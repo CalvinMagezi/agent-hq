@@ -18,7 +18,8 @@
     "relay:logs": "apps/discord-relay/daemon.sh logs",
     "chat": "bun run scripts/agent-hq-chat.ts",
     "daemon": "bun run scripts/agent-hq-daemon.ts",
-    "daemon:install": "bash scripts/install-launchd.sh"
+    "daemon:install": "bash scripts/install-launchd.sh",
+    "setup": "bun run scripts/setup.ts"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

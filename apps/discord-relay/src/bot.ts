@@ -24,7 +24,7 @@ const MAX_DEDUP_SIZE = 200;
 
 export function buildConfig(): RelayConfig {
   return {
-    discordBotToken: process.env.DISCORD_BOT_TOKEN!,
+    discordBotToken: process.env.DISCORD_BOT_TOKEN || "",
     discordUserId: process.env.DISCORD_USER_ID!,
     discordBotId: process.env.DISCORD_BOT_ID,
     claudePath: process.env.CLAUDE_PATH || "claude",

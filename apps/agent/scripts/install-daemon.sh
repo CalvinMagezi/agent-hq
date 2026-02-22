@@ -37,7 +37,7 @@ detect_bun() {
 
 install_macos() {
     local plist_name="com.agent-hq.agent.plist"
-    local plist_src="$SCRIPT_DIR/$plist_name"
+    local plist_src="$SCRIPT_DIR/$plist_name.example"
     local plist_dest="$HOME_DIR/Library/LaunchAgents/$plist_name"
     local log_dir="$HOME_DIR/Library/Logs"
     local bun_path

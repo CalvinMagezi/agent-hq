@@ -40,5 +40,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 
+# Runtime state (bot sessions, locks, usage tracking)
+**/.discord-relay*/
+**/.agent-hq-worker-id
+**/.agent-hq-sessions/
+
+# Launchd plist files (machine-specific, use *.plist.example templates)
+*.plist
+!*.plist.example
+
 # Vault (local Obsidian data — not tracked)
 .vault/

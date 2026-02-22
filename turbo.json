@@ -1,0 +1,32 @@
+{
+    "$schema": "https://turbo.build/schema.json",
+    "tasks": {
+        "build": {
+            "dependsOn": [
+                "^build"
+            ],
+            "outputs": [
+                "dist/**"
+            ],
+            "env": [
+                "OPENROUTER_API_KEY",
+                "BRAVE_SEARCH_API_KEY",
+                "DEFAULT_MODEL",
+                "VAULT_PATH"
+            ]
+        },
+        "dev": {
+            "cache": false,
+            "persistent": true
+        },
+        "lint": {
+            "cache": true
+        },
+        "test": {
+            "cache": false,
+            "dependsOn": [
+                "^build"
+            ]
+        }
+    }
+}

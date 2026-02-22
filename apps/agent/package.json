@@ -1,0 +1,29 @@
+{
+    "name": "hq-agent",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "bun --watch index.ts",
+        "start": "bun index.ts",
+        "build": "tsc --noEmit",
+        "lint": "eslint ."
+    },
+    "dependencies": {
+        "@mariozechner/pi-coding-agent": "latest",
+        "@repo/vault-client": "*",
+        "discord.js": "^14.16.3",
+        "dotenv": "^16.4.5",
+        "gray-matter": "^4.0.3",
+        "node-pty": "^1.1.0",
+        "ws": "^8.19.0"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.17.0",
+        "@types/node": "^22.10.5",
+        "@types/ws": "^8.5.13",
+        "eslint": "^9.39.2",
+        "typescript": "^5.7.3",
+        "typescript-eslint": "^8.20.0"
+    }
+}

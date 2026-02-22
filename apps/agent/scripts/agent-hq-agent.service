@@ -1,0 +1,30 @@
+[Unit]
+Description=Agent HQ Agent - Local AI Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Updated by install-daemon.sh
+WorkingDirectory=__AGENT_DIR__
+ExecStart=/usr/local/bin/bun index.ts
+Restart=on-failure
+RestartSec=10s
+# Maximum restart attempts: 5 within 5 minutes
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Environment file (contains CONVEX_URL, API keys, etc.)
+EnvironmentFile=__AGENT_DIR__/.env.local
+
+# Logging
+StandardOutput=append:__HOME__/.local/share/agent-hq/agent.log
+StandardError=append:__HOME__/.local/share/agent-hq/agent.error.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=__AGENT_DIR__ __HOME__/.local/share/agent-hq
+
+[Install]
+WantedBy=default.target

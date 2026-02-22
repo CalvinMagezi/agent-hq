@@ -1,0 +1,550 @@
+#!/usr/bin/env bun
+/**
+ * hq — Unified Agent-HQ CLI
+ *
+ * Manages HQ agent, Discord relay, background daemon, and provides
+ * an interactive chat interface. Single installable entry point.
+ *
+ * Install: hq install-cli   (symlinks to ~/.local/bin/hq)
+ * Usage:   hq [command] [target] [options]
+ */
+
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { execSync, spawnSync } from "child_process";
+
+// ─── Paths ────────────────────────────────────────────────────────────────────
+
+const REPO_ROOT   = path.resolve(import.meta.dir, "..");
+const AGENT_DIR   = path.join(REPO_ROOT, "apps/discord-relay");  // kept for relay lock
+const RELAY_DIR   = path.join(REPO_ROOT, "apps/discord-relay");
+const HQ_DIR      = path.join(REPO_ROOT, "apps/agent");
+const SCRIPTS_DIR = import.meta.dir;
+const LAUNCH_AGENTS = path.join(os.homedir(), "Library/LaunchAgents");
+
+const AGENT_DAEMON = "com.agent-hq.agent";
+const RELAY_DAEMON = "com.agent-hq.discord-relay";
+
+const AGENT_LOG = path.join(os.homedir(), "Library/Logs/hq-agent.log");
+const AGENT_ERR = path.join(os.homedir(), "Library/Logs/hq-agent.error.log");
+const RELAY_LOG = path.join(os.homedir(), "Library/Logs/discord-relay.log");
+const RELAY_ERR = path.join(os.homedir(), "Library/Logs/discord-relay.error.log");
+
+const RELAY_LOCK = path.join(RELAY_DIR, ".discord-relay/bot.lock");
+
+// ─── ANSI colours ─────────────────────────────────────────────────────────────
+
+const c = {
+  reset:  "\x1b[0m",
+  bold:   "\x1b[1m",
+  dim:    "\x1b[2m",
+  green:  "\x1b[32m",
+  red:    "\x1b[31m",
+  yellow: "\x1b[33m",
+  cyan:   "\x1b[36m",
+  gray:   "\x1b[90m",
+};
+
+// Strip ANSI codes for length calculation
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+// ─── Shell helpers ────────────────────────────────────────────────────────────
+
+function sh(cmd: string): string {
+  try {
+    return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  } catch { return ""; }
+}
+
+function isAlive(pid: string): boolean {
+  return sh(`kill -0 ${pid} 2>/dev/null; echo $?`) === "0";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// ─── Output helpers ───────────────────────────────────────────────────────────
+
+const ok   = (msg: string) => console.log(`${c.green}✅${c.reset}  ${msg}`);
+const fail = (msg: string) => console.log(`${c.red}❌${c.reset}  ${msg}`);
+const warn = (msg: string) => console.log(`${c.yellow}⚠️ ${c.reset}  ${msg}`);
+const info = (msg: string) => console.log(`${c.cyan}ℹ️ ${c.reset}  ${msg}`);
+const dim  = (msg: string) => console.log(`${c.gray}${msg}${c.reset}`);
+
+function section(title: string) {
+  console.log(`\n${c.bold}── ${title} ──${c.reset}`);
+}
+
+// ─── Daemon / process helpers ─────────────────────────────────────────────────
+
+function daemonPid(daemon: string): string | null {
+  const line = sh(`launchctl list 2>/dev/null | grep "${daemon}"`);
+  if (!line) return null;
+  const pid = line.trim().split(/\s+/)[0];
+  return pid && pid !== "-" && isAlive(pid) ? pid : null;
+}
+
+function agentPid():  string | null { return daemonPid(AGENT_DAEMON); }
+
+function relayPid(): string | null {
+  // Try lock file first (most reliable)
+  if (fs.existsSync(RELAY_LOCK)) {
+    const pid = fs.readFileSync(RELAY_LOCK, "utf-8").trim();
+    if (pid && isAlive(pid)) return pid;
+  }
+  return daemonPid(RELAY_DAEMON);
+}
+
+function uptime(pid: string): string {
+  return sh(`ps -o etime= -p ${pid} 2>/dev/null`).trim() || "?";
+}
+
+function resolveTargets(target?: string): Array<"agent" | "relay"> {
+  if (!target || target === "all") return ["agent", "relay"];
+  if (target === "agent") return ["agent"];
+  if (target === "relay") return ["relay"];
+  warn(`Unknown target "${target}" — expected agent, relay, or all`);
+  return [];
+}
+
+// ─── Commands ─────────────────────────────────────────────────────────────────
+
+// hq  |  hq chat
+async function cmdChat(): Promise<void> {
+  const chatScript = path.join(SCRIPTS_DIR, "agent-hq-chat.ts");
+  spawnSync(process.execPath, [chatScript], { stdio: "inherit", env: process.env });
+}
+
+// hq status  |  hq s
+async function cmdStatus(): Promise<void> {
+  console.log(`\n${c.bold}━━━ Agent HQ Status ━━━${c.reset}\n`);
+
+  const ap = agentPid();
+  const rp = relayPid();
+
+  ap
+    ? ok(`HQ Agent   running  ${c.gray}(PID: ${ap}, uptime: ${uptime(ap)})${c.reset}`)
+    : fail("HQ Agent   not running");
+
+  rp
+    ? ok(`Relay      running  ${c.gray}(PID: ${rp}, uptime: ${uptime(rp)})${c.reset}`)
+    : fail("Relay      not running");
+
+  console.log();
+}
+
+// hq start [agent|relay|all]
+async function cmdStart(target?: string): Promise<void> {
+  for (const t of resolveTargets(target)) {
+    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+    const label  = t === "agent" ? "HQ Agent"   : "Relay";
+    const pid    = t === "agent" ? agentPid()   : relayPid();
+
+    if (pid) { warn(`${label} already running (PID: ${pid})`); continue; }
+
+    sh(`launchctl start "${daemon}" 2>/dev/null`);
+    await sleep(2500);
+
+    const newPid = t === "agent" ? agentPid() : relayPid();
+    newPid
+      ? ok(`${label} started (PID: ${newPid})`)
+      : fail(`${label} failed to start — run: hq errors ${t}`);
+  }
+}
+
+// hq stop [agent|relay|all]
+async function cmdStop(target?: string): Promise<void> {
+  for (const t of resolveTargets(target)) {
+    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+    const label  = t === "agent" ? "HQ Agent"   : "Relay";
+    const pid    = t === "agent" ? agentPid()   : relayPid();
+
+    sh(`launchctl stop "${daemon}" 2>/dev/null`);
+    if (pid) sh(`kill ${pid} 2>/dev/null`);
+    await sleep(800);
+    console.log(`⏹️   ${label} stopped`);
+  }
+}
+
+// hq restart [agent|relay|all]  |  hq r
+async function cmdRestart(target?: string): Promise<void> {
+  await cmdStop(target);
+  await sleep(1000);
+  // Clean stale relay lock
+  if ((!target || target === "all" || target === "relay") && fs.existsSync(RELAY_LOCK)) {
+    const lockPid = fs.readFileSync(RELAY_LOCK, "utf-8").trim();
+    if (!isAlive(lockPid)) {
+      fs.rmSync(RELAY_LOCK);
+      info("Cleaned stale relay lock");
+    }
+  }
+  await cmdStart(target);
+}
+
+// hq logs [agent|relay|all] [N]  |  hq l
+async function cmdLogs(target?: string, n = 30): Promise<void> {
+  for (const t of resolveTargets(target)) {
+    const file  = t === "agent" ? AGENT_LOG : RELAY_LOG;
+    const label = t === "agent" ? "HQ Agent" : "Relay";
+    section(`${label} — last ${n} lines`);
+    if (fs.existsSync(file)) {
+      const lines = fs.readFileSync(file, "utf-8").split("\n").slice(-n).join("\n");
+      console.log(lines || "(empty)");
+    } else {
+      dim("(no log file yet)");
+    }
+  }
+}
+
+// hq errors [agent|relay|all] [N]  |  hq e
+async function cmdErrors(target?: string, n = 20): Promise<void> {
+  for (const t of resolveTargets(target)) {
+    const file  = t === "agent" ? AGENT_ERR : RELAY_ERR;
+    const label = t === "agent" ? "HQ Agent" : "Relay";
+    section(`${label} errors — last ${n} lines`);
+    if (fs.existsSync(file)) {
+      const lines = fs.readFileSync(file, "utf-8").split("\n").slice(-n).join("\n");
+      console.log(lines || "(no errors)");
+    } else {
+      dim("(no error log yet)");
+    }
+  }
+}
+
+// hq follow [agent|relay|all]  |  hq f
+async function cmdFollow(target?: string): Promise<void> {
+  const targets = resolveTargets(target);
+  const files = targets.map(t => t === "agent" ? AGENT_LOG : RELAY_LOG);
+  section(`Following ${targets.join(" + ")} logs (Ctrl+C to stop)`);
+  spawnSync("tail", ["-f", ...files], { stdio: "inherit" });
+}
+
+// hq ps  |  hq p
+async function cmdPs(): Promise<void> {
+  section("Agent HQ Processes");
+  console.log();
+
+  const ap = agentPid();
+  const rp = relayPid();
+  console.log(ap
+    ? `🤖  HQ Agent     PID ${ap} (uptime: ${uptime(ap)})`
+    : `🤖  HQ Agent     not running`);
+  console.log(rp
+    ? `📡  Relay        PID ${rp} (uptime: ${uptime(rp)})`
+    : `📡  Relay        not running`);
+
+  console.log();
+
+  for (const [icon, label, pattern] of [
+    ["🟣", "Claude Code", "claude.*--resume|claude.*--print|claude.*--output-format"],
+    ["🟢", "OpenCode",    "opencode run"],
+    ["🔵", "Gemini CLI",  "gemini.*--output-format|gemini.*--yolo"],
+  ] as const) {
+    const pids = sh(`pgrep -f "${pattern}" 2>/dev/null`).split("\n").filter(Boolean);
+    if (pids.length) {
+      console.log(`${icon}  ${label} CLIs:`);
+      for (const pid of pids) {
+        const cmd = sh(`ps -o command= -p ${pid} 2>/dev/null`).substring(0, 80);
+        console.log(`    PID ${pid} (${uptime(pid)}) ${c.gray}${cmd}${c.reset}`);
+      }
+    } else {
+      console.log(`${icon}  ${label} CLIs: none`);
+    }
+  }
+
+  console.log();
+  if (fs.existsSync(RELAY_LOCK)) {
+    const lockPid = fs.readFileSync(RELAY_LOCK, "utf-8").trim();
+    console.log(isAlive(lockPid)
+      ? `🔒  Relay lock: PID ${lockPid} (active)`
+      : `⚠️   Relay lock: PID ${lockPid} (STALE — run: hq clean)`);
+  } else {
+    console.log(`🔓  Relay lock: none`);
+  }
+  console.log();
+}
+
+// hq health  |  hq h
+async function cmdHealth(): Promise<void> {
+  console.log(`\n${c.bold}━━━ Agent HQ Health Check ━━━${c.reset}`);
+  await cmdStatus();
+
+  section("CLI Tools");
+  const claudeV = sh("claude --version 2>/dev/null");
+  const geminiV = sh("gemini --version 2>/dev/null");
+  const ocV     = sh("opencode version 2>/dev/null | head -1");
+  const bunV    = sh("bun --version 2>/dev/null");
+
+  claudeV ? ok(`Claude CLI: ${claudeV}`)               : fail("Claude CLI: not found");
+  geminiV ? ok(`Gemini CLI: ${geminiV}`)                : warn("Gemini CLI: not found (optional)");
+  ocV     ? ok(`OpenCode CLI: ${ocV}`)                  : warn("OpenCode CLI: not found (optional)");
+  bunV    ? ok(`Bun: ${bunV}`)                          : fail("Bun: not found");
+
+  section("Daemons");
+  const ap = path.join(LAUNCH_AGENTS, `${AGENT_DAEMON}.plist`);
+  const rp = path.join(LAUNCH_AGENTS, `${RELAY_DAEMON}.plist`);
+  fs.existsSync(ap) ? ok("HQ Agent daemon: installed") : warn("HQ Agent daemon: not installed  (run: hq install agent)");
+  fs.existsSync(rp) ? ok("Relay daemon: installed")    : warn("Relay daemon: not installed     (run: hq install relay)");
+
+  section("Recent HQ Agent Logs");
+  dim(fs.existsSync(AGENT_LOG)
+    ? fs.readFileSync(AGENT_LOG, "utf-8").split("\n").slice(-5).join("\n")
+    : "(no logs yet)");
+
+  section("Recent Relay Logs");
+  dim(fs.existsSync(RELAY_LOG)
+    ? fs.readFileSync(RELAY_LOG, "utf-8").split("\n").slice(-5).join("\n")
+    : "(no logs yet)");
+
+  console.log();
+}
+
+// hq install [agent|relay|all]
+async function cmdInstall(target?: string): Promise<void> {
+  for (const t of resolveTargets(target)) {
+    const daemon   = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+    const srcDir   = t === "agent" ? HQ_DIR       : RELAY_DIR;
+    const plistSrc = path.join(srcDir, `${daemon}.plist`);
+    const plistDst = path.join(LAUNCH_AGENTS, `${daemon}.plist`);
+    const label    = t === "agent" ? "HQ Agent"   : "Relay";
+
+    if (!fs.existsSync(plistSrc)) {
+      fail(`${label} plist not found: ${plistSrc}`);
+      continue;
+    }
+    fs.mkdirSync(LAUNCH_AGENTS, { recursive: true });
+    fs.copyFileSync(plistSrc, plistDst);
+    sh(`launchctl load "${plistDst}" 2>/dev/null`);
+    ok(`${label} daemon installed and started`);
+  }
+}
+
+// hq uninstall [agent|relay|all]
+async function cmdUninstall(target?: string): Promise<void> {
+  for (const t of resolveTargets(target)) {
+    const daemon   = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+    const plistDst = path.join(LAUNCH_AGENTS, `${daemon}.plist`);
+    const label    = t === "agent" ? "HQ Agent"   : "Relay";
+
+    sh(`launchctl unload "${plistDst}" 2>/dev/null`);
+    if (fs.existsSync(plistDst)) {
+      fs.rmSync(plistDst);
+      ok(`${label} daemon uninstalled`);
+    } else {
+      warn(`${label} daemon was not installed`);
+    }
+  }
+}
+
+// hq kill  |  hq k
+async function cmdKill(): Promise<void> {
+  console.log("☠️   Killing all Agent HQ processes...\n");
+
+  const ap = agentPid();
+  const rp = relayPid();
+  if (ap) { sh(`kill -9 ${ap} 2>/dev/null`); info(`Killed HQ Agent (PID ${ap})`); }
+  if (rp) { sh(`kill -9 ${rp} 2>/dev/null`); info(`Killed Relay    (PID ${rp})`); }
+
+  sh(`pkill -9 -f "claude.*--resume|claude.*--print|claude.*--output-format" 2>/dev/null`);
+  sh(`pkill -9 -f "opencode run" 2>/dev/null`);
+  sh(`pkill -9 -f "gemini.*--output-format|gemini.*--yolo" 2>/dev/null`);
+
+  if (fs.existsSync(RELAY_LOCK)) {
+    fs.rmSync(RELAY_LOCK);
+    info("Removed relay lock file");
+  }
+
+  await sleep(500);
+  ok("Done");
+}
+
+// hq clean  |  hq c
+async function cmdClean(): Promise<void> {
+  section("Cleaning stale state");
+
+  // Relay lock
+  if (fs.existsSync(RELAY_LOCK)) {
+    const lockPid = fs.readFileSync(RELAY_LOCK, "utf-8").trim();
+    if (!isAlive(lockPid)) {
+      fs.rmSync(RELAY_LOCK);
+      ok(`Removed stale relay lock (PID ${lockPid})`);
+    } else {
+      info(`Relay lock held by active PID ${lockPid}`);
+    }
+  } else {
+    info("No relay lock file");
+  }
+
+  // Orphaned CLI children
+  let orphans = 0;
+  const rp = relayPid();
+  const checkOrphans = (pattern: string, label: string) => {
+    for (const pid of sh(`pgrep -f "${pattern}" 2>/dev/null`).split("\n").filter(Boolean)) {
+      const ppid = sh(`ps -o ppid= -p ${pid} 2>/dev/null`).trim();
+      if (!rp || !ppid.includes(rp)) {
+        sh(`kill -9 ${pid} 2>/dev/null`);
+        info(`Killed orphaned ${label} (PID ${pid})`);
+        orphans++;
+      }
+    }
+  };
+
+  checkOrphans("claude.*--resume|claude.*--output-format", "Claude CLI");
+  checkOrphans("opencode run", "OpenCode CLI");
+  checkOrphans("gemini.*--output-format|gemini.*--yolo", "Gemini CLI");
+
+  if (orphans === 0) ok("No orphaned CLI processes");
+  ok("Clean complete");
+}
+
+// hq fg [agent|relay]
+async function cmdFg(target = "agent"): Promise<void> {
+  const isAgent = target === "agent";
+  const daemon  = isAgent ? AGENT_DAEMON : RELAY_DAEMON;
+  const dir     = isAgent ? HQ_DIR       : RELAY_DIR;
+  const label   = isAgent ? "HQ Agent"   : "Relay";
+  const pid     = isAgent ? agentPid()   : relayPid();
+
+  sh(`launchctl stop "${daemon}" 2>/dev/null`);
+  if (pid) sh(`kill ${pid} 2>/dev/null`);
+  await sleep(1000);
+
+  console.log(`Starting ${label} in foreground (Ctrl+C to stop)...`);
+  spawnSync(process.execPath, ["index.ts"], { cwd: dir, stdio: "inherit" });
+}
+
+// hq install-cli
+async function cmdInstallCli(): Promise<void> {
+  const hqScript = path.join(SCRIPTS_DIR, "hq.ts");
+  const binDir   = path.join(os.homedir(), ".local/bin");
+  const binPath  = path.join(binDir, "hq");
+
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.chmodSync(hqScript, 0o755);
+  if (fs.existsSync(binPath)) fs.rmSync(binPath);
+  fs.symlinkSync(hqScript, binPath);
+
+  ok(`hq CLI installed → ${binPath}`);
+
+  if (!process.env.PATH?.split(":").includes(binDir)) {
+    console.log();
+    warn(`${binDir} is not in your PATH`);
+    info(`Add this to your ~/.zshrc:`);
+    console.log(`  ${c.bold}export PATH="$HOME/.local/bin:$PATH"${c.reset}`);
+  } else {
+    ok(`${binDir} is already in PATH`);
+  }
+}
+
+// hq help
+function cmdHelp(): void {
+  console.log(`
+${c.bold}hq${c.reset} — Agent HQ CLI
+
+${c.bold}USAGE${c.reset}
+  hq [command] [target] [options]
+
+${c.bold}CHAT (default when no command given)${c.reset}
+  hq                            Interactive chat session
+  hq chat                       Interactive chat session
+
+${c.bold}SERVICE MANAGEMENT${c.reset}
+  hq status                     Status of all services            (alias: s)
+  hq start  [agent|relay|all]   Start services
+  hq stop   [agent|relay|all]   Stop services
+  hq restart [agent|relay|all]  Restart services                  (alias: r)
+  hq fg [agent|relay]           Run a service in foreground
+
+${c.bold}LOGS${c.reset}
+  hq logs   [agent|relay|all] [N]  Last N log lines (default 30)  (alias: l)
+  hq errors [agent|relay|all] [N]  Last N error lines (default 20)(alias: e)
+  hq follow [agent|relay|all]      Live tail logs                  (alias: f)
+
+${c.bold}PROCESSES & HEALTH${c.reset}
+  hq ps                         All managed processes              (alias: p)
+  hq health                     Full health check                  (alias: h)
+  hq kill                       Force-kill all processes           (alias: k)
+  hq clean                      Remove stale locks & orphans       (alias: c)
+
+${c.bold}SETUP${c.reset}
+  hq install   [agent|relay|all]  Install launchd daemons (auto-start on login)
+  hq uninstall [agent|relay|all]  Remove launchd daemons
+  hq install-cli                  Symlink hq to ~/.local/bin/hq
+
+${c.bold}EXAMPLES${c.reset}
+  hq                    # Start chatting
+  hq restart            # Restart everything
+  hq restart relay      # Restart just the relay
+  hq logs relay 50      # Last 50 relay log lines
+  hq follow             # Live tail all logs
+  hq ps                 # See all running processes
+  hq health             # Full system health report
+  hq install            # Install both daemons (first-time setup)
+  hq install-cli        # Add 'hq' to PATH
+`);
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+const [cmd, arg1, arg2] = process.argv.slice(2);
+
+switch (cmd) {
+  case undefined:
+  case "chat":
+    await cmdChat(); break;
+
+  case "status": case "s":
+    await cmdStatus(); break;
+
+  case "start":
+    await cmdStart(arg1); break;
+
+  case "stop":
+    await cmdStop(arg1); break;
+
+  case "restart": case "r":
+    await cmdRestart(arg1); break;
+
+  case "logs": case "l":
+    await cmdLogs(arg1, arg2 ? parseInt(arg2, 10) : 30); break;
+
+  case "errors": case "e":
+    await cmdErrors(arg1, arg2 ? parseInt(arg2, 10) : 20); break;
+
+  case "follow": case "f":
+    await cmdFollow(arg1); break;
+
+  case "ps": case "p":
+    await cmdPs(); break;
+
+  case "health": case "h":
+    await cmdHealth(); break;
+
+  case "kill": case "k":
+    await cmdKill(); break;
+
+  case "clean": case "c":
+    await cmdClean(); break;
+
+  case "fg":
+    await cmdFg(arg1); break;
+
+  case "install":
+    await cmdInstall(arg1); break;
+
+  case "uninstall":
+    await cmdUninstall(arg1); break;
+
+  case "install-cli":
+    await cmdInstallCli(); break;
+
+  case "help": case "--help": case "-h":
+    cmdHelp(); break;
+
+  default:
+    fail(`Unknown command: ${cmd}`);
+    console.log(`Run ${c.bold}hq help${c.reset} for usage.`);
+    process.exit(1);
+}

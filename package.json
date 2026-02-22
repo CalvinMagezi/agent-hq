@@ -1,0 +1,28 @@
+{
+  "name": "agent-hq-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "check": "turbo lint && turbo build",
+    "agent": "bun --cwd apps/agent start",
+    "relay": "bun --cwd apps/discord-relay start",
+    "relay:daemon": "apps/discord-relay/daemon.sh",
+    "relay:install": "apps/discord-relay/daemon.sh install",
+    "relay:status": "apps/discord-relay/daemon.sh status",
+    "relay:logs": "apps/discord-relay/daemon.sh logs",
+    "chat": "bun run scripts/agent-hq-chat.ts",
+    "daemon": "bun run scripts/agent-hq-daemon.ts",
+    "daemon:install": "bash scripts/install-launchd.sh"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "turbo": "^2.0.0"
+  },
+  "packageManager": "bun@1.1.0"
+}

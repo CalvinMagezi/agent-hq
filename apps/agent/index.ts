@@ -17,6 +17,7 @@ import { loadDiscordConfig, type DiscordBot } from "./discordBot.js";
 import { shouldFlushMemory, executeMemoryFlush, createFlushState, DEFAULT_FLUSH_OPTIONS } from "./lib/memoryFlush.js";
 import { logger } from "./lib/logger.js";
 import { ChatSessionManager } from "./lib/chatSession.js";
+import { buildModelConfig } from "./lib/modelConfig.js";
 import { AgentWsServer } from "./lib/wsServer.js";
 import { PtyManager } from "./lib/ptyManager.js";
 import { Orchestrator } from "./lib/orchestrator.js";
@@ -38,11 +39,17 @@ const TARGET_DIR = process.env.TARGET_DIR || process.cwd();
 const API_KEY = process.env.AGENTHQ_API_KEY || "local-master-key";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-if (!OPENROUTER_API_KEY) {
-    console.warn("Warning: OPENROUTER_API_KEY is not set. OpenRouter models will fail.");
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+if (!OPENROUTER_API_KEY && !GEMINI_API_KEY) {
+    console.warn("Warning: Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set. LLM calls will fail.");
+} else {
+    if (GEMINI_API_KEY) console.log("✓ GEMINI_API_KEY configured — Gemini models will use Google API directly");
+    if (OPENROUTER_API_KEY) console.log("✓ OPENROUTER_API_KEY configured — non-Gemini models available via OpenRouter");
+    if (!GEMINI_API_KEY) console.log("Note: GEMINI_API_KEY not set — Gemini models will route through OpenRouter");
 }
 
-const MODEL_ID = process.env.DEFAULT_MODEL || "moonshotai/kimi-k2.5";
+const MODEL_ID = process.env.DEFAULT_MODEL || "gemini-2.5-flash";
 const WORKER_ID_FILE = ".agent-hq-worker-id";
 const CONTEXT_FILE = "agent-hq-context.md";
 const SESSIONS_DIR = ".agent-hq-sessions";
@@ -373,19 +380,20 @@ async function setupAgent() {
     }, 10000); // 10 seconds
 
     // 4. Initialize Chat Session (shared brain for all clients: Discord, WebSocket, etc.)
-    if (OPENROUTER_API_KEY) {
+    if (OPENROUTER_API_KEY || GEMINI_API_KEY) {
         chatSession = new ChatSessionManager({
             targetDir: TARGET_DIR,
             workerId: WORKER_ID,
             modelId: MODEL_ID,
             openrouterApiKey: OPENROUTER_API_KEY,
+            geminiApiKey: GEMINI_API_KEY,
             vaultClient: adapter.client,
             apiKey: API_KEY,
             contextFile: CONTEXT_FILE,
         });
         console.log("💬 Chat session initialized (vault mode)");
     } else {
-        console.log("⚠️  Chat session disabled (no OPENROUTER_API_KEY)");
+        console.log("⚠️  Chat session disabled (no API keys configured)");
     }
 
     // 5. Initialize Discord Bot (optional — only if settings are configured)
@@ -769,7 +777,6 @@ async function handleJob(job: any) {
 
         // Determine Model — per-job override takes priority, then env default
         const effectiveModelId = job.modelOverride || MODEL_ID;
-        let model: any = effectiveModelId;
 
         // Scan folder for project context to provide better grounding
         let folderContent = "";
@@ -781,38 +788,14 @@ async function handleJob(job: any) {
             // Ignore folder read errors - not critical
         }
 
-        if (typeof effectiveModelId === 'string' && effectiveModelId.startsWith("moonshotai/")) {
-            model = {
-                id: effectiveModelId,
-                name: "Kimi k2.5",
-                provider: "openrouter",
-                api: "openai-completions",
-                baseUrl: "https://openrouter.ai/api/v1",
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0.3, output: 0.3, cacheRead: 0.075, cacheWrite: 0.3 },
-                contextWindow: 200000,
-                maxTokens: 8192
-            };
-        } else if (typeof effectiveModelId === 'string' && effectiveModelId !== MODEL_ID) {
-            // Build an OpenRouter model config for overridden model IDs
-            model = {
-                id: effectiveModelId,
-                name: effectiveModelId.split("/").pop() || effectiveModelId,
-                provider: "openrouter",
-                api: "openai-completions",
-                baseUrl: "https://openrouter.ai/api/v1",
-                reasoning: effectiveModelId.includes("thinking") || effectiveModelId.includes("reasoning"),
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: 200000,
-                maxTokens: 8192
-            };
-            logger.info("Using model override", { modelId: effectiveModelId });
-        }
+        const model = buildModelConfig({
+            modelId: effectiveModelId,
+            geminiApiKey: GEMINI_API_KEY,
+            openrouterApiKey: OPENROUTER_API_KEY,
+        });
 
         if (job.modelOverride) {
-            logger.info("Job model override", { jobId: job._id, model: job.modelOverride });
+            logger.info("Job model override", { jobId: job._id, model: job.modelOverride, provider: model.provider });
         }
 
         // Create Session — pass per-job thinkingLevel if specified

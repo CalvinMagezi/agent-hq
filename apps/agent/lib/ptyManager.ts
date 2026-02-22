@@ -297,6 +297,7 @@ export class PtyManager {
         // ALWAYS strip sensitive env vars regardless of profile
         const sensitiveVars = [
             "OPENROUTER_API_KEY",
+            "GEMINI_API_KEY",
             "AGENTHQ_API_KEY",
             "MCP_GATEWAY_TOKEN",
             "DISCORD_BOT_TOKEN",

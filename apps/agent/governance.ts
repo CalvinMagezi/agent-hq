@@ -101,6 +101,7 @@ export const DANGEROUS_BASH_PATTERNS: RegExp[] = [
 // Env vars that should never be leaked to child processes
 const SENSITIVE_ENV_VARS = [
     "OPENROUTER_API_KEY",
+    "GEMINI_API_KEY",
     "AGENTHQ_API_KEY",
     "MCP_GATEWAY_TOKEN",
     "DISCORD_BOT_TOKEN",

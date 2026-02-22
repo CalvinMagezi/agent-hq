@@ -1,4 +1,5 @@
 import type { BaseHarness } from "./harnesses/base.js";
+import type { GeminiHarness } from "./harnesses/gemini.js";
 import type { ConvexAPI } from "./vaultApi.js";
 import type { ChannelSettings, RelayConfig } from "./types.js";
 
@@ -428,6 +429,118 @@ export async function handleCommand(
       };
     }
 
+    // ── Gemini CLI Plugin / MCP Server Management ─────────────────
+
+    case "!plugins": {
+      if (!isGemini) {
+        return { handled: true, response: "Plugin management is only available for Gemini CLI." };
+      }
+      const geminiHarness = harness as unknown as GeminiHarness;
+      const plugins = geminiHarness.getPlugins();
+      const names = Object.keys(plugins);
+      if (names.length === 0) {
+        return {
+          handled: true,
+          response: "No MCP server plugins configured.\nUse `!plugin add <name> <command> [args...]` to add one.\nExample: `!plugin add obsidian npx -y @mauricio.wolff/mcp-obsidian /path/to/vault`",
+        };
+      }
+      const lines = [`**Configured MCP Server Plugins** (${names.length})`];
+      for (const [name, cfg] of Object.entries(plugins)) {
+        const desc = cfg.description ? ` — ${cfg.description}` : "";
+        const cmd = cfg.command
+          ? `\`${cfg.command} ${(cfg.args || []).join(" ")}\``
+          : cfg.httpUrl
+            ? `HTTP: \`${cfg.httpUrl}\``
+            : cfg.url
+              ? `SSE: \`${cfg.url}\``
+              : "_no command_";
+        lines.push(`**${name}**${desc}: ${cmd}${cfg.trust ? " _(trusted)_" : ""}`);
+      }
+      lines.push("\nUse `!plugin remove <name>` to remove a plugin.");
+      return { handled: true, response: lines.join("\n") };
+    }
+
+    case "!plugin": {
+      if (!isGemini) {
+        return { handled: true, response: "Plugin management is only available for Gemini CLI." };
+      }
+      const geminiHarness = harness as unknown as GeminiHarness;
+      const pluginParts = arg.split(/\s+/);
+      const subCmd = pluginParts[0]?.toLowerCase();
+
+      if (!subCmd || subCmd === "list") {
+        // Delegate to !plugins handler
+        const plugins = geminiHarness.getPlugins();
+        const names = Object.keys(plugins);
+        if (names.length === 0) {
+          return {
+            handled: true,
+            response: "No MCP plugins configured. Usage:\n`!plugin add <name> <command> [args...]`\n`!plugin add <name> --url <sseUrl>`\n`!plugin add <name> --http <httpUrl>`",
+          };
+        }
+        const lines = names.map((n) => {
+          const cfg = plugins[n];
+          return `- **${n}**: ${cfg.command ? `${cfg.command} ${(cfg.args || []).join(" ")}` : cfg.httpUrl || cfg.url || "?"}`;
+        });
+        return { handled: true, response: `**MCP Plugins:**\n${lines.join("\n")}` };
+      }
+
+      if (subCmd === "add") {
+        const name = pluginParts[1];
+        if (!name) {
+          return {
+            handled: true,
+            response: "Usage: `!plugin add <name> <command> [args...]`\nExamples:\n- `!plugin add obsidian npx -y @mauricio.wolff/mcp-obsidian /vault/path`\n- `!plugin add workspace --http https://workspace.example.com/mcp`",
+          };
+        }
+        const rest = pluginParts.slice(2);
+
+        let mcpConfig: import("./harnesses/gemini.js").GeminiMcpServer;
+        if (rest[0] === "--http" || rest[0] === "--httpUrl") {
+          mcpConfig = { httpUrl: rest[1], trust: true };
+        } else if (rest[0] === "--url" || rest[0] === "--sse") {
+          mcpConfig = { url: rest[1], trust: true };
+        } else if (rest.length > 0) {
+          mcpConfig = { command: rest[0], args: rest.slice(1), trust: true };
+        } else {
+          return { handled: true, response: `Usage: \`!plugin add ${name} <command> [args...]\`` };
+        }
+
+        await geminiHarness.addPlugin(name, mcpConfig);
+        const cmdStr = mcpConfig.command
+          ? `\`${mcpConfig.command} ${(mcpConfig.args || []).join(" ")}\``
+          : mcpConfig.httpUrl
+            ? `HTTP \`${mcpConfig.httpUrl}\``
+            : `SSE \`${mcpConfig.url}\``;
+        return {
+          handled: true,
+          response: `Added MCP plugin **${name}**: ${cmdStr}\nGemini CLI will load it on the next call (trusted, auto-approved via --yolo).`,
+        };
+      }
+
+      if (subCmd === "remove" || subCmd === "rm" || subCmd === "delete") {
+        const name = pluginParts[1];
+        if (!name) {
+          return { handled: true, response: "Usage: `!plugin remove <name>`" };
+        }
+        const removed = await geminiHarness.removePlugin(name);
+        return {
+          handled: true,
+          response: removed ? `Removed MCP plugin **${name}**.` : `Plugin **${name}** not found.`,
+        };
+      }
+
+      if (subCmd === "clear" || subCmd === "reset") {
+        await geminiHarness.clearPlugins();
+        return { handled: true, response: "All MCP plugins cleared." };
+      }
+
+      return {
+        handled: true,
+        response: "Unknown subcommand. Available: `!plugin add`, `!plugin remove`, `!plugin list`, `!plugin clear`",
+      };
+    }
+
     // ── HQ Management ─────────────────────────────────────────────
 
     case "!hq": {
@@ -612,6 +725,13 @@ export async function handleCommand(
             "`!rmdir <path|#|all>` — Remove a directory by path, number, or all",
             "`!clear` — Reset all settings to defaults",
             "",
+            "**Plugins (MCP Servers)**",
+            "`!plugins` — List configured MCP server plugins",
+            "`!plugin add <name> <command> [args...]` — Add stdio MCP server",
+            "`!plugin add <name> --http <url>` — Add HTTP MCP server",
+            "`!plugin remove <name>` — Remove a plugin",
+            "`!plugin clear` — Remove all plugins",
+            "",
             "**HQ**",
             "`!hq` — Show HQ commands (local vault mode)",
             "`!hq status` — Check HQ status",
@@ -622,7 +742,7 @@ export async function handleCommand(
             "`!usage reset` — Reset usage counters",
             "",
             "**Limits**",
-            "5 min timeout per call. Runs with `--yolo` (auto-approve tool actions).",
+            "2 min timeout per call. Runs with `--yolo` (auto-approve tool actions).",
             "",
             "**Note**",
             "Gemini CLI is stateless — each message is independent. No `!continue`, `!budget`, `!effort`, or `!sp`.",

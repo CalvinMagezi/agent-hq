@@ -6,8 +6,22 @@ import type { ChannelSettings } from "../types.js";
 
 const SETTINGS_FILE = "channel-settings.json";
 const USAGE_FILE = "usage.json";
+const PLUGINS_FILE = "gemini-plugins.json";
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes (Gemini preview models retry with backoff)
 const MAX_CONCURRENT_CALLS = 3;
+
+export interface GeminiMcpServer {
+  command?: string;          // stdio: executable (e.g. "npx", "uvx")
+  args?: string[];           // stdio: arguments
+  env?: Record<string, string>;
+  cwd?: string;
+  httpUrl?: string;          // Streamable HTTP transport
+  url?: string;              // SSE transport
+  headers?: Record<string, string>;
+  timeout?: number;
+  trust?: boolean;           // Bypass per-tool confirmation (consistent with --yolo)
+  description?: string;
+}
 
 export interface GeminiConfig {
   geminiPath: string;
@@ -32,6 +46,7 @@ export class GeminiHarness implements BaseHarness {
 
   private config: GeminiConfig;
   private channelSettings: Record<string, ChannelSettings> = {};
+  private plugins: Record<string, GeminiMcpServer> = {};
   private activeProcesses = new Set<string>();
   private globalActiveCount = 0;
   private usage: HarnessUsageStats = {
@@ -63,6 +78,16 @@ export class GeminiHarness implements BaseHarness {
     } catch {
       // Fresh usage stats
     }
+
+    try {
+      const raw = await readFile(join(this.config.relayDir, PLUGINS_FILE), "utf-8");
+      this.plugins = JSON.parse(raw);
+    } catch {
+      this.plugins = {};
+    }
+
+    // Sync plugins to project-level .gemini/settings.json so Gemini CLI picks them up
+    await this.syncPluginsToSettings();
   }
 
   async call(
@@ -240,6 +265,62 @@ export class GeminiHarness implements BaseHarness {
     return trimmed;
   }
 
+  // ── Plugin / MCP Server Management ───────────────────────────────
+
+  getPlugins(): Record<string, GeminiMcpServer> {
+    return { ...this.plugins };
+  }
+
+  async addPlugin(name: string, config: GeminiMcpServer): Promise<void> {
+    this.plugins[name] = config;
+    await this.persistPlugins();
+    await this.syncPluginsToSettings();
+  }
+
+  async removePlugin(name: string): Promise<boolean> {
+    if (!(name in this.plugins)) return false;
+    delete this.plugins[name];
+    await this.persistPlugins();
+    await this.syncPluginsToSettings();
+    return true;
+  }
+
+  async clearPlugins(): Promise<void> {
+    this.plugins = {};
+    await this.persistPlugins();
+    await this.syncPluginsToSettings();
+  }
+
+  /**
+   * Write a project-level .gemini/settings.json containing the configured MCP servers.
+   * Gemini CLI automatically loads this when cwd is projectDir (or any parent).
+   * Only writes the mcpServers section — global settings in ~/.gemini/settings.json are merged by Gemini CLI itself.
+   */
+  private async syncPluginsToSettings(): Promise<void> {
+    const projectDir = this.config.projectDir || process.cwd();
+    const geminiDir = join(projectDir, ".gemini");
+    await mkdir(geminiDir, { recursive: true });
+    const settingsPath = join(geminiDir, "settings.json");
+
+    // Read existing settings to preserve non-mcpServers keys
+    let existing: Record<string, any> = {};
+    try {
+      const raw = await readFile(settingsPath, "utf-8");
+      existing = JSON.parse(raw);
+    } catch {
+      // No existing settings — start fresh
+    }
+
+    if (Object.keys(this.plugins).length === 0) {
+      // Remove mcpServers if no plugins configured
+      delete existing.mcpServers;
+    } else {
+      existing.mcpServers = this.plugins;
+    }
+
+    await writeFile(settingsPath, JSON.stringify(existing, null, 2));
+  }
+
   // ── Session Management (no-op — Gemini CLI is stateless) ──────────
 
   async resetSession(_channelId: string): Promise<void> {
@@ -304,6 +385,13 @@ export class GeminiHarness implements BaseHarness {
     await writeFile(
       join(this.config.relayDir, USAGE_FILE),
       JSON.stringify(this.usage, null, 2),
+    );
+  }
+
+  private async persistPlugins(): Promise<void> {
+    await writeFile(
+      join(this.config.relayDir, PLUGINS_FILE),
+      JSON.stringify(this.plugins, null, 2),
     );
   }
 }

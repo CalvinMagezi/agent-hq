@@ -31,7 +31,7 @@ export function getEmbeddingModel() {
 
 /** Default model configurations */
 export const MODEL_DEFAULTS = {
-  chat: "moonshotai/kimi-k2.5",
+  chat: "gemini-2.5-flash",
   embedding: "openai/text-embedding-3-small",
   cheapChat: "google/gemini-2.5-flash",
   embeddingDimensions: 1536,

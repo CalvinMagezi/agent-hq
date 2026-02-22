@@ -15,13 +15,15 @@ import { Type } from "@sinclair/typebox";
 import * as fs from "fs";
 import { createDispatchJobTool, createCheckJobStatusTool, type OnJobDispatched } from "./chatTools.js";
 import { createSecuritySpawnHook, SecurityProfile } from "../governance.js";
+import { buildModelConfig } from "./modelConfig.js";
 import { logger } from "./logger.js";
 
 export interface ChatSessionConfig {
     targetDir: string;
     workerId: string;
     modelId: string;
-    openrouterApiKey: string;
+    openrouterApiKey?: string;
+    geminiApiKey?: string;
     convexBaseUrl?: string;
     vaultClient?: any;
     apiKey?: string;
@@ -296,35 +298,11 @@ export class ChatSessionManager {
     private async createSession(): Promise<void> {
         const { config } = this;
 
-        // Build model config for OpenRouter
-        let model: any = config.modelId;
-        if (typeof config.modelId === "string" && config.modelId.startsWith("moonshotai/")) {
-            model = {
-                id: config.modelId,
-                name: "Kimi k2.5",
-                provider: "openrouter",
-                api: "openai-completions",
-                baseUrl: "https://openrouter.ai/api/v1",
-                reasoning: false,
-                input: ["text"],
-                cost: { input: 0.3, output: 0.3, cacheRead: 0.075, cacheWrite: 0.3 },
-                contextWindow: 200000,
-                maxTokens: 8192,
-            };
-        } else if (typeof config.modelId === "string") {
-            model = {
-                id: config.modelId,
-                name: config.modelId.split("/").pop() || config.modelId,
-                provider: "openrouter",
-                api: "openai-completions",
-                baseUrl: "https://openrouter.ai/api/v1",
-                reasoning: config.modelId.includes("thinking") || config.modelId.includes("reasoning"),
-                input: ["text"],
-                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                contextWindow: 200000,
-                maxTokens: 8192,
-            };
-        }
+        const model = buildModelConfig({
+            modelId: config.modelId,
+            geminiApiKey: config.geminiApiKey,
+            openrouterApiKey: config.openrouterApiKey,
+        });
 
         const settingsManager = SettingsManager.inMemory({
             compaction: {

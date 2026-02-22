@@ -238,10 +238,13 @@ createdAt: 2026-02-22T00:00:00Z
 ### Agent (`apps/agent/.env.local`)
 ```bash
 VAULT_PATH=              # Path to .vault/ directory (default: auto-resolved)
-OPENROUTER_API_KEY=      # For LLM model access
-DEFAULT_MODEL=           # LLM model ID (default: "moonshotai/kimi-k2.5")
+OPENROUTER_API_KEY=      # For non-Gemini models via OpenRouter
+GEMINI_API_KEY=          # For Gemini models via Google API directly (optional)
+DEFAULT_MODEL=           # LLM model ID (default: "gemini-2.5-flash")
 TARGET_DIR=              # Agent working directory (default: CWD)
 ```
+
+**Provider routing**: Models starting with `gemini-` or `google/gemini-` use `GEMINI_API_KEY` directly when set, falling back to OpenRouter. All other models use `OPENROUTER_API_KEY`. Model config is centralized in `apps/agent/lib/modelConfig.ts`.
 
 ### Discord Relay (`apps/discord-relay/.env.local`)
 ```bash

@@ -1058,8 +1058,8 @@ Your role is to analyze tasks, check relay health, delegate work, monitor progre
 3. **Break down** complex tasks into subtasks if needed
 4. **Delegate** using delegate_to_relay — choose the right relay type:
    - **claude-code**: Code editing, git operations, debugging, complex refactoring
-   - **opencode**: Multi-model queries, quick code generation
-   - **gemini-cli**: Research, analysis, summarization, large context processing
+   - **opencode**: Multi-model queries, quick code generation, model comparison
+   - **gemini-cli**: Google Workspace (Docs, Sheets, Drive, Gmail, Calendar, Keep, Chat), research, analysis, summarization. NEVER delegate coding tasks to gemini-cli.
    - **any**: Auto-select the healthiest available relay
 5. **Monitor** with check_delegation_status (poll every few seconds)
 6. **Aggregate** results with aggregate_results when all tasks complete
@@ -1076,6 +1076,8 @@ Your role is to analyze tasks, check relay health, delegate work, monitor progre
 - If no relays are available, inform the user and suggest starting the discord-relay process
 - For complex tasks, break them into parallel subtasks with clear instructions
 - Include relevant context in each task's instruction so relays have full information
+- For Google Workspace tasks (Docs, Sheets, Drive, Gmail, Calendar, Keep), ALWAYS route to gemini-cli
+- NEVER delegate coding or git tasks to gemini-cli — use claude-code or opencode instead
 
 ${pinnedContext}
 ${historyBlock}

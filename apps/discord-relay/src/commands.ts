@@ -710,7 +710,10 @@ export async function handleCommand(
         return {
           handled: true,
           response: [
-            "**Discord Relay Commands** (Gemini CLI)",
+            "**Discord Relay Commands** (Gemini CLI — Google Workspace Specialist)",
+            "",
+            "**Google Workspace**",
+            "`!workspace` / `!ws` — Show Workspace integration info and setup",
             "",
             "**Session**",
             "`!reset` — Clear settings (Gemini is stateless — no sessions)",
@@ -745,8 +748,9 @@ export async function handleCommand(
             "2 min timeout per call. Runs with `--yolo` (auto-approve tool actions).",
             "",
             "**Note**",
+            "Gemini CLI is a **Google Workspace specialist** — it manages Docs, Sheets, Drive, Gmail, Calendar, and Keep.",
+            "For coding tasks, use Claude Code or OpenCode instead.",
             "Gemini CLI is stateless — each message is independent. No `!continue`, `!budget`, `!effort`, or `!sp`.",
-            "Any non-command message is sent to Gemini CLI.",
             "Settings persist per channel until you `!reset` or `!clear`.",
           ].join("\n"),
         };
@@ -791,6 +795,36 @@ export async function handleCommand(
           "**Tips**",
           "Any non-command message is sent to Claude Code.",
           "Settings persist per channel until you `!reset` or `!clear`.",
+        ].join("\n"),
+      };
+    }
+
+    case "!workspace":
+    case "!ws": {
+      if (!isGemini) {
+        return {
+          handled: true,
+          response: "The `!workspace` command is only available for the Gemini CLI bot.",
+        };
+      }
+      return {
+        handled: true,
+        response: [
+          "**Google Workspace Integration**",
+          "",
+          "Gemini CLI has Google Workspace extensions providing access to:",
+          "- **Google Docs** — Create, read, edit, summarize documents",
+          "- **Google Sheets** — Create spreadsheets, analyze data, formulas",
+          "- **Google Drive** — Search, organize, share files",
+          "- **Gmail** — Draft emails, search inbox, manage labels",
+          "- **Google Calendar** — Create events, check availability",
+          "- **Google Keep** — Notes, lists, reminders",
+          "- **Google Chat** — Messages and spaces",
+          "",
+          "**Setup**: Run `bash scripts/setup-gemini-plugins.sh` to authenticate and install extensions.",
+          "**Auth**: Run `gemini login` to re-authenticate if needed.",
+          "",
+          "Ask me anything about your Google Workspace!",
         ].join("\n"),
       };
     }

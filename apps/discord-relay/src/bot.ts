@@ -70,7 +70,7 @@ export class BotInstance {
     this.agentId = `discord-relay-${harness.harnessName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
     this.harnessType = harness.harnessName.toLowerCase().replace(/\s+/g, "-");
     this.convex = new ConvexAPI(config);
-    this.enricher = new ContextEnricher(this.convex, config);
+    this.enricher = new ContextEnricher(this.convex, config, this.harnessType);
   }
 
   async start(): Promise<void> {
@@ -155,7 +155,7 @@ export class BotInstance {
       case "opencode":
         return ["code", "multi-model", "file-ops", "generation"];
       case "gemini-cli":
-        return ["research", "analysis", "large-context", "summarization"];
+        return ["google-workspace", "google-docs", "google-sheets", "google-drive", "gmail", "google-calendar", "research", "analysis", "large-context", "summarization"];
       default:
         return ["general"];
     }

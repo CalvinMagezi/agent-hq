@@ -7,10 +7,38 @@ export class ContextEnricher {
   private convex: ConvexAPI;
   private config: RelayConfig;
   private profileContext: string = "";
+  private harnessType: string;
 
-  constructor(convex: ConvexAPI, config: RelayConfig) {
+  constructor(convex: ConvexAPI, config: RelayConfig, harnessType?: string) {
     this.convex = convex;
     this.config = config;
+    this.harnessType = harnessType || "claude-code";
+  }
+
+  private getSystemPreamble(): string {
+    switch (this.harnessType) {
+      case "gemini-cli":
+        return (
+          "You are a Google Workspace specialist responding via Discord. " +
+          "Your primary role is managing Google Docs, Sheets, Drive, Gmail, Calendar, Keep, and Chat. " +
+          "You also excel at research, analysis, and summarization. " +
+          "You do NOT write code unless the user explicitly insists — suggest Claude Code or OpenCode for coding tasks. " +
+          "Keep responses concise and use Discord-compatible markdown."
+        );
+      case "opencode":
+        return (
+          "You are a multi-model coding assistant responding via Discord. " +
+          "You specialize in code generation, model comparison, and file operations. " +
+          "Keep responses concise and conversational. Use markdown formatting compatible with Discord."
+        );
+      case "claude-code":
+      default:
+        return (
+          "You are a personal AI assistant responding via Discord. " +
+          "You specialize in code editing, git operations, debugging, and complex refactoring. " +
+          "Keep responses concise and conversational. Use markdown formatting compatible with Discord."
+        );
+    }
   }
 
   async loadProfile(): Promise<void> {
@@ -55,7 +83,7 @@ export class ContextEnricher {
     });
 
     const parts: string[] = [
-      "You are a personal AI assistant responding via Discord. Keep responses concise and conversational. Use markdown formatting compatible with Discord.",
+      this.getSystemPreamble(),
     ];
 
     if (this.config.userName) {

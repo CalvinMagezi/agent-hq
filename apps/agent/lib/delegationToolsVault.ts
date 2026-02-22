@@ -51,8 +51,13 @@ export const DelegateToRelayTool: AgentTool<typeof DelegateToRelaySchema> = {
     description: `Delegate tasks to Discord relay bots for execution. Each task is sent to a specific relay bot type:
 - claude-code: Best for code editing, git operations, debugging, complex refactoring
 - opencode: Multi-model flexibility, quick code generation, model comparison
-- gemini-cli: Research, analysis, summarization, large context processing
+- gemini-cli: Google Workspace (Docs, Sheets, Drive, Gmail, Calendar, Keep), research, analysis, summarization. NOT for coding tasks.
 - any: Auto-select the healthiest available relay
+
+ROUTING GUIDELINES:
+- Google Docs/Sheets/Drive/Gmail/Calendar/Keep tasks → gemini-cli
+- Code editing, debugging, git operations → claude-code
+- Multi-model comparison, quick generation → opencode
 
 Tasks can have dependencies (dependsOn) to create execution chains. Always check relay health first with check_relay_health.`,
     parameters: DelegateToRelaySchema,

@@ -33,9 +33,10 @@ yarn-error.log*
 .env*
 !.env.example
 
-# MCP
+# MCP and Gemini CLI (machine-specific configs with local paths)
 .mcp.json
 .mcp-bridge.*
+**/.gemini/
 
 # typescript
 *.tsbuildinfo

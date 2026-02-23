@@ -1,8 +1,9 @@
 # Agent-HQ
 
 > **📚 Full docs, architecture deep-dives, and future vision:**
-> **[Agent-HQ NotebookLM →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f)**
-> *Explore the architecture, ask questions, generate audio overviews, and visualize the system with Google's NotebookLM.*
+> - **[Agent-HQ DeepWiki →](https://deepwiki.com/CalvinMagezi/agent-hq)** — Auto-generated deep wiki with full codebase exploration and architecture diagrams
+> - **[Agent-HQ NotebookLM →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f)** — Ask questions, generate audio overviews, and visualize the system
+> - **[Video Overview →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f?artifactId=a19ec78e-59a7-4078-aec4-def62656b22d)** — Watch the NotebookLM-generated video walkthrough of Agent-HQ
 
 ---
 
@@ -167,7 +168,7 @@ If you're an AI agent setting up Agent-HQ on behalf of a user, follow these step
 7. **Start services**: `bun run relay` is the minimum — add `agent` and `daemon` for full capability
 8. **Verify**: DM the Discord bot — if it responds, setup is complete
 
-The vault schema, job types, delegation flow, and all system files are documented in the [NotebookLM workspace](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f).
+The vault schema, job types, delegation flow, and all system files are documented in the [NotebookLM workspace](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f). For a full codebase deep dive, see the [DeepWiki](https://deepwiki.com/CalvinMagezi/agent-hq).
 
 ## Development Commands
 

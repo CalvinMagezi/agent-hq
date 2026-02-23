@@ -18,7 +18,7 @@ export type ThinkingLevel =
   | "xhigh";
 export type NoteType = "note" | "digest" | "system-file" | "report";
 export type EmbeddingStatus = "pending" | "processing" | "embedded" | "failed";
-export type HarnessType = "claude-code" | "opencode" | "gemini-cli" | "any";
+export type HarnessType = "claude-code" | "opencode" | "gemini-cli" | "openclaw" | "any";
 export type TaskStatus =
   | "pending"
   | "claimed"

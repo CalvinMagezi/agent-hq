@@ -11,6 +11,7 @@
 import * as path from "path";
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
+import { recordWorkflowRun } from "./statusHelper.js";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, "../..", ".vault");
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -18,6 +19,7 @@ const MODEL = process.env.ANALYSIS_MODEL ?? "google/gemini-2.5-flash";
 
 if (!OPENROUTER_API_KEY) {
   console.error("Error: OPENROUTER_API_KEY is required.");
+  recordWorkflowRun(VAULT_PATH, "knowledge-analysis", false, "OPENROUTER_API_KEY missing");
   process.exit(1);
 }
 
@@ -120,10 +122,12 @@ Be specific and reference note titles when possible.`,
     source: "knowledge-analysis",
   });
 
+  recordWorkflowRun(VAULT_PATH, "knowledge-analysis", true, `${allNotes.length} notes analyzed`);
   console.log(`[knowledge-analysis] Analysis saved for ${today}`);
 }
 
 main().catch((err) => {
+  recordWorkflowRun(VAULT_PATH, "knowledge-analysis", false, String(err));
   console.error("[knowledge-analysis] Fatal error:", err);
   process.exit(1);
 });

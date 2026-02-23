@@ -14,6 +14,31 @@ import * as fs from "fs";
 /** Type alias so other relay modules can import { ConvexAPI } from vaultApi */
 export type ConvexAPI = VaultAPI;
 
+export interface SystemStatus {
+  daemon: {
+    startedAt: string | null;
+    lastUpdated: string | null;
+    pid: number | null;
+    apiKeys: Record<string, boolean>;
+  } | null;
+  workflows: Record<string, {
+    lastRun: string;
+    success: boolean;
+    lastSuccess: string | null;
+    lastError: string | null;
+  }> | null;
+  heartbeat: { lastProcessed: string | null };
+  workers: Array<{ workerId: string; status: string; lastHeartbeat: string | null }>;
+  relays: Array<{
+    displayName: string;
+    relayId: string;
+    status: string;
+    lastHeartbeat: string | null;
+    tasksCompleted: number;
+    tasksFailed: number;
+  }>;
+}
+
 export class VaultAPI {
   private vault: VaultClient;
   private search: SearchClient | null = null;
@@ -308,5 +333,81 @@ export class VaultAPI {
     } catch (err: any) {
       console.warn("[VaultAPI] Update relay health error:", err.message);
     }
+  }
+
+  /** Get comprehensive system status for the !hq status command */
+  async getSystemStatus(): Promise<SystemStatus> {
+    const matter = await import("gray-matter").then((m) => m.default);
+    const vaultPath = this.vault.vaultPath;
+
+    // Read DAEMON-STATUS.md
+    let daemon: SystemStatus["daemon"] = null;
+    try {
+      const statusPath = path.join(vaultPath, "_system/DAEMON-STATUS.md");
+      if (fs.existsSync(statusPath)) {
+        const { data } = matter(fs.readFileSync(statusPath, "utf-8"));
+        daemon = {
+          startedAt: data.daemonStartedAt ?? null,
+          lastUpdated: data.lastUpdated ?? null,
+          pid: data.pid ?? null,
+          apiKeys: data.apiKeys ?? {},
+        };
+      }
+    } catch { /* skip */ }
+
+    // Read WORKFLOW-STATUS.md
+    let workflows: SystemStatus["workflows"] = null;
+    try {
+      const wfPath = path.join(vaultPath, "_system/WORKFLOW-STATUS.md");
+      if (fs.existsSync(wfPath)) {
+        const { data } = matter(fs.readFileSync(wfPath, "utf-8"));
+        workflows = data.workflows ?? null;
+      }
+    } catch { /* skip */ }
+
+    // Read HEARTBEAT.md
+    const heartbeat: SystemStatus["heartbeat"] = { lastProcessed: null };
+    try {
+      const hbPath = path.join(vaultPath, "_system/HEARTBEAT.md");
+      if (fs.existsSync(hbPath)) {
+        const { data } = matter(fs.readFileSync(hbPath, "utf-8"));
+        heartbeat.lastProcessed = data.lastProcessed ?? null;
+      }
+    } catch { /* skip */ }
+
+    // Read worker sessions
+    const workers: SystemStatus["workers"] = [];
+    try {
+      const sessionsDir = path.join(vaultPath, "_agent-sessions");
+      if (fs.existsSync(sessionsDir)) {
+        const files = fs.readdirSync(sessionsDir).filter((f) => f.startsWith("worker-") && f.endsWith(".md"));
+        for (const file of files) {
+          const { data } = matter(fs.readFileSync(path.join(sessionsDir, file), "utf-8"));
+          workers.push({
+            workerId: data.workerId ?? file.replace(".md", ""),
+            status: data.status ?? "unknown",
+            lastHeartbeat: data.lastHeartbeat ?? null,
+          });
+        }
+      }
+    } catch { /* skip */ }
+
+    // Read relay health
+    const relays: SystemStatus["relays"] = [];
+    try {
+      const relayHealth = await this.vault.getRelayHealthAll();
+      for (const r of relayHealth) {
+        relays.push({
+          displayName: r.displayName ?? r.relayId,
+          relayId: r.relayId,
+          status: r.status ?? "unknown",
+          lastHeartbeat: r.lastHeartbeat ?? null,
+          tasksCompleted: r.tasksCompleted ?? 0,
+          tasksFailed: r.tasksFailed ?? 0,
+        });
+      }
+    } catch { /* skip */ }
+
+    return { daemon, workflows, heartbeat, workers, relays };
   }
 }

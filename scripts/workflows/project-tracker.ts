@@ -11,6 +11,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
+import { recordWorkflowRun } from "./statusHelper.js";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, "../..", ".vault");
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -19,7 +20,12 @@ const MODEL = process.env.PROJECT_MODEL ?? "google/gemini-2.5-flash";
 
 if (!OPENROUTER_API_KEY) {
   console.error("Error: OPENROUTER_API_KEY is required.");
+  recordWorkflowRun(VAULT_PATH, "project-tracker", false, "OPENROUTER_API_KEY missing");
   process.exit(1);
+}
+
+if (!BRAVE_API_KEY) {
+  console.warn("[project-tracker] BRAVE_API_KEY not set — web search disabled.");
 }
 
 const vault = new VaultClient(VAULT_PATH);
@@ -125,7 +131,10 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+main().then(() => {
+  recordWorkflowRun(VAULT_PATH, "project-tracker", true);
+}).catch((err) => {
+  recordWorkflowRun(VAULT_PATH, "project-tracker", false, String(err));
   console.error("[project-tracker] Fatal error:", err);
   process.exit(1);
 });

@@ -35,6 +35,8 @@ export class ClaudeHarness implements BaseHarness {
   private sessions: SessionStore;
   private channelSettings: Record<string, ChannelSettings> = {};
   private activeProcesses: Set<string> = new Set();
+  private activeProcs = new Map<string, { kill(signal?: number): void }>();
+  private killedChannels = new Set<string>();
   private globalActiveCount = 0;
   private usage: UsageStats = {
     totalCostUsd: 0,
@@ -94,6 +96,15 @@ export class ClaudeHarness implements BaseHarness {
     options?: HarnessCallOptions,
   ): Promise<string> {
     return this.callClaude(prompt, channelId, options as ClaudeCallOptions);
+  }
+
+  /** Force-kill the running CLI process for a channel. */
+  kill(channelId: string): boolean {
+    const proc = this.activeProcs.get(channelId);
+    if (!proc) return false;
+    this.killedChannels.add(channelId);
+    proc.kill();
+    return true;
   }
 
   /**
@@ -277,6 +288,7 @@ export class ClaudeHarness implements BaseHarness {
           CLAUDE_CODE_ENTRYPOINT: undefined,
         },
       });
+      this.activeProcs.set(channelId, proc);
 
       const outputPromise = (async () => {
         const output = await new Response(proc.stdout).text();
@@ -302,8 +314,17 @@ export class ClaudeHarness implements BaseHarness {
         }, DEFAULT_TIMEOUT_MS);
       });
 
-      return await Promise.race([outputPromise, timeoutPromise]);
+      const result = await Promise.race([outputPromise, timeoutPromise]);
+      this.activeProcs.delete(channelId);
+      if (this.killedChannels.delete(channelId)) {
+        return { text: "Request cancelled by user.", sessionId: null, subtype: null };
+      }
+      return result;
     } catch (error: any) {
+      this.activeProcs.delete(channelId);
+      if (this.killedChannels.delete(channelId)) {
+        return { text: "Request cancelled by user.", sessionId: null, subtype: null };
+      }
       console.error("[Claude] Error:", error.message);
       if (error.message.includes("timed out")) {
         return {

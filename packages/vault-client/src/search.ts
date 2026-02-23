@@ -145,8 +145,9 @@ export class SearchClient {
    * Full-text keyword search using FTS5.
    */
   keywordSearch(query: string, limit: number = 20): SearchHit[] {
-    // Escape special FTS5 characters
-    const escaped = query.replace(/['"(){}[\]*+^~!@#$%&]/g, "");
+    // Escape special FTS5 characters: colons (column prefix), hyphens (NOT),
+    // periods (tokenizer issues), parentheses, quotes, operators
+    const escaped = query.replace(/['"(){}[\]*+^~!@#$%&:.\-,]/g, " ").replace(/\s+/g, " ");
     if (!escaped.trim()) return [];
 
     const rows = this.db

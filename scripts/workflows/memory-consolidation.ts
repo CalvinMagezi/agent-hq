@@ -11,6 +11,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
+import { recordWorkflowRun } from "./statusHelper.js";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, "../..", ".vault");
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -18,6 +19,7 @@ const MODEL = process.env.CONSOLIDATION_MODEL ?? "google/gemini-2.5-flash";
 
 if (!OPENROUTER_API_KEY) {
   console.error("Error: OPENROUTER_API_KEY is required.");
+  recordWorkflowRun(VAULT_PATH, "memory-consolidation", false, "OPENROUTER_API_KEY missing");
   process.exit(1);
 }
 
@@ -96,18 +98,21 @@ async function main(): Promise<void> {
   };
   const insights = result.choices[0]?.message?.content ?? "No insights generated.";
 
-  // Seed initial wikilinks from keyword search
-  const search = new SearchClient(VAULT_PATH);
+  // Seed initial wikilinks from keyword search (non-fatal)
   const today = new Date().toISOString().split("T")[0];
   const noteTitle = `Daily Insights ${today}`;
-  const related = search.keywordSearch("insights consolidation memory", 5)
-    .filter((r) => !r.notePath.includes(noteTitle));
-  search.close();
-
   let body = insights;
-  if (related.length > 0) {
-    const links = related.map((r) => `- [[${r.title}]]`).join("\n");
-    body += `\n\n<!-- agent-hq-graph-links -->\n## Related Notes\n\n${links}\n`;
+  try {
+    const search = new SearchClient(VAULT_PATH);
+    const related = search.keywordSearch("insights consolidation memory", 5)
+      .filter((r) => !r.notePath.includes(noteTitle));
+    search.close();
+    if (related.length > 0) {
+      const links = related.map((r) => `- [[${r.title}]]`).join("\n");
+      body += `\n\n<!-- agent-hq-graph-links -->\n## Related Notes\n\n${links}\n`;
+    }
+  } catch (err) {
+    console.warn("[memory-consolidation] Wikilink search failed (non-fatal):", String(err).substring(0, 100));
   }
 
   // Save insights note
@@ -117,10 +122,12 @@ async function main(): Promise<void> {
     source: "memory-consolidation",
   });
 
+  recordWorkflowRun(VAULT_PATH, "memory-consolidation", true, `${allNotes.length} notes consolidated`);
   console.log(`[memory-consolidation] Insights saved for ${today}`);
 }
 
 main().catch((err) => {
+  recordWorkflowRun(VAULT_PATH, "memory-consolidation", false, String(err));
   console.error("[memory-consolidation] Fatal error:", err);
   process.exit(1);
 });

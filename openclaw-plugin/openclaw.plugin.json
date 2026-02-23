@@ -1,0 +1,20 @@
+{
+  "name": "agent-hq-bridge",
+  "version": "0.1.0",
+  "description": "Bridge to Agent-HQ for secure capability brokering. Enables OpenClaw to request Google Workspace operations and other services via HQ's delegation system.",
+  "author": "calvinmagezi",
+  "license": "MIT",
+  "entry": "index.ts",
+  "config": {
+    "bridgeUrl": {
+      "type": "string",
+      "default": "http://127.0.0.1:18790",
+      "description": "URL of the Agent-HQ Bridge service"
+    },
+    "token": {
+      "type": "string",
+      "default": "",
+      "description": "Bearer token for authenticating with the Bridge (from _config.md)"
+    }
+  }
+}

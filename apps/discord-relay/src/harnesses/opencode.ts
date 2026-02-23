@@ -27,6 +27,8 @@ export class OpenCodeHarness implements BaseHarness {
   private sessions: SessionStore = { sessions: {} };
   private channelSettings: Record<string, ChannelSettings> = {};
   private activeProcesses = new Set<string>();
+  private activeProcs = new Map<string, { kill(signal?: number): void }>();
+  private killedChannels = new Set<string>();
   private globalActiveCount = 0;
   private usage: HarnessUsageStats = {
     totalCostUsd: 0,
@@ -66,6 +68,15 @@ export class OpenCodeHarness implements BaseHarness {
     } catch {
       // Fresh usage stats
     }
+  }
+
+  /** Force-kill the running CLI process for a channel. */
+  kill(channelId: string): boolean {
+    const proc = this.activeProcs.get(channelId);
+    if (!proc) return false;
+    this.killedChannels.add(channelId);
+    proc.kill();
+    return true;
   }
 
   async call(
@@ -154,6 +165,7 @@ export class OpenCodeHarness implements BaseHarness {
         stderr: "pipe",
         cwd: this.config.projectDir || undefined,
       });
+      this.activeProcs.set(channelId, proc);
 
       const outputPromise = (async () => {
         const output = await new Response(proc.stdout).text();
@@ -175,8 +187,17 @@ export class OpenCodeHarness implements BaseHarness {
         }, DEFAULT_TIMEOUT_MS);
       });
 
-      return await Promise.race([outputPromise, timeoutPromise]);
+      const result = await Promise.race([outputPromise, timeoutPromise]);
+      this.activeProcs.delete(channelId);
+      if (this.killedChannels.delete(channelId)) {
+        return "Request cancelled by user.";
+      }
+      return result;
     } catch (error: any) {
+      this.activeProcs.delete(channelId);
+      if (this.killedChannels.delete(channelId)) {
+        return "Request cancelled by user.";
+      }
       if (error.message?.includes("timed out")) {
         return "OpenCode took too long to respond (5 min timeout). Try a shorter or simpler request.";
       }

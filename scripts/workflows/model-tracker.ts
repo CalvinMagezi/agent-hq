@@ -11,6 +11,7 @@
 import * as path from "path";
 import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
+import { recordWorkflowRun } from "./statusHelper.js";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, "../..", ".vault");
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -19,6 +20,7 @@ const MODEL = process.env.MODEL_TRACKER_MODEL ?? "google/gemini-2.5-flash";
 
 if (!OPENROUTER_API_KEY) {
   console.error("Error: OPENROUTER_API_KEY is required.");
+  recordWorkflowRun(VAULT_PATH, "model-tracker", false, "OPENROUTER_API_KEY missing");
   process.exit(1);
 }
 
@@ -161,10 +163,12 @@ async function main(): Promise<void> {
   const snapshotContent = `# OpenRouter Model Snapshot\n\nTotal: ${currentModels.length} models\nLast updated: ${today}\n\n\`\`\`json\n${JSON.stringify(currentModels.slice(0, 100), null, 2)}\n\`\`\``;
   fs.writeFileSync(snapshotPath, matter.stringify("\n" + snapshotContent + "\n", snapshotData), "utf-8");
 
+  recordWorkflowRun(VAULT_PATH, "model-tracker", true, `${newModels.length} new, ${removedModels.length} removed`);
   console.log(`[model-tracker] Report saved. ${newModels.length} new, ${removedModels.length} removed.`);
 }
 
 main().catch((err) => {
+  recordWorkflowRun(VAULT_PATH, "model-tracker", false, String(err));
   console.error("[model-tracker] Fatal error:", err);
   process.exit(1);
 });

@@ -48,6 +48,8 @@ export class GeminiHarness implements BaseHarness {
   private channelSettings: Record<string, ChannelSettings> = {};
   private plugins: Record<string, GeminiMcpServer> = {};
   private activeProcesses = new Set<string>();
+  private activeProcs = new Map<string, { kill(signal?: number): void }>();
+  private killedChannels = new Set<string>();
   private globalActiveCount = 0;
   private usage: HarnessUsageStats = {
     totalCostUsd: 0,
@@ -88,6 +90,15 @@ export class GeminiHarness implements BaseHarness {
 
     // Sync plugins to project-level .gemini/settings.json so Gemini CLI picks them up
     await this.syncPluginsToSettings();
+  }
+
+  /** Force-kill the running CLI process for a channel (SIGKILL — Gemini ignores SIGTERM). */
+  kill(channelId: string): boolean {
+    const proc = this.activeProcs.get(channelId);
+    if (!proc) return false;
+    this.killedChannels.add(channelId);
+    proc.kill(9); // SIGKILL
+    return true;
   }
 
   async call(
@@ -160,6 +171,7 @@ export class GeminiHarness implements BaseHarness {
         stderr: "pipe",
         cwd: this.config.projectDir || undefined,
       });
+      this.activeProcs.set(channelId, proc);
 
       const outputPromise = (async () => {
         // Read stdout and stderr concurrently to avoid pipe deadlock
@@ -190,8 +202,17 @@ export class GeminiHarness implements BaseHarness {
         }, DEFAULT_TIMEOUT_MS);
       });
 
-      return await Promise.race([outputPromise, timeoutPromise]);
+      const result = await Promise.race([outputPromise, timeoutPromise]);
+      this.activeProcs.delete(channelId);
+      if (this.killedChannels.delete(channelId)) {
+        return "Request cancelled by user.";
+      }
+      return result;
     } catch (error: any) {
+      this.activeProcs.delete(channelId);
+      if (this.killedChannels.delete(channelId)) {
+        return "Request cancelled by user.";
+      }
       if (error.message?.includes("timed out")) {
         return "Gemini CLI took too long to respond (5 min timeout). Try a shorter or simpler request.";
       }

@@ -3,6 +3,16 @@ import type { GeminiHarness } from "./harnesses/gemini.js";
 import type { ConvexAPI } from "./vaultApi.js";
 import type { ChannelSettings, RelayConfig } from "./types.js";
 
+function formatTimeAgo(isoString: string | null): string {
+  if (!isoString) return "never";
+  const ms = Date.now() - new Date(isoString).getTime();
+  if (ms < 0) return "just now";
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+  if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h ago`;
+  return `${Math.round(ms / 86_400_000)}d ago`;
+}
+
 /** Model aliases for Claude Code (resolves short names internally) */
 const CLAUDE_MODEL_ALIASES: Record<string, string> = {
   opus: "opus",
@@ -83,11 +93,24 @@ export async function handleCommand(
 
     case "!reset":
     case "!new": {
+      harness.kill(channelId); // Kill any running process first
       await harness.resetSession(channelId);
       await harness.clearChannelSettings(channelId);
       return {
         handled: true,
         response: "Session and settings reset. Fresh start.",
+      };
+    }
+
+    case "!kill":
+    case "!abort":
+    case "!cancel": {
+      const killed = harness.kill(channelId);
+      return {
+        handled: true,
+        response: killed
+          ? "Killed the running process. You can send a new message."
+          : "No active process to kill in this channel.",
       };
     }
 
@@ -547,21 +570,68 @@ export async function handleCommand(
       const sub = arg.toLowerCase();
 
       if (sub === "status") {
-        return {
-          handled: true,
-          response: "HQ now runs locally via the vault. Use `bun run agent` to start the HQ agent and `bun run daemon` for background workflows.",
-        };
+        if (!convex) {
+          return { handled: true, response: "Vault connection not available." };
+        }
+        try {
+          const status = await convex.getSystemStatus();
+          const lines: string[] = ["**System Status**", ""];
+
+          // Daemon
+          if (status.daemon) {
+            const uptime = status.daemon.startedAt
+              ? formatTimeAgo(status.daemon.startedAt).replace(" ago", "")
+              : "unknown";
+            lines.push(`**Daemon:** Running (PID ${status.daemon.pid}, uptime ${uptime})`);
+            const keys = status.daemon.apiKeys;
+            lines.push(`**API Keys:** OpenRouter=${keys.openrouter ? "set" : "MISSING"}, Brave=${keys.brave ? "set" : "no"}, Gemini=${keys.gemini ? "set" : "no"}`);
+          } else {
+            lines.push("**Daemon:** Not running (no status file)");
+          }
+
+          // Heartbeat
+          lines.push(`**Heartbeat:** Last processed ${formatTimeAgo(status.heartbeat.lastProcessed)}`);
+
+          // Workers
+          if (status.workers.length > 0) {
+            lines.push("", "**Workers:**");
+            for (const w of status.workers) {
+              lines.push(`- \`${w.workerId}\`: ${w.status} (${formatTimeAgo(w.lastHeartbeat)})`);
+            }
+          }
+
+          // Relays
+          if (status.relays.length > 0) {
+            lines.push("", "**Relay Bots:**");
+            for (const r of status.relays) {
+              lines.push(`- ${r.displayName}: ${r.status} (${formatTimeAgo(r.lastHeartbeat)}) — ${r.tasksCompleted} completed, ${r.tasksFailed} failed`);
+            }
+          }
+
+          // Workflows
+          if (status.workflows) {
+            lines.push("", "**Scheduled Workflows:**");
+            for (const [name, wf] of Object.entries(status.workflows)) {
+              const icon = wf.success ? "OK" : "FAILED";
+              lines.push(`- ${name}: ${icon} (${formatTimeAgo(wf.lastRun)})`);
+            }
+          }
+
+          return { handled: true, response: lines.join("\n") };
+        } catch (err) {
+          return { handled: true, response: `Error reading status: ${err}` };
+        }
       }
 
       return {
         handled: true,
         response: [
           "**HQ Commands** (local vault mode)",
+          "`!hq status` — Live system health dashboard",
+          "`bun run status` — CLI status checker",
           "`bun run agent` — Start HQ agent (job processing)",
           "`bun run daemon` — Start background workflows",
           "`bun run chat` — Terminal chat interface",
-          "",
-          "The web UI has been replaced with local-first Obsidian vault.",
         ].join("\n"),
       };
     }
@@ -672,7 +742,8 @@ export async function handleCommand(
             "**Discord Relay Commands** (OpenCode)",
             "",
             "**Session**",
-            "`!reset` — New session + clear settings",
+            "`!reset` — New session + clear settings (kills running process)",
+            "`!kill` — Force-stop the running process",
             "`!session` — Show current session & settings",
             "`!continue <msg>` — Continue most recent session",
             "",
@@ -716,7 +787,8 @@ export async function handleCommand(
             "`!workspace` / `!ws` — Show Workspace integration info and setup",
             "",
             "**Session**",
-            "`!reset` — Clear settings (Gemini is stateless — no sessions)",
+            "`!reset` — Clear settings (kills running process)",
+            "`!kill` — Force-stop the running process",
             "`!session` — Show current settings",
             "",
             "**Models**",
@@ -762,7 +834,8 @@ export async function handleCommand(
           "**Discord Relay Commands** (Claude Code)",
           "",
           "**Session**",
-          "`!reset` — New session + clear settings",
+          "`!reset` — New session + clear settings (kills running process)",
+          "`!kill` — Force-stop the running process",
           "`!session` — Show current session & settings",
           "`!continue <msg>` — Continue most recent session",
           "",

@@ -19,6 +19,9 @@ import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
 import { calculateCost } from "@repo/vault-client/pricing";
+import { startBridge, stopBridge, type BridgeContext } from "./openclaw-bridge";
+import { OpenClawAdapter } from "@repo/vault-client/openclaw-adapter";
+import { AuditLogger } from "./openclaw-bridge/audit";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -47,6 +50,133 @@ try {
 
 console.log(`[daemon] Started. Vault: ${VAULT_PATH}`);
 console.log(`[daemon] Press Ctrl+C to stop.`);
+
+// ─── Startup Validation ─────────────────────────────────────────────
+
+function validatePrerequisites(): void {
+  const warnings: string[] = [];
+
+  if (!OPENROUTER_API_KEY) {
+    warnings.push("OPENROUTER_API_KEY is not set — embeddings will be skipped");
+  }
+  if (!process.env.BRAVE_API_KEY) {
+    warnings.push("BRAVE_API_KEY is not set — web digest search will be unavailable");
+  }
+
+  const requiredFiles = ["SOUL.md", "MEMORY.md", "PREFERENCES.md", "HEARTBEAT.md"];
+  for (const file of requiredFiles) {
+    if (!fs.existsSync(path.join(VAULT_PATH, "_system", file))) {
+      warnings.push(`Missing system file: _system/${file}`);
+    }
+  }
+
+  const requiredDirs = [
+    "_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed",
+    "_delegation/pending", "_delegation/claimed", "_delegation/completed",
+    "_agent-sessions",
+  ];
+  for (const dir of requiredDirs) {
+    if (!fs.existsSync(path.join(VAULT_PATH, dir))) {
+      warnings.push(`Missing directory: ${dir}`);
+    }
+  }
+
+  if (warnings.length > 0) {
+    console.warn("[daemon] Startup warnings:");
+    for (const w of warnings) {
+      console.warn(`  - ${w}`);
+    }
+  } else {
+    console.log("[daemon] All prerequisites validated.");
+  }
+}
+
+validatePrerequisites();
+
+// ─── Daemon Status Tracking ─────────────────────────────────────────
+
+/** Return an ISO-like timestamp in local time with UTC offset (e.g. 2026-02-22T20:25:45+03:00) */
+function localTimestamp(): string {
+  const d = new Date();
+  const off = -d.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const pad = (n: number) => String(Math.abs(n)).padStart(2, "0");
+  return (
+    d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()) +
+    sign + pad(Math.floor(Math.abs(off) / 60)) + ":" + pad(Math.abs(off) % 60)
+  );
+}
+
+const STATUS_FILE = path.join(VAULT_PATH, "_system/DAEMON-STATUS.md");
+const daemonStartedAt = localTimestamp();
+
+interface TaskRunStatus {
+  lastRun: string | null;
+  lastSuccess: string | null;
+  lastError: string | null;
+  runCount: number;
+  errorCount: number;
+}
+
+const taskRunStatus: Record<string, TaskRunStatus> = {};
+
+function recordTaskRun(taskName: string, success: boolean, error?: string): void {
+  const s = taskRunStatus[taskName] ??= {
+    lastRun: null, lastSuccess: null, lastError: null, runCount: 0, errorCount: 0,
+  };
+  s.lastRun = localTimestamp();
+  s.runCount++;
+  if (success) {
+    s.lastSuccess = s.lastRun;
+  } else {
+    s.lastError = error ?? "unknown error";
+    s.errorCount++;
+  }
+}
+
+async function writeDaemonStatus(): Promise<void> {
+  try {
+    const matter = await import("gray-matter").then((m) => m.default);
+    const frontmatter: Record<string, unknown> = {
+      noteType: "system-file",
+      fileName: "daemon-status",
+      daemonStartedAt,
+      lastUpdated: localTimestamp(),
+      pid: process.pid,
+      apiKeys: {
+        openrouter: !!OPENROUTER_API_KEY,
+        brave: !!process.env.BRAVE_API_KEY,
+        gemini: !!process.env.GEMINI_API_KEY,
+      },
+    };
+
+    const lines: string[] = ["# Daemon Status", ""];
+    lines.push(`**Started:** ${daemonStartedAt}`);
+    lines.push(`**PID:** ${process.pid}`);
+    lines.push(`**Vault:** ${VAULT_PATH}`);
+    lines.push(`**API Keys:** OpenRouter=${OPENROUTER_API_KEY ? "set" : "MISSING"}, Brave=${process.env.BRAVE_API_KEY ? "set" : "not set"}, Gemini=${process.env.GEMINI_API_KEY ? "set" : "not set"}`);
+    lines.push("");
+    lines.push("## Task Status");
+    lines.push("");
+    lines.push("| Task | Last Run | Last Success | Runs | Errors | Last Error |");
+    lines.push("|------|----------|--------------|------|--------|------------|");
+
+    // We reference the tasks array defined later — this is fine since writeDaemonStatus
+    // is only called after tasks is initialized in the scheduler
+    for (const taskName of Object.keys(taskRunStatus)) {
+      const s = taskRunStatus[taskName];
+      const lastRun = s.lastRun ?? "never";
+      const lastSuccess = s.lastSuccess ?? "never";
+      const lastError = s.lastError ? s.lastError.substring(0, 50) : "-";
+      lines.push(`| ${taskName} | ${lastRun} | ${lastSuccess} | ${s.runCount} | ${s.errorCount} | ${lastError} |`);
+    }
+
+    fs.writeFileSync(STATUS_FILE, matter.stringify(lines.join("\n"), frontmatter), "utf-8");
+  } catch (err) {
+    console.error("[daemon] Failed to write status file:", err);
+  }
+}
 
 // ─── Task: Expire Stale Approvals (every 1 min) ─────────────────────
 
@@ -83,6 +213,103 @@ async function expireApprovals(): Promise<void> {
 
 // ─── Task: Process Heartbeat (every 2 min) ───────────────────────────
 
+const HEARTBEAT_STATE_PATH = path.join(VAULT_PATH, "_system/heartbeat-state.json");
+const ACTIVE_HOURS = { start: 8, end: 24 }; // Only dispatch user tasks during these hours (local time)
+const HEARTBEAT_WRITE_INTERVAL_MS = 10 * 60 * 1000; // Only write lastProcessed every 10 min when idle
+
+interface HeartbeatState {
+  lastChecks: Record<string, number>;
+  lastStatus: "ok" | "alert";
+  alerts: string[];
+}
+
+function loadHeartbeatState(): HeartbeatState {
+  try {
+    if (fs.existsSync(HEARTBEAT_STATE_PATH)) {
+      return JSON.parse(fs.readFileSync(HEARTBEAT_STATE_PATH, "utf-8"));
+    }
+  } catch { /* use defaults */ }
+  return { lastChecks: {}, lastStatus: "ok", alerts: [] };
+}
+
+function saveHeartbeatState(state: HeartbeatState): void {
+  fs.writeFileSync(HEARTBEAT_STATE_PATH, JSON.stringify(state, null, 2), "utf-8");
+}
+
+function isActiveHours(): boolean {
+  const hour = new Date().getHours();
+  return hour >= ACTIVE_HOURS.start && hour < ACTIVE_HOURS.end;
+}
+
+/** Rotating health checks — each cycle runs the most overdue check */
+function runRotatingCheck(state: HeartbeatState): { check: string; result: string; isAlert: boolean } | null {
+  const checks: Record<string, () => { result: string; isAlert: boolean }> = {
+    jobs: () => {
+      const pending = countFiles(path.join(VAULT_PATH, "_jobs/pending"));
+      const running = countFiles(path.join(VAULT_PATH, "_jobs/running"));
+      const failed = countFiles(path.join(VAULT_PATH, "_jobs/failed"));
+      const isAlert = running > 10 || failed > 20;
+      return {
+        result: `pending=${pending} running=${running} failed=${failed}`,
+        isAlert,
+      };
+    },
+    workers: () => {
+      const sessionsDir = path.join(VAULT_PATH, "_agent-sessions");
+      if (!fs.existsSync(sessionsDir)) return { result: "no sessions dir", isAlert: false };
+      const files = fs.readdirSync(sessionsDir).filter(f => f.startsWith("worker-") && f.endsWith(".md"));
+      return { result: `${files.length} worker session(s)`, isAlert: false };
+    },
+    relay: () => {
+      const healthDir = path.join(VAULT_PATH, "_delegation/relay-health");
+      if (!fs.existsSync(healthDir)) return { result: "no relay health dir", isAlert: false };
+      const files = fs.readdirSync(healthDir).filter(f => f.endsWith(".md"));
+      return { result: `${files.length} relay(s) tracked`, isAlert: false };
+    },
+    disk: () => {
+      const embeddingsDir = path.join(VAULT_PATH, "_embeddings");
+      let dbSize = "n/a";
+      if (fs.existsSync(embeddingsDir)) {
+        const dbFile = path.join(embeddingsDir, "search.db");
+        if (fs.existsSync(dbFile)) {
+          const stat = fs.statSync(dbFile);
+          dbSize = `${(stat.size / 1024 / 1024).toFixed(1)}MB`;
+        }
+      }
+      return { result: `embeddings db=${dbSize}`, isAlert: false };
+    },
+  };
+
+  // Find the most overdue check
+  const now = Date.now();
+  let oldestCheck: string | null = null;
+  let oldestTime = Infinity;
+
+  for (const name of Object.keys(checks)) {
+    const lastRun = state.lastChecks[name] ?? 0;
+    if (lastRun < oldestTime) {
+      oldestTime = lastRun;
+      oldestCheck = name;
+    }
+  }
+
+  if (!oldestCheck) return null;
+
+  try {
+    const { result, isAlert } = checks[oldestCheck]();
+    state.lastChecks[oldestCheck] = now;
+    return { check: oldestCheck, result, isAlert };
+  } catch (err) {
+    state.lastChecks[oldestCheck] = now;
+    return { check: oldestCheck, result: `error: ${err}`, isAlert: true };
+  }
+}
+
+function countFiles(dir: string): number {
+  if (!fs.existsSync(dir)) return 0;
+  return fs.readdirSync(dir).filter(f => f.endsWith(".md")).length;
+}
+
 async function processHeartbeat(): Promise<void> {
   const heartbeatPath = path.join(VAULT_PATH, "_system/HEARTBEAT.md");
   if (!fs.existsSync(heartbeatPath)) return;
@@ -96,40 +323,97 @@ async function processHeartbeat(): Promise<void> {
     const actionsMatch = content.match(
       /## Pending Actions\s*\n([\s\S]*?)(?=\n##|$)/,
     );
-    if (!actionsMatch) return;
 
-    const actionsText = actionsMatch[1].trim();
-    if (actionsText === "_No pending actions._" || !actionsText) return;
+    let actionsProcessed = 0;
+    let updatedContent = content.trim();
 
-    // Extract individual tasks (lines starting with - or *)
-    const tasks = actionsText
-      .split("\n")
-      .filter((line) => /^[-*]\s+/.test(line))
-      .map((line) => line.replace(/^[-*]\s+/, "").trim())
-      .filter(Boolean);
+    if (actionsMatch && isActiveHours()) {
+      const actionsText = actionsMatch[1].trim();
+      if (actionsText !== "_No pending actions._" && actionsText) {
+        // Extract individual tasks (lines starting with - or *)
+        const pendingTasks = actionsText
+          .split("\n")
+          .filter((line) => /^[-*]\s+/.test(line))
+          .map((line) => line.replace(/^[-*]\s+/, "").trim())
+          .filter(Boolean);
 
-    if (tasks.length === 0) return;
+        // Create a background job for each task
+        for (const task of pendingTasks) {
+          const jobId = await vault.createJob({
+            instruction: task,
+            type: "background",
+            priority: 40,
+            securityProfile: "standard",
+          });
+          console.log(`[heartbeat] Created job ${jobId}: ${task.substring(0, 60)}...`);
+          actionsProcessed++;
+        }
 
-    // Create a background job for each task
-    for (const task of tasks) {
-      const jobId = await vault.createJob({
-        instruction: task,
-        type: "background",
-        priority: 40,
-        securityProfile: "standard",
-      });
-      console.log(`[heartbeat] Created job ${jobId}: ${task.substring(0, 60)}...`);
+        // Clear the pending actions
+        if (actionsProcessed > 0) {
+          updatedContent = updatedContent.replace(
+            /## Pending Actions\s*\n[\s\S]*?(?=\n##|$)/,
+            "## Pending Actions\n\n_No pending actions._\n",
+          );
+        }
+      }
+    } else if (actionsMatch && !isActiveHours()) {
+      const actionsText = actionsMatch[1].trim();
+      if (actionsText !== "_No pending actions._" && actionsText) {
+        console.log(`[heartbeat] Pending actions deferred — outside active hours (${ACTIVE_HOURS.start}:00-${ACTIVE_HOURS.end}:00)`);
+      }
     }
 
-    // Clear the pending actions
-    const updatedContent = content.replace(
-      /## Pending Actions\s*\n[\s\S]*?(?=\n##|$)/,
-      "## Pending Actions\n\n_No pending actions._\n",
-    );
-    data.lastProcessed = new Date().toISOString();
-    fs.writeFileSync(heartbeatPath, matter.stringify("\n" + updatedContent + "\n", data), "utf-8");
+    // Run a rotating health check
+    const state = loadHeartbeatState();
+    const checkResult = runRotatingCheck(state);
 
-    console.log(`[heartbeat] Processed ${tasks.length} action(s)`);
+    if (checkResult) {
+      const { check, result, isAlert } = checkResult;
+      if (isAlert) {
+        state.alerts.push(`[${localTimestamp()}] ${check}: ${result}`);
+        // Keep only last 10 alerts
+        if (state.alerts.length > 10) state.alerts = state.alerts.slice(-10);
+        state.lastStatus = "alert";
+        console.log(`[heartbeat] ALERT ${check}: ${result}`);
+      } else {
+        state.lastStatus = "ok";
+      }
+      saveHeartbeatState(state);
+    }
+
+    // Update the Alerts section in the heartbeat file
+    if (state.alerts.length > 0) {
+      const alertsSection = "## Alerts\n\n" + state.alerts.map(a => `- ${a}`).join("\n") + "\n";
+      if (updatedContent.includes("## Alerts")) {
+        updatedContent = updatedContent.replace(
+          /## Alerts\s*\n[\s\S]*?(?=\n##|$)/,
+          alertsSection,
+        );
+      } else {
+        updatedContent = updatedContent.trimEnd() + "\n\n" + alertsSection;
+      }
+    } else if (updatedContent.includes("## Alerts")) {
+      // Remove alerts section when no alerts
+      updatedContent = updatedContent.replace(/\n*## Alerts\s*\n[\s\S]*?(?=\n##|$)/, "");
+    }
+
+    // Early exit: skip writing if idle and recently written
+    if (actionsProcessed === 0) {
+      const last = data.lastProcessed ? new Date(data.lastProcessed).getTime() : 0;
+      if (Date.now() - last < HEARTBEAT_WRITE_INTERVAL_MS && !checkResult?.isAlert) {
+        return; // HEARTBEAT_OK — nothing to update
+      }
+    }
+
+    // Write back with clean content (no newline accumulation)
+    data.lastProcessed = localTimestamp();
+    data.status = state.lastStatus;
+    fs.writeFileSync(heartbeatPath, matter.stringify(updatedContent.trim(), data), "utf-8");
+
+    if (actionsProcessed > 0) {
+      console.log(`[heartbeat] Processed ${actionsProcessed} action(s)`);
+    }
   } catch (err) {
     console.error("[heartbeat] Error:", err);
   }
@@ -187,7 +471,7 @@ async function healthCheck(): Promise<void> {
           const elapsed = now - new Date(data.lastHeartbeat).getTime();
           if (elapsed > OFFLINE_WORKER_SECONDS * 1000) {
             data.status = "offline";
-            fs.writeFileSync(filePath, matter.stringify("\n" + content + "\n", data), "utf-8");
+            fs.writeFileSync(filePath, matter.stringify(content.trim(), data), "utf-8");
             console.log(`[health] Worker ${data.workerId} marked offline`);
           }
         }
@@ -571,7 +855,7 @@ async function processNoteLinking(): Promise<void> {
 
       fs.writeFileSync(
         absPath,
-        matter.stringify("\n" + newContent + "\n", data),
+        matter.stringify(newContent.trim(), data),
         "utf-8",
       );
 
@@ -686,7 +970,7 @@ async function processTopicMOCs(): Promise<void> {
 
       fs.writeFileSync(
         mocPath,
-        matter.stringify("\n" + content + "\n", frontmatter),
+        matter.stringify(content, frontmatter),
         "utf-8",
       );
       created++;
@@ -708,7 +992,7 @@ async function processTopicMOCs(): Promise<void> {
       data.updatedAt = new Date().toISOString();
       fs.writeFileSync(
         mocPath,
-        matter.stringify("\n" + newContent + "\n", data),
+        matter.stringify(newContent.trim(), data),
         "utf-8",
       );
       updated++;
@@ -717,6 +1001,105 @@ async function processTopicMOCs(): Promise<void> {
 
   if (created + updated > 0) {
     console.log(`[moc] Created ${created}, updated ${updated} topic MOC(s)`);
+  }
+}
+
+// ─── OpenClaw Bridge & Watchdog ──────────────────────────────────────
+
+let bridgeCtx: BridgeContext | null = null;
+
+function initBridge(): void {
+  try {
+    bridgeCtx = startBridge(VAULT_PATH);
+  } catch (err) {
+    console.error("[openclaw-bridge] Failed to start:", err);
+    bridgeCtx = null;
+  }
+}
+
+async function openclawWatchdog(): Promise<void> {
+  if (!bridgeCtx) return;
+
+  const adapter = bridgeCtx.adapter;
+  const audit = bridgeCtx.audit;
+  const config = adapter.getConfig();
+
+  // Skip if integration is disabled
+  if (!config.enabled) return;
+
+  // 1. Check heartbeat staleness
+  const heartbeat = adapter.readHeartbeat();
+  if (heartbeat && heartbeat.lastHeartbeat) {
+    const elapsed = Date.now() - new Date(heartbeat.lastHeartbeat).getTime();
+    if (elapsed > 10 * 60_000) {
+      console.warn("[openclaw-watchdog] OpenClaw offline (no heartbeat for >10 min)");
+    } else if (elapsed > 2 * 60_000) {
+      console.warn("[openclaw-watchdog] OpenClaw degraded (no heartbeat for >2 min)");
+    }
+  }
+
+  // 2. Check rate anomalies from audit log
+  const recentEntries = audit.getRecentEntries(60); // last hour
+  const requestCount = recentEntries.filter(
+    (e) => e.status === "accepted",
+  ).length;
+  const errorCount = recentEntries.filter(
+    (e) => e.status === "error",
+  ).length;
+  const blockedCount = recentEntries.filter(
+    (e) => e.action === "access_blocked" || e.status === "blocked",
+  ).length;
+
+  // Circuit breaker: too many requests/hour
+  if (requestCount > (config.rateLimit.perHour || 500)) {
+    console.error(
+      `[openclaw-watchdog] CIRCUIT BREAKER: ${requestCount} requests in last hour exceeds limit`,
+    );
+    adapter.tripCircuitBreaker("rate_limit_exceeded");
+    return;
+  }
+
+  // Circuit breaker: high error rate
+  if (requestCount > 10 && errorCount / requestCount > 0.5) {
+    console.error(
+      `[openclaw-watchdog] CIRCUIT BREAKER: Error rate ${Math.round((errorCount / requestCount) * 100)}% exceeds 50%`,
+    );
+    adapter.tripCircuitBreaker("high_error_rate");
+    return;
+  }
+
+  // Circuit breaker: blocked access attempts
+  if (blockedCount > 5) {
+    console.error(
+      `[openclaw-watchdog] CIRCUIT BREAKER: ${blockedCount} blocked access attempts in last hour`,
+    );
+    adapter.tripCircuitBreaker("unauthorized_access_pattern");
+    return;
+  }
+
+  // 3. Check delegation task backlog
+  const pendingDir = path.join(VAULT_PATH, "_delegation", "pending");
+  if (fs.existsSync(pendingDir)) {
+    const openclawPending = fs
+      .readdirSync(pendingDir)
+      .filter((f) => f.includes("openclaw-"));
+    if (openclawPending.length > 20) {
+      console.warn(
+        `[openclaw-watchdog] High delegation backlog: ${openclawPending.length} pending OpenClaw tasks`,
+      );
+    }
+  }
+
+  // 4. Auto-recover circuit breaker (half-open → closed after cooldown)
+  if (config.circuitBreaker.status === "open" && config.circuitBreaker.openedAt) {
+    const elapsed =
+      Date.now() - new Date(config.circuitBreaker.openedAt).getTime();
+    if (elapsed > (config.circuitBreaker.cooldownMinutes ?? 30) * 60_000) {
+      console.log(
+        "[openclaw-watchdog] Circuit breaker cooldown elapsed, resetting to closed",
+      );
+      adapter.resetCircuitBreaker();
+    }
   }
 }
 
@@ -778,31 +1161,53 @@ const tasks: ScheduledTask[] = [
     fn: processTopicMOCs,
     lastRun: 0,
   },
+  {
+    name: "openclaw-watchdog",
+    intervalMs: 2 * 60 * 1000,
+    fn: openclawWatchdog,
+    lastRun: 0,
+  },
 ];
 
 async function runScheduler(): Promise<void> {
+  // Start the OpenClaw Bridge HTTP server
+  initBridge();
+
+  // Write initial status before running any tasks
+  await writeDaemonStatus();
+
   // Run all tasks immediately on startup
   for (const task of tasks) {
     try {
       await task.fn();
       task.lastRun = Date.now();
+      recordTaskRun(task.name, true);
     } catch (err) {
       console.error(`[${task.name}] Error on startup:`, err);
+      recordTaskRun(task.name, false, String(err));
     }
   }
+  await writeDaemonStatus();
 
   // Main loop — check every 30 seconds
   setInterval(async () => {
     const now = Date.now();
+    let statusDirty = false;
     for (const task of tasks) {
       if (now - task.lastRun >= task.intervalMs) {
         try {
           await task.fn();
+          recordTaskRun(task.name, true);
         } catch (err) {
           console.error(`[${task.name}] Error:`, err);
+          recordTaskRun(task.name, false, String(err));
         }
         task.lastRun = now;
+        statusDirty = true;
       }
+    }
+    if (statusDirty) {
+      await writeDaemonStatus();
     }
   }, 30_000);
 }
@@ -811,12 +1216,14 @@ async function runScheduler(): Promise<void> {
 
 process.on("SIGINT", () => {
   console.log("\n[daemon] Shutting down...");
+  if (bridgeCtx) stopBridge(bridgeCtx);
   search.close();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   console.log("[daemon] Received SIGTERM, shutting down...");
+  if (bridgeCtx) stopBridge(bridgeCtx);
   search.close();
   process.exit(0);
 });

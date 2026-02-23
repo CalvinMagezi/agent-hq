@@ -36,6 +36,9 @@ export interface BaseHarness {
     options?: HarnessCallOptions,
   ): Promise<string>;
 
+  /** Force-kill the running CLI process for a channel. Returns true if a process was killed. */
+  kill(channelId: string): boolean;
+
   resetSession(channelId: string): Promise<void>;
   getSession(channelId: string): { sessionId: string | null };
 

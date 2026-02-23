@@ -10,6 +10,7 @@
 import * as path from "path";
 import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
+import { recordWorkflowRun } from "./statusHelper.js";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, "../..", ".vault");
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -17,6 +18,7 @@ const MODEL = process.env.PREFERENCE_MODEL ?? "google/gemini-2.5-flash";
 
 if (!OPENROUTER_API_KEY) {
   console.error("Error: OPENROUTER_API_KEY is required.");
+  recordWorkflowRun(VAULT_PATH, "preference-tracker", false, "OPENROUTER_API_KEY missing");
   process.exit(1);
 }
 
@@ -100,10 +102,12 @@ Current preferences (update or extend, don't remove without evidence):\n${curren
   data.lastUpdated = new Date().toISOString();
   fs.writeFileSync(prefsPath, matter.stringify("\n" + updatedPrefs + "\n", data), "utf-8");
 
+  recordWorkflowRun(VAULT_PATH, "preference-tracker", true);
   console.log("[preference-tracker] Preferences updated.");
 }
 
 main().catch((err) => {
+  recordWorkflowRun(VAULT_PATH, "preference-tracker", false, String(err));
   console.error("[preference-tracker] Fatal error:", err);
   process.exit(1);
 });

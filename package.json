@@ -19,6 +19,7 @@
     "chat": "bun run scripts/agent-hq-chat.ts",
     "daemon": "bun run scripts/agent-hq-daemon.ts",
     "daemon:install": "bash scripts/install-launchd.sh",
+    "status": "bun run scripts/agent-hq-status.ts",
     "setup": "bun run scripts/setup.ts"
   },
   "devDependencies": {

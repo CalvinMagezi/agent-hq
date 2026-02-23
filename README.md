@@ -1,8 +1,37 @@
 # Agent-HQ
 
-A local-first AI agent hub built on an Obsidian vault. Agent-HQ gives you a personal AI assistant with full access to your machine, controllable from the terminal or Discord.
+> **📚 Full docs, architecture deep-dives, and future vision:**
+> **[Agent-HQ NotebookLM →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f)**
+> *Explore the architecture, ask questions, generate audio overviews, and visualize the system with Google's NotebookLM.*
 
-All data lives in an Obsidian vault (`.vault/`) on the local filesystem — no cloud backend required.
+---
+
+**Your personal AI assistant that lives on your machine.** Agent-HQ connects your favourite AI tools (Claude Code, Gemini CLI, OpenCode) to Discord, giving you a powerful AI assistant accessible from anywhere — while keeping all your data 100% local in an [Obsidian](https://obsidian.md) vault.
+
+No cloud backend. No vendor lock-in. Your machine, your data, your agents.
+
+```
+You (Discord DM)
+     │
+     ▼
+Discord Relay ──► Claude Code  ┐
+                 Gemini CLI    ├──► .vault/ (local Obsidian vault)
+                 OpenCode      ┘         │
+                                         ├── Job Queue      (atomic markdown files)
+                                         ├── Memory         (SOUL, MEMORY, PREFERENCES)
+                                         ├── Notes + Search (SQLite FTS5 + embeddings)
+                                         └── Delegation     ──► HQ Agent ──► Shell/Filesystem
+```
+
+## What You Get
+
+- **Discord as your AI interface** — DM any of your bots, get responses from Claude, Gemini, or OpenCode
+- **Persistent memory** — The agent remembers facts, goals, and context across sessions
+- **Local job queue** — Queue background tasks, get results back in Discord
+- **Multi-agent orchestration** — HQ delegates tasks to the right specialist bot
+- **Scheduled workflows** — Daily web digests, memory consolidation, project tracking
+- **Voice messages** — Send voice notes, get transcribed and processed responses
+- **Full machine access** — Agent can run code, edit files, push git commits, search your vault
 
 ## Architecture
 
@@ -25,19 +54,6 @@ All data lives in an Obsidian vault (`.vault/`) on the local filesystem — no c
 │   ├── agent-hq-daemon.ts # Background workflow daemon
 │   └── workflows/         # Scheduled daily/weekly workflows
 └── turbo.json             # Turborepo pipeline config
-```
-
-### How the pieces fit together
-
-```
-Discord DM ──> Discord Relay ──> CLI Harnesses (Claude Code, OpenCode, Gemini)
-                    │                   │
-                    ├── .vault/ ◄───────┘ (delegation, memory, context)
-                    │     │
-Terminal Chat ──────┘     ├── Job Queue (markdown files, atomic rename)
-                          ├── Notes + Search (SQLite FTS5 + embeddings)
-                          ├── Memory (SOUL, MEMORY, PREFERENCES)
-                          └── Delegation Queue ──> HQ Agent ──> Shell/Filesystem
 ```
 
 - **HQ Agent** — Polls vault for jobs, executes with Pi SDK (bash, files, web search), writes logs
@@ -126,7 +142,7 @@ Only needed if you want background job processing.
 
 ```bash
 OPENROUTER_API_KEY=your_key
-DEFAULT_MODEL=moonshotai/kimi-k2.5
+DEFAULT_MODEL=gemini-2.5-flash
 ```
 
 ### 4. Start services
@@ -138,6 +154,21 @@ bun run chat         # Terminal chat interface (optional)
 bun run daemon       # Background workflow daemon (optional)
 ```
 
+## Setup for AI Agents
+
+If you're an AI agent setting up Agent-HQ on behalf of a user, follow these steps:
+
+1. **Check prerequisites**: Verify `bun --version` ≥ 1.1.0 and at least one CLI harness is installed
+2. **Clone and install**: `git clone ... && bun install`
+3. **Run setup**: `bun run setup` — creates `.vault/` with all required structure
+4. **Check vault health**: `bun run status` — validates system files and directory layout
+5. **Configure env files**: Copy `.env.example` templates, fill in tokens from the user
+6. **Security note**: Never commit `.env.local` files. All credentials go in gitignored env files only.
+7. **Start services**: `bun run relay` is the minimum — add `agent` and `daemon` for full capability
+8. **Verify**: DM the Discord bot — if it responds, setup is complete
+
+The vault schema, job types, delegation flow, and all system files are documented in the [NotebookLM workspace](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f).
+
 ## Development Commands
 
 ```bash
@@ -145,6 +176,7 @@ bun run build        # Workspace-wide production build
 bun run lint         # Lint all packages
 bun run check        # Lint + build all packages
 bun run setup        # Initialize/repair vault directory structure
+bun run status       # Check system health
 ```
 
 ## Discord Relay Commands
@@ -174,3 +206,25 @@ DM your bot or @mention it in a server. Any non-command message is sent to the C
 | Agent | Pi SDK |
 | Discord | discord.js v14 |
 | Build | Turborepo, Bun workspaces |
+
+## Acknowledgements
+
+Agent-HQ stands on the shoulders of some great projects and ideas:
+
+- **[Pi SDK](https://github.com/mariozechner/pi)** by [@mariozechner](https://github.com/mariozechner) — The agent execution engine powering the HQ worker. Pi's tool system, session management, and coding agent are the backbone of everything the HQ agent does.
+
+- **[claude-telegram-relay](https://github.com/godagoo/claude-telegram-relay)** by [@godagoo](https://github.com/godagoo) — Inspired the architecture for a secure, ban-resistant relay that uses official CLI tools rather than unofficial API wrappers. The pattern of wrapping CLI harnesses instead of direct API access is what keeps this relay safe and sustainable.
+
+- **[OpenClaw](https://github.com/opencode-ai/opencode)** — Inspired the multi-harness design and the idea that different AI tools have different strengths worth routing to explicitly.
+
+- **[Obsidian](https://obsidian.md)** — The knowledge management app that doubles as our entire database. The vault format (markdown + YAML frontmatter + wikilinks) is the foundation of Agent-HQ's local-first architecture.
+
+- **Anthropic's research on agent orchestration** — The [building effective agents](https://www.anthropic.com/engineering/building-c-compiler) post shaped how we think about multi-agent delegation, tool design, and keeping humans in the loop for dangerous operations.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup guide, project principles, and PR process.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

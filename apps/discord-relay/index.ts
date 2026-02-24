@@ -43,10 +43,29 @@ if (!(await acquireLock(RELAY_DIR))) {
 const sharedConfig = buildConfig();
 const bots: BotInstance[] = [];
 
+// ── Shared VaultSync instance — one watcher + one SQLite writer for all bots ──
+// Passing it to each BotInstance prevents multiple fs.watch + SQLITE_BUSY issues.
+let sharedSync: any = null;
+if (sharedConfig.vaultPath) {
+  try {
+    const { VaultSync } = await import("@repo/vault-sync");
+    sharedSync = new VaultSync({
+      vaultPath: sharedConfig.vaultPath,
+      debounceMs: 200,
+      stabilityMs: 500,
+      fullScanIntervalMs: 3_600_000,
+    });
+    await sharedSync.start();
+    console.log("[Relay] Shared sync engine started.");
+  } catch (err: any) {
+    console.warn("[Relay] Shared sync engine failed, bots will use polling:", err.message);
+  }
+}
+
 // ── Claude Code Bot (optional — set DISCORD_BOT_TOKEN to enable) ────
 if (process.env.DISCORD_BOT_TOKEN) {
   const claudeHarness = new ClaudeHarness(sharedConfig);
-  bots.push(new BotInstance(sharedConfig, claudeHarness));
+  bots.push(new BotInstance(sharedConfig, claudeHarness, sharedSync));
   console.log("[Claude Code] Bot enabled — token configured.");
 }
 
@@ -64,7 +83,7 @@ if (process.env.DISCORD_BOT_TOKEN_OPENCODE) {
     projectDir: process.env.PROJECT_DIR || process.cwd(),
     relayDir: opencodeConfig.relayDir,
   });
-  bots.push(new BotInstance(opencodeConfig, opencodeHarness));
+  bots.push(new BotInstance(opencodeConfig, opencodeHarness, sharedSync));
   console.log("[OpenCode] Bot enabled — token configured.");
 }
 
@@ -84,7 +103,7 @@ if (process.env.DISCORD_BOT_TOKEN_GEMINI) {
     relayDir: geminiRelayDir,
     defaultModel: process.env.GEMINI_DEFAULT_MODEL,
   });
-  bots.push(new BotInstance(geminiConfig, geminiHarness));
+  bots.push(new BotInstance(geminiConfig, geminiHarness, sharedSync));
   console.log("[Gemini CLI] Bot enabled — token configured.");
 }
 

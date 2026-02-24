@@ -301,19 +301,59 @@ export class AgentAdapter {
     }
   }
 
+  // ─── Sync Engine Integration ──────────────────────────────────────
+
+  private syncClient: any = null;
+
+  /**
+   * Initialize the sync engine for event-driven job detection.
+   * Call this before onUpdate() for faster job pickup.
+   */
+  async initSync(): Promise<void> {
+    try {
+      const { SyncedVaultClient } = await import("@repo/vault-sync");
+      const syncedVault = new SyncedVaultClient(this.vaultPath);
+      await syncedVault.startSync();
+      this.syncClient = syncedVault;
+      this.vault = syncedVault; // Upgrade vault to synced version
+      console.log("[agent-adapter] Vault sync engine initialized");
+    } catch (err) {
+      console.warn("[agent-adapter] Sync engine not available, using polling:", err);
+    }
+  }
+
+  /**
+   * Stop the sync engine on shutdown.
+   */
+  async stopSync(): Promise<void> {
+    if (this.syncClient?.stopSync) {
+      await this.syncClient.stopSync();
+    }
+  }
+
   // ─── Convex Subscription Compatibility ─────────────────────────────
 
   /**
-   * Simulates Convex's onUpdate subscription with file polling.
-   * Watches the _jobs/pending/ directory for changes.
+   * Event-driven job detection with polling fallback.
+   *
+   * If sync engine is initialized (via initSync), fires callback immediately
+   * when a job file appears in _jobs/pending/ via fs events. Falls back to
+   * 30s polling as a safety net.
+   *
+   * Without sync engine, polls every 5 seconds (legacy behavior).
    */
   onUpdate(
     _queryRef: any,
     _args: any,
     callback: (result: any) => void,
   ): () => void {
-    // Poll the pending jobs directory every 5 seconds
-    const interval = setInterval(async () => {
+    const cleanups: (() => void)[] = [];
+
+    // Guard against concurrent invocations from rapid event bursts
+    let delivering = false;
+    const deliverJob = async () => {
+      if (delivering) return;
+      delivering = true;
       try {
         const job = await this.vault.getPendingJob("any");
         if (job) {
@@ -331,10 +371,28 @@ export class AgentAdapter {
           });
         }
       } catch {
-        // Ignore polling errors
+        // Ignore
+      } finally {
+        delivering = false;
       }
-    }, 5000);
+    };
 
-    return () => clearInterval(interval);
+    // If sync engine is available, subscribe to job:created events
+    if (this.syncClient?.on) {
+      const unsub = this.syncClient.on("job:created", () => deliverJob());
+      cleanups.push(unsub);
+
+      // Safety-net polling at 30s (down from 5s)
+      const interval = setInterval(deliverJob, 30_000);
+      cleanups.push(() => clearInterval(interval));
+    } else {
+      // Legacy polling at 5s
+      const interval = setInterval(deliverJob, 5000);
+      cleanups.push(() => clearInterval(interval));
+    }
+
+    return () => {
+      for (const cleanup of cleanups) cleanup();
+    };
   }
 }

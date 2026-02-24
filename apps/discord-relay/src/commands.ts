@@ -57,6 +57,7 @@ function getModelAliases(harnessName: string): Record<string, string> {
 export interface CommandResult {
   handled: boolean;
   response?: string;
+  file?: { name: string; buffer: Buffer };
 }
 
 /**
@@ -901,6 +902,7 @@ export async function handleCommand(
         ].join("\n"),
       };
     }
+
 
     default:
       // Unknown !command — don't eat it, pass to harness

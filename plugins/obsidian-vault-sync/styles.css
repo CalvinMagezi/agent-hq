@@ -1,0 +1,98 @@
+/* Agent-HQ Vault Sync — Plugin Styles */
+
+/* Status bar */
+.vault-sync-status {
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.vault-sync-status-synced {
+  color: var(--text-success);
+}
+
+.vault-sync-status-syncing {
+  color: var(--text-accent);
+}
+
+.vault-sync-status-connecting {
+  color: var(--text-muted);
+}
+
+.vault-sync-status-disconnected {
+  color: var(--text-muted);
+}
+
+.vault-sync-status-error {
+  color: var(--text-error);
+}
+
+/* Conflict modal */
+.vault-sync-conflict-modal {
+  max-width: 600px;
+}
+
+.vault-sync-conflict-item {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.vault-sync-conflict-item h4 {
+  margin: 0 0 4px 0;
+  font-family: var(--font-monospace);
+  font-size: 13px;
+}
+
+.vault-sync-conflict-hashes {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  margin-bottom: 8px;
+}
+
+/* Device modal */
+.vault-sync-device-modal {
+  max-width: 500px;
+}
+
+.vault-sync-device-list {
+  list-style: none;
+  padding: 0;
+}
+
+.vault-sync-device-list li {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.vault-sync-device-id {
+  font-family: var(--font-monospace);
+  font-size: 13px;
+}
+
+.vault-sync-device-status-online {
+  color: var(--text-success);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.vault-sync-no-devices {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.vault-sync-pairing-code {
+  font-family: var(--font-monospace);
+  font-size: 32px;
+  font-weight: bold;
+  text-align: center;
+  padding: 16px;
+  letter-spacing: 8px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.vault-sync-pairing-code-visible {
+  color: var(--text-accent);
+}

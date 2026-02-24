@@ -14,7 +14,8 @@
     "./models": "./src/models.ts",
     "./types": "./src/types.ts",
     "./agent-adapter": "./src/agentAdapter.ts",
-    "./openclaw-adapter": "./src/openclawAdapter.ts"
+    "./openclaw-adapter": "./src/openclawAdapter.ts",
+    "./trace": "./src/traceDb.ts"
   },
   "dependencies": {
     "gray-matter": "^4.0.3",

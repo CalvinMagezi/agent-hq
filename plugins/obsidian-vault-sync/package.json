@@ -1,0 +1,17 @@
+{
+  "name": "obsidian-vault-sync",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "bun run esbuild.config.mjs production",
+    "dev": "bun run esbuild.config.mjs"
+  },
+  "dependencies": {
+    "@repo/vault-sync-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0",
+    "obsidian": "^1.7.2",
+    "@types/node": "^22.0.0"
+  }
+}

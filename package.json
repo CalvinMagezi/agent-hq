@@ -3,7 +3,8 @@
   "private": true,
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "plugins/*"
   ],
   "scripts": {
     "dev": "turbo dev",
@@ -20,7 +21,11 @@
     "daemon": "bun run scripts/agent-hq-daemon.ts",
     "daemon:install": "bash scripts/install-launchd.sh",
     "status": "bun run scripts/agent-hq-status.ts",
-    "setup": "bun run scripts/setup.ts"
+    "setup": "bun run scripts/setup.ts",
+    "sync-server": "bun run packages/vault-sync-server/src/index.ts",
+    "relay-server": "bun run packages/agent-relay-server/src/index.ts",
+    "plugin:build": "cd plugins/obsidian-vault-sync && bun run build",
+    "plugin:install": "bash scripts/install-obsidian-plugin.sh"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

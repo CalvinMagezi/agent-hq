@@ -22,6 +22,14 @@ dist/
 .DS_Store
 *.pem
 context.md
+chat.md
+
+# Bun build artifacts
+*.bun-build
+
+# SQLite WAL/SHM files
+*.db-shm
+*.db-wal
 
 # debug
 npm-debug.log*

@@ -692,6 +692,10 @@ export class VaultClient {
       deadlineMs?: number;
       dependsOn?: string[];
       modelOverride?: string;
+      traceId?: string;
+      spanId?: string;
+      parentSpanId?: string;
+      securityConstraints?: import("./types").DelegationSecurityConstraints;
     }>,
   ): Promise<void> {
     for (const task of tasks) {
@@ -711,11 +715,25 @@ export class VaultClient {
           modelOverride: task.modelOverride ?? null,
           claimedBy: null,
           claimedAt: null,
+          traceId: task.traceId ?? null,
+          spanId: task.spanId ?? null,
+          parentSpanId: task.parentSpanId ?? null,
+          securityConstraints: task.securityConstraints ?? null,
           createdAt: this.nowISO(),
         },
         `# Task Instruction\n\n${task.instruction}`,
       );
     }
+  }
+
+  /**
+   * Read a full result file stored in _delegation/results/.
+   * Returns null if not found.
+   */
+  readFullResult(taskId: string): string | null {
+    const filePath = this.resolve("_delegation/results", `result-${taskId}.md`);
+    if (!fs.existsSync(filePath)) return null;
+    return fs.readFileSync(filePath, "utf-8");
   }
 
   /**
@@ -1296,6 +1314,10 @@ export class VaultClient {
       result: data.result,
       error: data.error,
       createdAt: data.createdAt ?? "",
+      traceId: data.traceId ?? undefined,
+      spanId: data.spanId ?? undefined,
+      parentSpanId: data.parentSpanId ?? undefined,
+      securityConstraints: data.securityConstraints ?? undefined,
       _filePath: filePath,
     };
   }

@@ -9,6 +9,8 @@ import {
   type Message,
 } from "discord.js";
 import { writeFile, unlink, mkdir } from "fs/promises";
+import * as fs from "fs";
+import * as path from "path";
 import { join } from "path";
 import type { BaseHarness } from "./harnesses/base.js";
 import { ContextEnricher } from "./context.js";
@@ -19,6 +21,8 @@ import { classifyIntent } from "./intent.js";
 import { handleCommand } from "./commands.js";
 import { createTranscriber, type Transcriber } from "./transcribe.js";
 import type { RelayConfig } from "./types.js";
+
+const MAX_INLINE_RESULT = 8000;
 
 const MAX_DEDUP_SIZE = 200;
 
@@ -63,14 +67,18 @@ export class BotInstance {
   private processedMessages = new Set<string>();
   private agentId: string;
   private harnessType: string;
+  private syncCleanup: (() => void) | null = null;
+  /** Shared VaultSync instance injected from index.ts — avoids multiple SQLite writers */
+  private sharedSync: any | null = null;
 
-  constructor(config: RelayConfig, harness: BaseHarness) {
+  constructor(config: RelayConfig, harness: BaseHarness, sharedSync?: any) {
     this.config = config;
     this.harness = harness;
     this.agentId = `discord-relay-${harness.harnessName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
     this.harnessType = harness.harnessName.toLowerCase().replace(/\s+/g, "-");
     this.convex = new ConvexAPI(config);
     this.enricher = new ContextEnricher(this.convex, config, this.harnessType);
+    this.sharedSync = sharedSync ?? null;
   }
 
   async start(): Promise<void> {
@@ -125,9 +133,9 @@ export class BotInstance {
       await this.convex.sendHeartbeat(this.agentId, "online", heartbeatMeta);
     }, 20000);
 
-    // Poll for delegated tasks from HQ orchestrator every 5 seconds
-    this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 5000);
-    console.log(`[${this.harness.harnessName}] Delegation polling started (every 5s)`);
+    // Event-driven delegation with polling fallback
+    await this.initSyncDelegation();
+    console.log(`[${this.harness.harnessName}] Delegation monitoring started`);
   }
 
   async stop(): Promise<void> {
@@ -139,11 +147,67 @@ export class BotInstance {
       clearInterval(this.delegationInterval);
       this.delegationInterval = null;
     }
+    if (this.syncCleanup) {
+      this.syncCleanup();
+      this.syncCleanup = null;
+    }
     await this.convex.sendHeartbeat(this.agentId, "offline").catch(() => {});
     if (this.client) {
       await this.client.destroy();
       this.client = null;
       console.log(`[${this.harness.harnessName}] Discord bot stopped.`);
+    }
+  }
+
+  /** Initialize event-driven delegation monitoring with sync engine fallback to polling. */
+  private async initSyncDelegation(): Promise<void> {
+    // Use injected shared sync instance to avoid multiple VaultSync instances
+    // opening the same SQLite DB (causes SQLITE_BUSY and duplicate fs.watch watchers)
+    const sync = this.sharedSync;
+    if (sync?.on) {
+      try {
+        const unsub = sync.on("task:created", () => {
+          this.checkPendingDelegations();
+        });
+        // syncCleanup only unsubscribes the listener — does NOT stop the shared sync
+        this.syncCleanup = () => unsub();
+        this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 30_000);
+        console.log(`[${this.harness.harnessName}] Using shared sync engine — event-driven delegation with 30s fallback`);
+        return;
+      } catch (err) {
+        console.warn(`[${this.harness.harnessName}] Could not subscribe to shared sync:`, err);
+      }
+    }
+
+    // No shared sync — create a dedicated one for this bot
+    try {
+      const { VaultSync } = await import("@repo/vault-sync");
+      const vaultPath = this.config.vaultPath;
+      if (!vaultPath) throw new Error("No vault path configured");
+
+      const ownSync = new VaultSync({
+        vaultPath,
+        debounceMs: 200,
+        stabilityMs: 500,
+        fullScanIntervalMs: 3_600_000,
+      });
+      await ownSync.start();
+
+      const unsub = ownSync.on("task:created", () => {
+        this.checkPendingDelegations();
+      });
+
+      this.syncCleanup = () => {
+        unsub();
+        ownSync.stop();
+      };
+
+      this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 30_000);
+      console.log(`[${this.harness.harnessName}] Sync engine active — event-driven delegation with 30s fallback`);
+    } catch (err) {
+      // Fallback to legacy 5s polling if sync engine is unavailable
+      console.warn(`[${this.harness.harnessName}] Sync engine not available, using 5s polling:`, err);
+      this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 5000);
     }
   }
 
@@ -194,26 +258,143 @@ export class BotInstance {
         await this.convex.updateDelegation(task._id, "running");
         this.setBotPresence("busy");
 
+        // ── Trace recording (best-effort) ───────────────────────────
+        let traceDb: any = null;
+        let relaySpanId: string | null = null;
+        if (task.traceId && this.config.vaultPath) {
+          try {
+            const { TraceDB } = await import("@repo/vault-client/trace");
+            traceDb = new TraceDB(this.config.vaultPath);
+            relaySpanId = traceDb.createSpan({
+              traceId: task.traceId,
+              parentSpanId: task.spanId,
+              taskId: task.taskId,
+              type: "relay_exec",
+              name: `${this.harnessType}:${task.taskId}`,
+            });
+            traceDb.addSpanEvent(relaySpanId, task.traceId, "claimed", `Claimed by ${this.agentId}`);
+          } catch {
+            // Non-fatal — tracing is best-effort
+            traceDb = null;
+            relaySpanId = null;
+          }
+        }
+
+        // ── Cancellation signal path ─────────────────────────────────
+        const signalsDir = this.config.vaultPath
+          ? path.join(this.config.vaultPath, "_delegation/signals")
+          : null;
+        const signalPath = signalsDir
+          ? path.join(signalsDir, `cancel-${task.taskId}.md`)
+          : null;
+
+        // Clean up any stale signal from a previous run
+        if (signalPath && fs.existsSync(signalPath)) {
+          try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
+        }
+
+        let cancelCheckInterval: ReturnType<typeof setInterval> | null = null;
+        let wasCancelled = false;
+
         try {
-          // Execute via harness
+          // ── Build instruction with security constraints ───────────────
+          let instruction = task.instruction;
+          const sc = task.securityConstraints;
+          if (sc) {
+            const lines: string[] = [
+              "SECURITY CONSTRAINTS (enforced — violation will fail the task):",
+            ];
+            if (sc.noGit) lines.push("- Do NOT run any git commands");
+            if (sc.noNetwork) lines.push("- Do NOT make any network requests");
+            if (sc.filesystemAccess === "read-only") lines.push("- Read-only filesystem access — do NOT write or delete files");
+            if (sc.allowedDirectories?.length) lines.push(`- Only access these directories: ${sc.allowedDirectories.join(", ")}`);
+            if (sc.blockedCommands?.length) lines.push(`- Do NOT run commands matching: ${sc.blockedCommands.join(", ")}`);
+            if (lines.length > 1) {
+              instruction = `${lines.join("\n")}\n\n${instruction}`;
+            }
+          }
+
           const channelId = task.discordChannelId || `delegation-${task.taskId}`;
           const options: any = {};
           if (task.modelOverride) {
             options.channelSettings = { model: task.modelOverride };
           }
 
-          const result = await this.harness.call(
-            task.instruction,
-            channelId,
-            options,
-          );
+          // ── Start cancellation polling ────────────────────────────────
+          if (signalPath) {
+            cancelCheckInterval = setInterval(() => {
+              if (fs.existsSync(signalPath)) {
+                wasCancelled = true;
+                this.harness.kill?.(channelId);
+                if (cancelCheckInterval) {
+                  clearInterval(cancelCheckInterval);
+                  cancelCheckInterval = null;
+                }
+              }
+            }, 2000);
+          }
+
+          // ── Execute via harness (with optional timeout) ───────────────
+          const maxMs = sc?.maxExecutionMs;
+          let result: string;
+          if (maxMs) {
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`Task timed out after ${maxMs}ms`)), maxMs),
+            );
+            result = await Promise.race([
+              this.harness.call(instruction, channelId, options),
+              timeoutPromise,
+            ]);
+          } else {
+            result = await this.harness.call(instruction, channelId, options);
+          }
+
+          // Stop cancellation polling
+          if (cancelCheckInterval) {
+            clearInterval(cancelCheckInterval);
+            cancelCheckInterval = null;
+          }
+
+          // Check if cancelled mid-execution
+          if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
+            wasCancelled = true;
+            const partial = result.substring(0, 500);
+            await this.convex.updateDelegation(task._id, "cancelled", partial, "Cancelled by HQ");
+            if (signalPath && fs.existsSync(signalPath)) {
+              try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
+            }
+            if (traceDb && relaySpanId && task.traceId) {
+              traceDb.addSpanEvent(relaySpanId, task.traceId, "cancelled", "Cancelled by HQ signal");
+              traceDb.completeSpan(relaySpanId, "cancelled");
+            }
+            console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled`);
+            continue;
+          }
+
+          // ── Result chunking — overflow large results ──────────────────
+          let inlineResult: string;
+          if (result.length > MAX_INLINE_RESULT && this.config.vaultPath) {
+            try {
+              const resultsDir = path.join(this.config.vaultPath, "_delegation/results");
+              fs.mkdirSync(resultsDir, { recursive: true });
+              const resultFile = path.join(resultsDir, `result-${task.taskId}.md`);
+              fs.writeFileSync(resultFile, result, "utf-8");
+              const summary = result.substring(0, 500);
+              inlineResult = `${summary}\n\n[Full result: _delegation/results/result-${task.taskId}.md (${result.length} chars)]`;
+            } catch {
+              inlineResult = result.substring(0, MAX_INLINE_RESULT);
+            }
+          } else {
+            inlineResult = result;
+          }
 
           // Report success
-          await this.convex.updateDelegation(
-            task._id,
-            "completed",
-            result.substring(0, 10000), // Cap result size
-          );
+          await this.convex.updateDelegation(task._id, "completed", inlineResult);
+
+          if (traceDb && relaySpanId && task.traceId) {
+            traceDb.addSpanEvent(relaySpanId, task.traceId, "completed", `Result: ${result.length} chars`);
+            traceDb.completeSpan(relaySpanId, "completed");
+          }
 
           console.log(
             `[${this.harness.harnessName}] Delegation: task ${task.taskId} completed (${result.length} chars)`,
@@ -222,9 +403,7 @@ export class BotInstance {
           // Post result to Discord channel if specified
           if (task.discordChannelId && this.client) {
             try {
-              const channel = await this.client.channels.fetch(
-                task.discordChannelId,
-              );
+              const channel = await this.client.channels.fetch(task.discordChannelId);
               if (channel && "send" in channel) {
                 const header = `**[HQ Delegation Result]** Task: \`${task.taskId}\`\n`;
                 const chunks = chunkMessage(header + result);
@@ -240,19 +419,44 @@ export class BotInstance {
             }
           }
         } catch (execErr: any) {
-          // Report failure
-          await this.convex.updateDelegation(
-            task._id,
-            "failed",
-            undefined,
-            execErr.message || String(execErr),
-          );
-          console.error(
-            `[${this.harness.harnessName}] Delegation: task ${task.taskId} failed:`,
-            execErr.message,
-          );
+          // Stop cancellation polling
+          if (cancelCheckInterval) {
+            clearInterval(cancelCheckInterval);
+            cancelCheckInterval = null;
+          }
+
+          if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
+            // Harness threw because it was killed by cancellation
+            await this.convex.updateDelegation(task._id, "cancelled", undefined, "Cancelled by HQ");
+            if (signalPath && fs.existsSync(signalPath)) {
+              try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
+            }
+            if (traceDb && relaySpanId && task.traceId) {
+              traceDb.addSpanEvent(relaySpanId, task.traceId, "cancelled", "Cancelled by HQ signal");
+              traceDb.completeSpan(relaySpanId, "cancelled");
+            }
+            console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled (harness killed)`);
+          } else {
+            await this.convex.updateDelegation(
+              task._id,
+              "failed",
+              undefined,
+              execErr.message || String(execErr),
+            );
+            if (traceDb && relaySpanId && task.traceId) {
+              traceDb.addSpanEvent(relaySpanId, task.traceId, "failed", execErr.message || String(execErr));
+              traceDb.completeSpan(relaySpanId, "failed");
+            }
+            console.error(
+              `[${this.harness.harnessName}] Delegation: task ${task.taskId} failed:`,
+              execErr.message,
+            );
+          }
         } finally {
           this.setBotPresence("online");
+          if (traceDb) {
+            try { traceDb.close(); } catch { /* ignore */ }
+          }
         }
       }
     } catch (err: any) {
@@ -376,7 +580,12 @@ export class BotInstance {
     try {
       const cmdResult = await handleCommand(content, message.channelId, this.harness, this.config, this.convex);
       if (cmdResult.handled) {
-        if (cmdResult.response) {
+        if (cmdResult.file) {
+          await message.reply({
+            content: cmdResult.response,
+            files: [{ attachment: cmdResult.file.buffer, name: cmdResult.file.name }],
+          });
+        } else if (cmdResult.response) {
           await message.reply(cmdResult.response);
         }
         return;

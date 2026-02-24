@@ -47,6 +47,10 @@ export interface Job {
   stats?: JobStats;
   createdAt: string;
   updatedAt?: string;
+  /** Distributed trace ID for orchestration flows */
+  traceId?: string;
+  /** Root span ID for this job */
+  spanId?: string;
   /** Path to the job file on disk */
   _filePath: string;
 }
@@ -91,6 +95,21 @@ export interface SearchResult {
   _filePath: string;
 }
 
+export interface DelegationSecurityConstraints {
+  /** Regex patterns for blocked shell commands (e.g., ["^git\\s", "rm\\s+-rf"]) */
+  blockedCommands?: string[];
+  /** Filesystem access level */
+  filesystemAccess?: "full" | "read-only" | "restricted";
+  /** Allowed directory paths when filesystemAccess is "restricted" */
+  allowedDirectories?: string[];
+  /** Block all git commands */
+  noGit?: boolean;
+  /** Block network access */
+  noNetwork?: boolean;
+  /** Max execution time in ms (overrides deadlineMs) */
+  maxExecutionMs?: number;
+}
+
 export interface DelegatedTask {
   taskId: string;
   jobId: string;
@@ -105,6 +124,14 @@ export interface DelegatedTask {
   result?: string;
   error?: string;
   createdAt: string;
+  /** Distributed trace ID — links back to parent orchestration */
+  traceId?: string;
+  /** Span ID for this delegation task */
+  spanId?: string;
+  /** Parent span ID (the HQ job span) */
+  parentSpanId?: string;
+  /** Security constraints enforced at the relay level */
+  securityConstraints?: DelegationSecurityConstraints;
   _filePath: string;
 }
 

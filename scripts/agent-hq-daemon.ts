@@ -17,6 +17,7 @@
 import * as path from "path";
 import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
+import { SyncedVaultClient } from "@repo/vault-sync";
 import { SearchClient } from "@repo/vault-client/search";
 import { calculateCost } from "@repo/vault-client/pricing";
 import { startBridge, stopBridge, type BridgeContext } from "./openclaw-bridge";
@@ -38,7 +39,7 @@ const RELAY_STALE_SECONDS = 60;
 
 // ─── Initialization ──────────────────────────────────────────────────
 
-const vault = new VaultClient(VAULT_PATH);
+const vault = new SyncedVaultClient(VAULT_PATH);
 let search: SearchClient;
 
 try {
@@ -654,6 +655,49 @@ async function cleanupStaleJobs(): Promise<void> {
   }
 }
 
+// ─── Task: Delegation Artifact Cleanup (every 1 hr) ─────────────────
+
+async function cleanupDelegationArtifacts(): Promise<void> {
+  const now = Date.now();
+  const signalMaxAge = 60 * 60 * 1000;     // 1 hour — signals should be consumed fast
+  const resultMaxAge = 7 * 24 * 3600 * 1000; // 7 days — same as job files
+  let cleaned = 0;
+
+  // Clean up stale cancellation signals
+  const signalsDir = path.join(VAULT_PATH, "_delegation/signals");
+  if (fs.existsSync(signalsDir)) {
+    for (const file of fs.readdirSync(signalsDir).filter(f => f.endsWith(".md"))) {
+      try {
+        const filePath = path.join(signalsDir, file);
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > signalMaxAge) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch { /* skip */ }
+    }
+  }
+
+  // Clean up old result overflow files
+  const resultsDir = path.join(VAULT_PATH, "_delegation/results");
+  if (fs.existsSync(resultsDir)) {
+    for (const file of fs.readdirSync(resultsDir).filter(f => f.endsWith(".md"))) {
+      try {
+        const filePath = path.join(resultsDir, file);
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > resultMaxAge) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch { /* skip */ }
+    }
+  }
+
+  if (cleaned > 0) {
+    console.log(`[delegation-cleanup] Removed ${cleaned} stale artifact(s)`);
+  }
+}
+
 // ─── Task: Note Linking (every 2 hr) ─────────────────────────────────
 
 const SIMILARITY_THRESHOLD = 0.75;
@@ -1121,7 +1165,7 @@ const tasks: ScheduledTask[] = [
   },
   {
     name: "heartbeat",
-    intervalMs: 2 * 60 * 1000,
+    intervalMs: 5 * 60 * 1000, // Lengthened from 2min; events handle fast path
     fn: processHeartbeat,
     lastRun: 0,
   },
@@ -1139,7 +1183,7 @@ const tasks: ScheduledTask[] = [
   },
   {
     name: "embeddings",
-    intervalMs: 10 * 60 * 1000,
+    intervalMs: 30 * 60 * 1000, // Lengthened from 10min; events handle fast path
     fn: processEmbeddings,
     lastRun: 0,
   },
@@ -1147,6 +1191,12 @@ const tasks: ScheduledTask[] = [
     name: "stale-cleanup",
     intervalMs: 60 * 60 * 1000,
     fn: cleanupStaleJobs,
+    lastRun: 0,
+  },
+  {
+    name: "delegation-cleanup",
+    intervalMs: 60 * 60 * 1000,
+    fn: cleanupDelegationArtifacts,
     lastRun: 0,
   },
   {
@@ -1170,6 +1220,60 @@ const tasks: ScheduledTask[] = [
 ];
 
 async function runScheduler(): Promise<void> {
+  // Start the vault sync engine (file watching + change detection)
+  try {
+    await vault.startSync();
+    console.log("[daemon] Vault sync engine started (event-driven mode)");
+
+    // Event-driven: process embeddings immediately when notes are created or modified
+    vault.on("note:created", async (event) => {
+      try {
+        await processEmbeddings();
+        recordTaskRun("embeddings", true);
+      } catch (err) {
+        recordTaskRun("embeddings", false, String(err));
+      }
+    });
+
+    vault.on("note:modified", async (event) => {
+      // Only re-embed if the note is in Notebooks/
+      if (event.path.startsWith("Notebooks/")) {
+        try {
+          await processEmbeddings();
+          recordTaskRun("embeddings", true);
+        } catch (err) {
+          recordTaskRun("embeddings", false, String(err));
+        }
+      }
+    });
+
+    // Event-driven: process heartbeat immediately when system files change
+    vault.on("system:modified", async (event) => {
+      if (event.path.includes("HEARTBEAT.md")) {
+        try {
+          await processHeartbeat();
+          recordTaskRun("heartbeat", true);
+        } catch (err) {
+          recordTaskRun("heartbeat", false, String(err));
+        }
+      }
+    });
+
+    // Event-driven: expire approvals when new ones are created
+    vault.on("approval:created", async () => {
+      try {
+        await expireApprovals();
+        recordTaskRun("expire-approvals", true);
+      } catch (err) {
+        recordTaskRun("expire-approvals", false, String(err));
+      }
+    });
+
+    console.log("[daemon] Event subscriptions registered (embeddings, heartbeat, approvals)");
+  } catch (err) {
+    console.warn("[daemon] Vault sync engine failed to start, falling back to polling-only:", err);
+  }
+
   // Start the OpenClaw Bridge HTTP server
   initBridge();
 
@@ -1189,7 +1293,7 @@ async function runScheduler(): Promise<void> {
   }
   await writeDaemonStatus();
 
-  // Main loop — check every 30 seconds
+  // Main loop — check every 30 seconds (safety-net polling fallback)
   setInterval(async () => {
     const now = Date.now();
     let statusDirty = false;
@@ -1214,16 +1318,18 @@ async function runScheduler(): Promise<void> {
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────
 
-process.on("SIGINT", () => {
+process.on("SIGINT", async () => {
   console.log("\n[daemon] Shutting down...");
   if (bridgeCtx) stopBridge(bridgeCtx);
+  await vault.stopSync().catch(() => {});
   search.close();
   process.exit(0);
 });
 
-process.on("SIGTERM", () => {
+process.on("SIGTERM", async () => {
   console.log("[daemon] Received SIGTERM, shutting down...");
   if (bridgeCtx) stopBridge(bridgeCtx);
+  await vault.stopSync().catch(() => {});
   search.close();
   process.exit(0);
 });

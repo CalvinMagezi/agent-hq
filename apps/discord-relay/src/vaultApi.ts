@@ -283,6 +283,9 @@ export class VaultAPI {
         modelOverride: undefined as string | undefined,
         dependsOn: t.dependsOn,
         createdAt: Date.now(),
+        traceId: t.traceId,
+        spanId: t.spanId,
+        securityConstraints: t.securityConstraints as any,
       }));
     } catch {
       return [];

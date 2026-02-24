@@ -1,0 +1,10 @@
+{
+  "id": "agent-hq-vault-sync",
+  "name": "Agent-HQ Vault Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Secure cross-device vault synchronization for Agent-HQ. E2E encrypted, zero-knowledge relay.",
+  "author": "Calvin Magezi",
+  "authorUrl": "https://github.com/calvinmagezi",
+  "isDesktopOnly": false
+}

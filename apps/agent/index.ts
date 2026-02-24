@@ -29,7 +29,12 @@ import {
     CheckRelayHealthTool,
     CheckDelegationStatusTool,
     AggregateResultsTool,
+    CancelDelegationTool,
+    GetTraceStatusTool,
 } from "./lib/delegationToolsVault.js";
+import { BuildPromptTool, initPromptBuilder } from "./lib/promptBuilder.js";
+import { TraceDB } from "@repo/vault-client/trace";
+import { TraceReporter } from "./lib/traceReporter.js";
 
 dotenv.config({ path: ".env.local" });
 
@@ -87,6 +92,9 @@ const adapter = new AgentAdapter(VAULT_PATH);
 
 // Initialize delegation tools with vault path
 initDelegationTools(VAULT_PATH);
+
+// Initialize prompt builder for context-enriched delegations
+initPromptBuilder(VAULT_PATH);
 
 // ── Task Classification ─────────────────────────────────────────────
 // Keywords that indicate the task is HQ-internal (not delegatable)
@@ -491,7 +499,8 @@ async function setupAgent() {
         console.log(`🌐 WebSocket server on ws://127.0.0.1:${wsPort}`);
     }
 
-    // 7. Subscribe to Jobs (file-based polling)
+    // 7. Initialize sync engine for event-driven job detection
+    await adapter.initSync();
     console.log("📡 Listening for tasks...\n");
 
     const unsubscribe = adapter.onUpdate(
@@ -518,18 +527,24 @@ async function setupAgent() {
         }
     );
 
-    // 8. Startup Catchup — check for pending jobs from offline period
-    try {
-        const pendingJob = await adapter.getPendingJob({
-            workerId: WORKER_ID,
-            workerSecret: "",
-        });
-        if (pendingJob && pendingJob.status === "pending") {
-            console.log("📋 Found pending job from offline period, processing...");
-            await handleJob(pendingJob);
+    // 8. Startup Catchup — check for pending jobs that predate this process start.
+    // Guard: skip if the sync engine's initial scan already triggered a job:created
+    // event and handleJob is already running (isBusy). The tiny delay lets the
+    // event-driven path claim the job first, eliminating the race condition.
+    await new Promise((r) => setTimeout(r, 200));
+    if (!isBusy) {
+        try {
+            const pendingJob = await adapter.getPendingJob({
+                workerId: WORKER_ID,
+                workerSecret: "",
+            });
+            if (pendingJob && pendingJob.status === "pending") {
+                console.log("📋 Found pending job from offline period, processing...");
+                await handleJob(pendingJob);
+            }
+        } catch (err: any) {
+            console.warn("⚠️ Startup catchup check failed:", err.message);
         }
-    } catch (err: any) {
-        console.warn("⚠️ Startup catchup check failed:", err.message);
     }
 
     return unsubscribe;
@@ -576,6 +591,11 @@ async function handleJob(job: any) {
         isBusy: true,
         currentJobInstruction: job.instruction,
     });
+
+    // Trace context — declared outside try so finally block can access them
+    let traceId: string | undefined;
+    let jobSpanId: string | undefined;
+    let traceReporterStop: (() => void) | undefined;
 
     try {
         // Try to claim the job - this will fail if another worker grabbed it
@@ -721,12 +741,37 @@ async function handleJob(job: any) {
             }
         );
 
-        // Set current job context for delegation tools
-        setCurrentJob(job._id, job.userId);
-
         // Classify task: HQ-internal (uses local tools) vs delegatable (uses relay orchestration)
         const isHqTask = isHqInternalTask(job.instruction);
         logger.info("Task classification", { jobId: job._id, isHqInternal: isHqTask, instruction: job.instruction.substring(0, 80) });
+
+        // Create distributed trace for orchestration flows
+        if (!isHqTask) {
+            try {
+                const traceDb = new TraceDB(VAULT_PATH);
+                traceId = traceDb.createTrace(job._id, job.instruction);
+                jobSpanId = traceDb.createSpan({
+                    traceId,
+                    type: "job",
+                    name: `Job: ${job.instruction.substring(0, 80)}`,
+                });
+                traceDb.addSpanEvent(jobSpanId, traceId, "started");
+                traceDb.close();
+
+                // Start progress reporter
+                const reporter = new TraceReporter();
+                traceReporterStop = reporter.watchTrace(traceId, job._id, {
+                    vaultPath: VAULT_PATH,
+                    adapter,
+                    wsServer: wsServer ?? undefined,
+                });
+            } catch (err) {
+                logger.warn("Failed to create trace", { error: String(err) });
+            }
+        }
+
+        // Set current job context for delegation tools (with trace context)
+        setCurrentJob(job._id, job.userId, traceId, jobSpanId);
 
         const rawTools: AgentTool<any>[] = isHqTask
             ? [
@@ -749,10 +794,13 @@ async function handleJob(job: any) {
                 HeartbeatTool,
                 MCPBridgeTool,
                 ChatWithUserTool,
+                BuildPromptTool,
                 DelegateToRelayTool,
                 CheckRelayHealthTool,
                 CheckDelegationStatusTool,
                 AggregateResultsTool,
+                CancelDelegationTool,
+                GetTraceStatusTool,
               ];
 
         if (job.type === "rpc") {
@@ -1045,7 +1093,7 @@ IMPORTANT: Verify your work with tools before responding.`;
             // Delegatable task: orchestrator prompt — delegate to relay bots
             promptText = `SYSTEM INFO:
 Working Directory: ${TARGET_DIR}
-Job ID: ${job._id}
+Job ID: ${job._id}${traceId ? `\nTrace ID: ${traceId} (use get_trace_status anytime for a full progress view)` : ""}
 
 # YOU ARE THE HQ ORCHESTRATOR
 
@@ -1056,26 +1104,40 @@ Your role is to analyze tasks, check relay health, delegate work, monitor progre
 1. **Analyze** the incoming task
 2. **Check relay health** with check_relay_health to see which relays are available
 3. **Break down** complex tasks into subtasks if needed
-4. **Delegate** using delegate_to_relay — choose the right relay type:
+4. **Build prompts** — For EVERY delegation, call build_prompt BEFORE delegate_to_relay:
+   - Pass the raw instruction or subtask description as rawInstruction
+   - Specify the targetHarness you plan to delegate to
+   - If you detect a project name in the instruction, pass it as projectName
+   - The tool gathers vault context (preferences, memory, project notes, relevant knowledge)
+   - Use the returned enriched prompt as the instruction in delegate_to_relay
+5. **Delegate** using delegate_to_relay with the enriched prompt — choose the right relay type:
    - **claude-code**: Code editing, git operations, debugging, complex refactoring
    - **opencode**: Multi-model queries, quick code generation, model comparison
    - **gemini-cli**: Google Workspace (Docs, Sheets, Drive, Gmail, Calendar, Keep, Chat), research, analysis, summarization. NEVER delegate coding tasks to gemini-cli.
    - **any**: Auto-select the healthiest available relay
-5. **Monitor** with check_delegation_status (poll every few seconds)
-6. **Aggregate** results with aggregate_results when all tasks complete
-7. **Report** a synthesized response to the user
+6. **Monitor** with check_delegation_status (poll every few seconds)
+7. **Aggregate** results with aggregate_results when all tasks complete
+8. **Report** a synthesized response to the user
 
 ## Self-Execute ONLY For
 - Relay health monitoring and diagnostics
 - HQ configuration and setup
 - Memory and context management
 
+## Monitoring & Control
+- Use **get_trace_status** to see the full orchestration tree at a glance (status, timing, per-task progress)
+- Use **cancel_delegation** to abort tasks that are stuck, no longer needed, or running too long
+- **Proactively report progress** — don't wait until all tasks finish; report milestones (e.g., "3/5 tasks complete, waiting on synthesis")
+- If a task fails, consider retrying with a different relay or adjusted instruction
+- You can pass **securityConstraints** per task in delegate_to_relay (e.g., noGit: true, filesystemAccess: "read-only", maxExecutionMs: 60000)
+
 ## Rules
 - ALWAYS check relay health before delegating
+- ALWAYS call build_prompt before delegate_to_relay — raw instructions without context lead to poor results from sub-agents
+- For trivial, self-contained tasks (e.g., "what is 2+2") you may skip build_prompt
 - NEVER try to write code or run bash commands — delegate those tasks
 - If no relays are available, inform the user and suggest starting the discord-relay process
 - For complex tasks, break them into parallel subtasks with clear instructions
-- Include relevant context in each task's instruction so relays have full information
 - For Google Workspace tasks (Docs, Sheets, Drive, Gmail, Calendar, Keep), ALWAYS route to gemini-cli
 - NEVER delegate coding or git tasks to gemini-cli — use claude-code or opencode instead
 
@@ -1225,6 +1287,26 @@ Remember: You are the ORCHESTRATOR. Delegate the work, monitor progress, and rep
             });
         }
     } finally {
+        // Stop trace reporter and finalize trace
+        if (traceReporterStop) {
+            traceReporterStop();
+        }
+        if (traceId) {
+            try {
+                const traceDb = new TraceDB(VAULT_PATH);
+                const trace = traceDb.getTrace(traceId);
+                if (trace && trace.status === "active") {
+                    traceDb.completeTrace(traceId, "completed");
+                    if (jobSpanId) {
+                        traceDb.completeSpan(jobSpanId, "completed");
+                    }
+                }
+                traceDb.close();
+            } catch {
+                // Non-fatal
+            }
+        }
+
         isBusy = false;
         currentJobId = null;
         currentSession = null;
@@ -1294,6 +1376,9 @@ async function shutdown() {
         console.log(`💾 Saving state for active job...`);
         await syncSessionState(currentSession, currentJobId);
     }
+
+    // Stop sync engine
+    await adapter.stopSync();
 
     try {
         await adapter.workerHeartbeat({

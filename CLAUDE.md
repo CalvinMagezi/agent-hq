@@ -33,6 +33,7 @@ Package manager: **Bun** (v1.1.0+)
 │   └── discord-relay/     # Multi-bot Discord relay
 ├── packages/
 │   ├── vault-client/      # Shared vault data access layer (@repo/vault-client)
+│   ├── vault-sync/        # File sync engine with event-driven change detection (@repo/vault-sync)
 │   └── convex/            # Legacy Convex backend (archived, not used)
 ├── scripts/
 │   ├── agent-hq-chat.ts   # Terminal chat CLI
@@ -90,6 +91,34 @@ Exported as `@repo/vault-client` workspace package. All apps import from this.
 
 **Atomic Operations**: Job/task claiming uses `fs.renameSync` — if two workers race, only one rename succeeds (ENOENT for loser).
 
+### 2b. VaultSync Package
+**Location**: `packages/vault-sync/`
+
+Exported as `@repo/vault-sync`. Event-driven file change detection engine that sits alongside/underneath the Obsidian vault layer.
+
+**Key Exports**:
+- `VaultSync` — Main orchestrator (watcher + scanner + change log + event bus)
+- `SyncedVaultClient` — Drop-in replacement for `VaultClient` with sync-awareness and advisory locking
+- `EventBus` — Typed pub/sub for vault change events
+- `ChangeLog` — Append-only SQLite journal (guaranteed delivery, cursor-based consumption)
+- `SyncState` — File version tracking with content hashing
+- `LockManager` — Advisory file-level locks for write atomicity
+- `ConflictResolver` — Deterministic conflict resolution (merge-frontmatter strategy)
+
+**Architecture** (inspired by PasteMax + Syncthing):
+- **FileWatcher**: `fs.watch({ recursive: true })` with per-path debounce (300ms) + stability checks (1000ms)
+- **FullScanner**: Periodic safety-net scan (1hr) using mtime+size pre-filter then SHA-256 content hashing
+- **EventBus**: Classifies raw fs events into domain events (`job:created`, `task:claimed`, `note:modified`, etc.)
+- **ChangeLog**: Append-only SQLite journal; consumers resume from cursor positions after crash
+- **SyncState**: Tracks file versions with device ID tagging for future P2P sync
+
+**Database**: `.vault/_embeddings/sync.db` (separate from `search.db`; uses `bun:sqlite` with WAL mode)
+
+**Integration**: Daemon, Agent, and Relay use event subscriptions with polling fallbacks:
+- Daemon: `note:created` triggers immediate embedding, `system:modified` triggers heartbeat processing
+- Agent: `job:created` event replaces 5s polling (30s fallback)
+- Relay: `task:created` event replaces 5s delegation polling (30s fallback)
+
 ### 3. Local Worker Agent (HQ)
 **Location**: `apps/agent/`
 
@@ -97,7 +126,7 @@ A polling worker that picks up jobs from the vault and executes them locally usi
 
 **Core Architecture**:
 - Uses `AgentAdapter` from `@repo/vault-client/agent-adapter`
-- Polls `_jobs/pending/` every 5 seconds via `adapter.onUpdate()`
+- Detects new jobs via `job:created` events (sync engine) with 30s polling fallback via `adapter.onUpdate()`
 - Executes jobs with Pi SDK tools: `BashTool`, `FileTool`, `LocalContextTool`, `MCPBridgeTool`
 - Writes logs to `_logs/YYYY-MM-DD/` via `adapter.addJobLog()`
 - Updates job status: `pending` → `running` → `done`/`failed`
@@ -295,19 +324,20 @@ await adapter.addJobLog(jobId, "info", "Processing...");
 ## HQ Agent Flow
 
 1. Job created as markdown file in `_jobs/pending/` (via chat CLI, Discord, or delegation)
-2. Agent polls and picks up job via atomic rename to `_jobs/running/`
-3. Agent executes with Pi SDK tools
-4. Agent writes logs to `_logs/YYYY-MM-DD/`
-5. For delegation: agent creates tasks in `_delegation/pending/`
-6. Relay bots pick up and execute delegated tasks
-7. Agent updates job status to `done`/`failed` (moved to `_jobs/done/` or `_jobs/failed/`)
+2. Sync engine detects new file via `fs.watch` -> emits `job:created` event (or 30s polling fallback)
+3. Agent picks up job via atomic rename to `_jobs/running/`
+4. Agent executes with Pi SDK tools
+5. Agent writes logs to `_logs/YYYY-MM-DD/`
+6. For delegation: agent creates tasks in `_delegation/pending/`
+7. Relay bots pick up delegated tasks via `task:created` events (or 30s polling fallback)
+8. Agent updates job status to `done`/`failed` (moved to `_jobs/done/` or `_jobs/failed/`)
 
 **Security**: Agent runs with local user permissions, gated by `ToolGuardian` security profiles.
 
 ## Important Notes
 
 - The `packages/convex/` directory is archived legacy code — do not use or modify
-- The `.vault/_embeddings/` directory is gitignored (local SQLite search index)
+- The `.vault/_embeddings/` directory is gitignored (contains `search.db` for FTS5/embeddings and `sync.db` for file change tracking)
 - Job claiming uses atomic `fs.renameSync` — safe for concurrent workers
 - Frontmatter is parsed with `gray-matter` — all data files use YAML frontmatter
 - OpenRouter is the LLM provider for all AI operations

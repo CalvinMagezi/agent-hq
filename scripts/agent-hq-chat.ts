@@ -3,19 +3,23 @@
  * agent-hq-chat — Terminal chat CLI for Agent HQ.
  *
  * Provides a readline-based REPL with:
- * - Streaming responses from OpenRouter
+ * - Streaming responses via relay server (when available) or direct OpenRouter
  * - Thread management (create, switch, list, archive)
  * - Context injection (SOUL, MEMORY, PREFERENCES, pinned notes)
  * - /hq command to dispatch jobs to the HQ agent
  * - Thread persistence to .vault/_threads/
  *
  * Usage: bun run scripts/agent-hq-chat.ts
+ *
+ * Relay mode: set RELAY_SERVER=1 (or RELAY_HOST/RELAY_PORT) to route through
+ * the relay server for real-time streaming and agent tool use.
  */
 
 import * as readline from "readline";
 import * as path from "path";
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
+import { RelayClient } from "@repo/agent-relay-protocol";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -27,9 +31,43 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const DEFAULT_MODEL =
   process.env.DEFAULT_MODEL ?? "moonshotai/kimi-k2.5";
 
-if (!OPENROUTER_API_KEY) {
+// Relay server config (optional — falls back to direct OpenRouter)
+const USE_RELAY =
+  process.env.RELAY_SERVER === "1" ||
+  process.env.RELAY_SERVER === "true" ||
+  !!process.env.RELAY_HOST;
+const RELAY_HOST = process.env.RELAY_HOST ?? "127.0.0.1";
+const RELAY_PORT = parseInt(process.env.RELAY_PORT ?? "18900", 10);
+const RELAY_API_KEY = process.env.AGENTHQ_API_KEY ?? "";
+
+if (!USE_RELAY && !OPENROUTER_API_KEY) {
   console.error("Error: OPENROUTER_API_KEY is required. Set it in .env.local");
+  console.error("Tip: Set RELAY_SERVER=1 to route through the relay server instead.");
   process.exit(1);
+}
+
+// ─── Relay Client (optional) ─────────────────────────────────────────
+
+let relayClient: RelayClient | null = null;
+
+async function initRelay(): Promise<boolean> {
+  if (!USE_RELAY) return false;
+  try {
+    relayClient = new RelayClient({
+      host: RELAY_HOST,
+      port: RELAY_PORT,
+      apiKey: RELAY_API_KEY,
+      clientId: "chat-cli",
+      clientType: "cli",
+      autoReconnect: true,
+    });
+    await relayClient.connect();
+    return true;
+  } catch (err) {
+    console.warn(colorText(`  Warning: Relay server not available (${err instanceof Error ? err.message : err}). Falling back to direct OpenRouter.`, "yellow"));
+    relayClient = null;
+    return false;
+  }
 }
 
 // ─── Initialization ──────────────────────────────────────────────────
@@ -130,7 +168,43 @@ async function loadSystemContext(): Promise<string> {
 async function streamChat(userMessage: string): Promise<string> {
   messages.push({ role: "user", content: userMessage });
 
-  const model = DEFAULT_MODEL;
+  // ── Relay path ────────────────────────────────────────────────────
+  if (relayClient?.isConnected) {
+    process.stdout.write(colorText("\n  Assistant: ", "cyan"));
+    let fullResponse = "";
+
+    try {
+      const final = await relayClient.chat({
+        content: userMessage,
+        threadId: currentThreadId ?? undefined,
+        modelOverride: (globalThis as any).__currentModel ?? undefined,
+        onDelta: (delta) => {
+          process.stdout.write(delta);
+          fullResponse += delta;
+        },
+        onTool: (toolName) => {
+          process.stdout.write(colorText(`\n  [tool: ${toolName}] `, "dim"));
+        },
+      });
+
+      process.stdout.write("\n\n");
+
+      if (final.threadId && !currentThreadId) {
+        currentThreadId = final.threadId;
+      }
+
+      messages.push({ role: "assistant", content: final.content });
+      return final.content;
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(colorText(`\n  Error: ${errMsg}`, "red"));
+      messages.pop();
+      return "";
+    }
+  }
+
+  // ── Direct OpenRouter path ────────────────────────────────────────
+  const model = (globalThis as any).__currentModel ?? DEFAULT_MODEL;
   const requestMessages = [
     { role: "system" as const, content: systemPrompt },
     ...messages.map((m) => ({
@@ -318,18 +392,33 @@ async function handleCommand(input: string): Promise<boolean> {
         console.log(colorText("\n  Usage: /hq <task instruction>", "yellow"));
         return true;
       }
-      const jobId = await vault.createJob({
-        instruction: args,
-        type: "background",
-        priority: 50,
-        securityProfile: "standard",
-      });
-      console.log(
-        colorText(`\n  Job dispatched: ${jobId}`, "green"),
-      );
-      console.log(
-        colorText("  The HQ agent will pick this up on next poll.", "dim"),
-      );
+
+      if (relayClient?.isConnected) {
+        // Submit via relay server
+        const submitted = await relayClient.submitJob({
+          instruction: args,
+          jobType: "background",
+        });
+        console.log(colorText(`\n  Job submitted via relay: ${submitted.jobId}`, "green"));
+        console.log(colorText("  Waiting for completion...", "dim"));
+        const completed = await relayClient.waitForJob(
+          submitted.jobId,
+          (delta) => process.stdout.write(delta),
+        );
+        process.stdout.write("\n");
+        if (completed.result) {
+          console.log(colorText(`\n  Result: ${completed.result.substring(0, 200)}`, "dim"));
+        }
+      } else {
+        const jobId = await vault.createJob({
+          instruction: args,
+          type: "background",
+          priority: 50,
+          securityProfile: "standard",
+        });
+        console.log(colorText(`\n  Job dispatched: ${jobId}`, "green"));
+        console.log(colorText("  The HQ agent will pick this up on next poll.", "dim"));
+      }
       return true;
     }
 
@@ -408,6 +497,19 @@ async function handleCommand(input: string): Promise<boolean> {
 async function main(): Promise<void> {
   printHeader();
 
+  // Try to connect to relay server if configured
+  if (USE_RELAY) {
+    const connected = await initRelay();
+    if (connected) {
+      console.log(
+        colorText(
+          `  Relay server: ws://${RELAY_HOST}:${RELAY_PORT} (streaming enabled)`,
+          "green",
+        ),
+      );
+    }
+  }
+
   // Load system context
   console.log(colorText("  Loading system context...", "dim"));
   systemPrompt = await loadSystemContext();
@@ -453,6 +555,7 @@ async function main(): Promise<void> {
   rl.on("close", () => {
     console.log(colorText("\n  Goodbye!", "dim"));
     search?.close();
+    relayClient?.disconnect();
     process.exit(0);
   });
 }

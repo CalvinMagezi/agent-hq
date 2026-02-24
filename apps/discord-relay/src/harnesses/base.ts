@@ -1,5 +1,8 @@
 import type { ChannelSettings } from "../types.js";
 
+/** Called with each raw stdout chunk during harness execution. */
+export type ChunkCallback = (chunk: string) => void;
+
 /** Options passed to harness.call() alongside the prompt */
 export interface HarnessCallOptions {
   filePaths?: string[];
@@ -34,6 +37,17 @@ export interface BaseHarness {
     prompt: string,
     channelId: string,
     options?: HarnessCallOptions,
+  ): Promise<string>;
+
+  /**
+   * Streaming variant of call() — identical behaviour but fires onChunk for each stdout chunk.
+   * Optional: harnesses that implement this enable live output tracking.
+   */
+  callWithChunks?(
+    prompt: string,
+    channelId: string,
+    options?: HarnessCallOptions,
+    onChunk?: ChunkCallback,
   ): Promise<string>;
 
   /** Force-kill the running CLI process for a channel. Returns true if a process was killed. */

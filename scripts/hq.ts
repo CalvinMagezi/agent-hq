@@ -274,7 +274,7 @@ async function cmdHealth(): Promise<void> {
   section("CLI Tools");
   const claudeV = sh("claude --version 2>/dev/null");
   const geminiV = sh("gemini --version 2>/dev/null");
-  const ocV     = sh("opencode version 2>/dev/null | head -1");
+  const ocV     = sh("opencode --version 2>/dev/null | head -1");
   const bunV    = sh("bun --version 2>/dev/null");
 
   claudeV ? ok(`Claude CLI: ${claudeV}`)               : fail("Claude CLI: not found");

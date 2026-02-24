@@ -177,3 +177,21 @@ export interface WorkerSession {
     model: string;
   };
 }
+
+export interface LiveTaskOutput {
+  taskId: string;
+  claimedBy: string;
+  startedAt: string;
+  lastChunkAt: string;
+  byteCount: number;
+  output: string;
+  _filePath: string;
+}
+
+export interface RecentActivityEntry {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+  source: "discord" | "chat" | "job";
+  channel?: string;
+}

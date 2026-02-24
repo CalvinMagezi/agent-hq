@@ -294,6 +294,20 @@ export class AgentAdapter {
     const filename = args.title.toUpperCase().replace(/\s+/g, "-");
     const filePath = path.join(this.vaultPath, "_system", `${filename}.md`);
 
+    if (args.title === "Memory" && fs.existsSync(filePath)) {
+      let raw = fs.readFileSync(filePath, "utf-8");
+      // Cap the auto-memory work log to 20 entries
+      const rawLines = raw.split("\n");
+      const workLogIndices = rawLines.map((line, idx) => line.startsWith("- [") && line.includes("] Task:") ? idx : -1).filter(idx => idx !== -1);
+
+      if (workLogIndices.length >= 20) {
+        // Remove the oldest task log line
+        rawLines.splice(workLogIndices[0], 1);
+        raw = rawLines.join("\n");
+        fs.writeFileSync(filePath, raw, "utf-8");
+      }
+    }
+
     if (fs.existsSync(filePath)) {
       fs.appendFileSync(filePath, "\n" + args.content, "utf-8");
     } else {

@@ -30,11 +30,13 @@ export const PROFILE_TOOL_NAMES: Record<SecurityProfile, string[] | "*"> = {
         "read", "ls", "find", "grep", "local_context", "mcp_bridge", "heartbeat",
         "list_skills", "load_skill",
         // Delegation: read-only monitoring
-        "check_relay_health", "check_delegation_status",
+        "check_relay_health", "check_delegation_status", "get_live_task_output",
     ],
     [SecurityProfile.STANDARD]: [
         "read", "ls", "find", "grep", "local_context", "mcp_bridge", "heartbeat",
         "list_skills", "load_skill", "edit", "write",
+        // Clarification protocol
+        "chat_with_user", "draft_dispatch_plan", "build_prompt",
         // Delegation: full orchestration
         "delegate_to_relay", "check_relay_health", "check_delegation_status", "aggregate_results",
     ],
@@ -105,6 +107,8 @@ const SENSITIVE_ENV_VARS = [
     "AGENTHQ_API_KEY",
     "MCP_GATEWAY_TOKEN",
     "DISCORD_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN_OPENCODE",
+    "DISCORD_BOT_TOKEN_GEMINI",
 ];
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -138,6 +142,12 @@ export function createSecuritySpawnHook(
     return (ctx: BashSpawnContext): BashSpawnContext => {
         // Audit log all commands
         log(`[AUDIT] bash: ${ctx.command.substring(0, 200)}`);
+
+        // Network Egress Audit
+        const egressMatch = ctx.command.match(/\b(curl|wget|nc|ping|ssh)\b/i);
+        if (egressMatch) {
+            log(`[NETWORK EGRESS] Detected use of ${egressMatch[1]} in command: ${ctx.command.substring(0, 200)}`);
+        }
 
         // Block dangerous patterns for non-admin, non-guarded profiles
         // (GUARDED handles this via approval flow in ToolGuardian instead)
@@ -214,13 +224,17 @@ export class ToolGuardian {
     private allowedTools: Set<string> | "ALL";
     private onApprovalRequired?: ApprovalCallback;
 
+    private allowedPaths?: string[];
+
     constructor(
         profile: SecurityProfile = SecurityProfile.MINIMAL,
         policy: ToolPolicy = DEFAULT_POLICIES,
         onApprovalRequired?: ApprovalCallback,
+        allowedPaths?: string[],
     ) {
         this.profile = profile;
         this.onApprovalRequired = onApprovalRequired;
+        this.allowedPaths = allowedPaths;
         const allowed = policy[profile];
         if (allowed.includes("*")) {
             this.allowedTools = "ALL";
@@ -249,6 +263,20 @@ export class ToolGuardian {
                     throw new Error(
                         `Security Error: Tool '${tool.name}' is not allowed under security profile '${guardian.profile}'.`,
                     );
+                }
+
+                // Path sandboxing for file writes
+                if (guardian.allowedPaths && guardian.allowedPaths.length > 0 && FILE_WRITE_TOOLS.has(tool.name)) {
+                    const argsObj = args as Record<string, any>;
+                    const targetPath = argsObj?.file || argsObj?.path || argsObj?.filePath;
+                    if (targetPath) {
+                        const pathModule = require("path");
+                        const resolvedTarget = pathModule.resolve(targetPath);
+                        const isAllowed = guardian.allowedPaths.some(p => resolvedTarget.startsWith(pathModule.resolve(p)));
+                        if (!isAllowed) {
+                            throw new Error(`Security Error: Path ${resolvedTarget} is outside allowed directories.`);
+                        }
+                    }
                 }
 
                 // GUARDED profile: check if this invocation needs approval

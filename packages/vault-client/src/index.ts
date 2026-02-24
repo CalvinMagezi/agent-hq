@@ -28,9 +28,10 @@ import type {
   ConversationMessage,
   JobStats,
   SearchResult,
+  RecentActivityEntry,
 } from "./types";
 
-export type { Job, Note, DelegatedTask, RelayHealth, SystemContext, SearchResult };
+export type { Job, Note, DelegatedTask, RelayHealth, SystemContext, SearchResult, RecentActivityEntry };
 export { calculateCost } from "./pricing";
 
 // Re-export types
@@ -1235,6 +1236,200 @@ export class VaultClient {
     const filename = path.basename(found);
     const dest = this.resolve("_approvals/resolved", filename);
     fs.renameSync(found, dest);
+  }
+
+  // ─── Live Task Output ──────────────────────────────────────────────
+
+  /**
+   * Write a chunk of harness stdout to the live output file for a task.
+   * Creates the file on first call; appends and trims to 50KB rolling window on subsequent calls.
+   */
+  writeLiveChunk(taskId: string, claimedBy: string, chunk: string): void {
+    const MAX_BODY = 50_000;
+    const TRIM_TO = 50_000;
+    const now = this.nowISO();
+    const filePath = this.resolve("_delegation/live", `live-${taskId}.md`);
+
+    if (!fs.existsSync(filePath)) {
+      this.writeMdFile(
+        filePath,
+        { taskId, claimedBy, startedAt: now, lastChunkAt: now, byteCount: chunk.length },
+        chunk,
+      );
+    } else {
+      try {
+        const { data, content } = this.readMdFile(filePath);
+        let newBody = content + chunk;
+        if (newBody.length > MAX_BODY + 1024) {
+          newBody = newBody.slice(newBody.length - TRIM_TO);
+        }
+        data.lastChunkAt = now;
+        data.byteCount = (data.byteCount ?? 0) + chunk.length;
+        this.writeMdFile(filePath, data, newBody);
+      } catch {
+        // If read fails, overwrite with just this chunk
+        this.writeMdFile(
+          filePath,
+          { taskId, claimedBy, startedAt: now, lastChunkAt: now, byteCount: chunk.length },
+          chunk,
+        );
+      }
+    }
+  }
+
+  /**
+   * Read the current live output for a running task. Returns null if no live file exists.
+   */
+  readLiveOutput(taskId: string): import("./types").LiveTaskOutput | null {
+    const filePath = this.resolve("_delegation/live", `live-${taskId}.md`);
+    if (!fs.existsSync(filePath)) return null;
+    try {
+      const { data, content } = this.readMdFile(filePath);
+      return {
+        taskId: data.taskId ?? taskId,
+        claimedBy: data.claimedBy ?? "",
+        startedAt: data.startedAt ?? "",
+        lastChunkAt: data.lastChunkAt ?? "",
+        byteCount: data.byteCount ?? 0,
+        output: content,
+        _filePath: filePath,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Delete the live output file for a task (call on completion/failure).
+   */
+  deleteLiveOutput(taskId: string): void {
+    const filePath = this.resolve("_delegation/live", `live-${taskId}.md`);
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  /**
+   * List all currently active live output files, sorted by most recently updated.
+   */
+  listLiveTasks(): import("./types").LiveTaskOutput[] {
+    const files = this.listMdFiles("_delegation/live");
+    const results: import("./types").LiveTaskOutput[] = [];
+    for (const f of files) {
+      try {
+        const { data, content } = this.readMdFile(f);
+        const taskId = data.taskId ?? path.basename(f, ".md").replace("live-", "");
+        results.push({
+          taskId,
+          claimedBy: data.claimedBy ?? "",
+          startedAt: data.startedAt ?? "",
+          lastChunkAt: data.lastChunkAt ?? "",
+          byteCount: data.byteCount ?? 0,
+          output: content,
+          _filePath: f,
+        });
+      } catch {
+        // Skip malformed files
+      }
+    }
+    return results.sort(
+      (a, b) => new Date(b.lastChunkAt).getTime() - new Date(a.lastChunkAt).getTime(),
+    );
+  }
+
+  // ─── Recent Activity ─────────────────────────────────────────────────
+
+  /**
+   * Append a message to the recent activity log.
+   * Maintains a rolling window of the most recent messages.
+   */
+  async appendRecentActivity(entry: RecentActivityEntry): Promise<void> {
+    const filePath = this.resolve("_system", "RECENT_ACTIVITY.md");
+    const MAX_ENTRIES = 30;
+    const MAX_CONTENT_LENGTH = 1000;
+
+    let entries: RecentActivityEntry[] = [];
+
+    // Read existing entries
+    if (fs.existsSync(filePath)) {
+      try {
+        const { data } = this.readMdFile(filePath);
+        entries = (data.entries as RecentActivityEntry[]) ?? [];
+      } catch {
+        entries = [];
+      }
+    }
+
+    // Truncate content if too long
+    const truncatedContent = entry.content.length > MAX_CONTENT_LENGTH
+      ? entry.content.substring(0, MAX_CONTENT_LENGTH) + "..."
+      : entry.content;
+
+    // Add new entry with heavily truncated content for frontmatter (to avoid JSON/YAML bloat)
+    // Since getRecentActivity reads from data.entries, 200 chars is enough context.
+    entries.push({
+      ...entry,
+      content: truncatedContent.length > 200 ? truncatedContent.substring(0, 200) + "..." : truncatedContent,
+    });
+
+    // Keep only the most recent entries
+    if (entries.length > MAX_ENTRIES) {
+      entries = entries.slice(-MAX_ENTRIES);
+    }
+
+    // Build markdown content (uses full truncatedContent, not the 200-char version)
+    const lines = entries.slice().reverse().map(e => {
+      const roleLabel = e.role === "user" ? "User" : "Assistant";
+      const sourceLabel = e.source === "discord" ? "[Discord]" : e.source === "chat" ? "[Chat]" : "[Job]";
+      const channelInfo = e.channel ? ` (#${e.channel.substring(0, 8)})` : "";
+      const time = new Date(e.timestamp).toLocaleString();
+      return `### ${roleLabel} ${sourceLabel}${channelInfo} — ${time}\n\n${e.content}`;
+    });
+
+    const content = `# Recent Activity\n\nA rolling log of the most recent conversations across Discord, Chat, and Jobs.\n\n---\n\n${lines.join("\n\n---\n\n")}`;
+
+    this.writeMdFile(filePath, { entries, updatedAt: this.nowISO() }, content);
+  }
+
+  /**
+   * Get the recent activity log.
+   */
+  async getRecentActivity(limit: number = 15): Promise<RecentActivityEntry[]> {
+    const filePath = this.resolve("_system", "RECENT_ACTIVITY.md");
+
+    if (!fs.existsSync(filePath)) {
+      return [];
+    }
+
+    try {
+      const { data } = this.readMdFile(filePath);
+      const entries = (data.entries as RecentActivityEntry[]) ?? [];
+      return entries.slice(-limit);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get recent activity formatted as a context string for prompts.
+   */
+  async getRecentActivityContext(limit: number = 15): Promise<string> {
+    const entries = await this.getRecentActivity(limit);
+
+    if (entries.length === 0) {
+      return "";
+    }
+
+    const lines = entries.map(e => {
+      const roleLabel = e.role === "user" ? "User" : "Assistant";
+      const sourceLabel = e.source === "discord" ? "Discord" : e.source === "chat" ? "Chat" : "Job";
+      const time = new Date(e.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+      return `[${time} ${sourceLabel}] ${roleLabel}: ${e.content}`;
+    });
+
+    return `## Recent Conversation History (${entries.length} messages)\n\n` + lines.join("\n\n");
   }
 
   // ─── Parsers ───────────────────────────────────────────────────────

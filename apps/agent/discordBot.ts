@@ -428,6 +428,46 @@ export class DiscordBot {
         }
     }
 
+    /**
+     * Send a plain-text or embed progress message to the configured channel.
+     * Used by WaitForDelegationTool for autonomous delegation updates.
+     * No-ops silently if Discord is not configured.
+     */
+    async sendProgressMessage(content: string, embed?: {
+        title: string;
+        description: string;
+        color: number;
+        fields?: Array<{ name: string; value: string; inline?: boolean }>;
+        timestamp?: string;
+    }): Promise<void> {
+        const channelId = this.config.channelId;
+        const webhookUrl = this.config.webhookUrl;
+
+        if (!channelId && !webhookUrl) return;
+
+        const payload: Record<string, any> = embed
+            ? { embeds: [{ ...embed, timestamp: embed.timestamp ?? new Date().toISOString() }] }
+            : { content };
+
+        if (webhookUrl) {
+            try {
+                await fetch(webhookUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
+                });
+            } catch (err: any) {
+                console.warn("Discord webhook progress message failed:", err.message);
+            }
+        } else if (channelId) {
+            try {
+                await this.discordApi("POST", `/channels/${channelId}/messages`, payload);
+            } catch (err: any) {
+                console.warn("Discord channel progress message failed:", err.message);
+            }
+        }
+    }
+
     // --- Internal Methods ---
 
     private async checkCompletedJobs(): Promise<void> {

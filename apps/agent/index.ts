@@ -25,14 +25,18 @@ import { createDispatchParallelTasksTool } from "./lib/orchestrationTools.js";
 import {
     initDelegationTools,
     setCurrentJob,
+    setDelegationNotifiers,
     DelegateToRelayTool,
     CheckRelayHealthTool,
     CheckDelegationStatusTool,
     AggregateResultsTool,
     CancelDelegationTool,
     GetTraceStatusTool,
+    WaitForDelegationTool,
+    GetLiveTaskOutputTool,
 } from "./lib/delegationToolsVault.js";
 import { BuildPromptTool, initPromptBuilder } from "./lib/promptBuilder.js";
+import { DraftDispatchPlanTool } from "./lib/delegationPlannerTool.js";
 import { TraceDB } from "@repo/vault-client/trace";
 import { TraceReporter } from "./lib/traceReporter.js";
 
@@ -273,7 +277,7 @@ const ChatWithUserTool: AgentTool<typeof ChatWithUserSchema> = {
     execute: async (toolCallId, args) => {
         // Log the message
         console.log(`[Agent -> User]: ${args.message}`);
-        
+
         // If we're in an interactive job and need to wait for a response
         if (args.waitForResponse && currentJobId) {
             // Update job status to waiting
@@ -313,23 +317,23 @@ const ChatWithUserTool: AgentTool<typeof ChatWithUserSchema> = {
                 // Wait 500ms before checking again
                 await new Promise(resolve => setTimeout(resolve, 500));
             }
-            
+
             if (pendingUserResponse) {
-                return { 
-                    content: [{ type: "text", text: pendingUserResponse }], 
+                return {
+                    content: [{ type: "text", text: pendingUserResponse }],
                     details: { received: true, message: pendingUserResponse }
                 };
             } else {
-                return { 
-                    content: [{ type: "text", text: "No response received within timeout period." }], 
+                return {
+                    content: [{ type: "text", text: "No response received within timeout period." }],
                     details: { timeout: true }
                 };
             }
         }
-        
+
         // Non-blocking message
-        return { 
-            content: [{ type: "text", text: `Message sent to user: "${args.message}"` }], 
+        return {
+            content: [{ type: "text", text: `Message sent to user: "${args.message}"` }],
             details: { acknowledged: true }
         };
     }
@@ -498,6 +502,9 @@ async function setupAgent() {
         wsServer.start();
         console.log(`🌐 WebSocket server on ws://127.0.0.1:${wsPort}`);
     }
+
+    // Connect delegation notifiers (after Discord + WS are initialized; both may be null)
+    setDelegationNotifiers(discordBot, wsServer);
 
     // 7. Initialize sync engine for event-driven job detection
     await adapter.initSync();
@@ -710,7 +717,7 @@ async function handleJob(job: any) {
             }
         };
 
-        const guardian = new ToolGuardian(securityProfile, DEFAULT_POLICIES, onApprovalRequired);
+        const guardian = new ToolGuardian(securityProfile, DEFAULT_POLICIES, onApprovalRequired, [TARGET_DIR, VAULT_PATH]);
 
         // Create bash tool with security spawn hook (intercepts commands BEFORE execution)
         const spawnHook = createSecuritySpawnHook(securityProfile, (msg) => logger.info(msg));
@@ -786,22 +793,26 @@ async function handleJob(job: any) {
                 secureBashTool,
                 ...codingToolsWithoutBash,
                 CheckRelayHealthTool,
+                GetLiveTaskOutputTool,
                 DelegateToRelayTool,
-              ]
+            ]
             : [
                 // Delegatable: orchestration tools only (no local execution)
                 LocalContextTool,
                 HeartbeatTool,
                 MCPBridgeTool,
                 ChatWithUserTool,
+                DraftDispatchPlanTool,
                 BuildPromptTool,
                 DelegateToRelayTool,
+                WaitForDelegationTool,
                 CheckRelayHealthTool,
                 CheckDelegationStatusTool,
+                GetLiveTaskOutputTool,
                 AggregateResultsTool,
                 CancelDelegationTool,
                 GetTraceStatusTool,
-              ];
+            ];
 
         if (job.type === "rpc") {
             rawTools.push(SubmitResultTool);
@@ -876,7 +887,9 @@ async function handleJob(job: any) {
         let currentAgentText = "";
         let lastUpdateTime = 0;
         let toolCallCount = 0;
-        const MAX_TOOL_CALLS = 20; // Safety breaker
+        const MAX_TOOL_CALLS = securityProfile === SecurityProfile.MINIMAL ? 10 :
+            securityProfile === SecurityProfile.STANDARD ? 20 :
+                securityProfile === SecurityProfile.GUARDED ? 40 : 50; // Adaptive safety breaker
         const UPDATE_THROTTLE_MS = 200;
 
         const syncStreamingText = async (force = false) => {
@@ -917,7 +930,7 @@ async function handleJob(job: any) {
         // --- Event Listeners ---
         session.subscribe(async (event: AgentSessionEvent) => {
             const eventType = event.type as string;
-            
+
             // 1. Stream to Console and accumulate for web
             if (eventType === "message_update") {
                 const updateEvent = event as any;
@@ -964,7 +977,7 @@ async function handleJob(job: any) {
                 const toolName = toolEvent.toolCall?.tool?.name || toolEvent.toolCall?.name || "tool";
                 const toolArgs = JSON.stringify(toolEvent.toolCall?.arguments || {});
                 console.log(`\n[🛠️ Tool Call]: ${toolName} -> ${toolArgs.substring(0, 100)}${toolArgs.length > 100 ? "..." : ""}`);
-                
+
                 toolCallCount++;
                 if (toolCallCount > MAX_TOOL_CALLS) {
                     console.error("\n🛑 SAFETY BREAKER: Too many tool calls. Aborting to save tokens.");
@@ -1034,7 +1047,7 @@ async function handleJob(job: any) {
                 logQueue.push(event);
                 void processLogQueue();
             }
-            
+
             // Periodic State Sync (Throttled)
             if (eventType === "message_stop" || eventType === "tool_execution_end") {
                 await syncSessionState(session, job._id);
@@ -1058,6 +1071,14 @@ async function handleJob(job: any) {
             console.warn("⚠️ Failed to load pinned context");
         }
 
+        // Fetch Recent Activity Context for continuity across sessions
+        let recentActivityContext = "";
+        try {
+            recentActivityContext = await adapter.client.getRecentActivityContext(15);
+        } catch (e) {
+            // Non-critical — recent activity is best-effort
+        }
+
         // Build conversation history for interactive jobs
         let historyBlock = "";
         if (job.type === "interactive" && job.conversationHistory && job.conversationHistory.length > 0) {
@@ -1067,10 +1088,21 @@ async function handleJob(job: any) {
                 : "No previous conversation.";
             historyBlock = `\n# CONVERSATION HISTORY\n${historyText}\n`;
         }
+        // Context Budget Accounting (~40k chars limit to avoid token bloat)
+        const MAX_VAR_CONTEXT_CHARS = 40000;
+        if (recentActivityContext.length > 20000) {
+            recentActivityContext = "...[TRUNCATED]\n" + recentActivityContext.slice(-20000); // Keep most recent
+        }
+        if (pinnedContext.length > MAX_VAR_CONTEXT_CHARS - recentActivityContext.length) {
+            pinnedContext = pinnedContext.substring(0, MAX_VAR_CONTEXT_CHARS - recentActivityContext.length) + "\n...[TRUNCATED]";
+        }
+
+        const currentTimeString = new Date().toLocaleString('en-US', { timeZoneName: 'short' });
 
         if (isHqTask) {
             // HQ-internal task: executor prompt with full local tools
             promptText = `SYSTEM INFO:
+Time: ${currentTimeString}
 Working Directory: ${TARGET_DIR}
 Contents: ${folderContent}
 
@@ -1082,6 +1114,8 @@ Contents: ${folderContent}
 
 ${pinnedContext}
 
+${recentActivityContext}
+
 ${preloadedSkills}
 ${autoLoadedSkillContent}
 ${historyBlock}
@@ -1092,20 +1126,61 @@ IMPORTANT: Verify your work with tools before responding.`;
         } else {
             // Delegatable task: orchestrator prompt — delegate to relay bots
             promptText = `SYSTEM INFO:
+Time: ${currentTimeString}
 Working Directory: ${TARGET_DIR}
 Job ID: ${job._id}${traceId ? `\nTrace ID: ${traceId} (use get_trace_status anytime for a full progress view)` : ""}
 
 # YOU ARE THE HQ ORCHESTRATOR
 
 You coordinate work across Discord relay agents. You do NOT execute code or file operations directly.
-Your role is to analyze tasks, check relay health, delegate work, monitor progress, and aggregate results.
+Your role is to analyze tasks, clarify with the user when needed, check relay health, delegate work, monitor progress, and aggregate results.
 
-## Your Workflow
+## Step 0: Clarify First (REQUIRED for coding/build/external-file tasks)
+
+For ANY task that involves writing code, building features, modifying files, or making changes in a specific external codebase or repository, you MUST run this entire protocol BEFORE proceeding to Steps 1–8:
+
+### 0a. Ask for clarification via chat_with_user (waitForResponse: true)
+Send ONE message that asks ALL of these questions together:
+1. "Which repository should I work in? (e.g., kolaborate-monorepo, agent-hq, or paste the full path)"
+2. "Which app or service within that repo? (e.g., marketplace, api, mobile, web)"
+3. "Where exactly should outputs go? (e.g., a new page at /pages/qa-dashboard, an existing component, a new file)"
+4. "Is there anything that should NOT be touched? (e.g., don't modify .vault/, no DB migrations without review)"
+
+### 0b. Draft the dispatch plan via draft_dispatch_plan
+Based on the user's answers, call draft_dispatch_plan with:
+- instruction: the original user request (verbatim)
+- targetRepo: from their answer to question 1
+- targetApp: from their answer to question 2
+- targetPath: from their answer to question 3
+- constraints: array of strings from their answer to question 4
+- proposedTasks: your task breakdown — each task needs taskId, description, targetHarness, deliverable, and optional dependsOn
+
+### 0c. Present the plan and wait for approval via chat_with_user (waitForResponse: true)
+Send the full plan text returned by draft_dispatch_plan, followed by:
+"Reply YES to dispatch, or tell me what to change."
+
+### 0d. Handle the response
+- If the user replies YES → proceed to Step 2
+- If the user requests changes → revise by calling draft_dispatch_plan again with corrected fields, then re-present
+- Repeat 0c–0d until you receive YES
+
+**SKIP Step 0 entirely for:**
+- Relay health checks ("check relay health", "is the relay running")
+- Vault lookups, note reads, memory queries
+- Status or diagnostic queries ("what's running", "get trace status")
+- Simple factual questions that need no delegation
+- Tasks where Calvin has ALREADY fully specified: target repo, target app, output path, AND constraints in the original instruction (nothing ambiguous)
+
+**NEVER call delegate_to_relay without completing Step 0 for any coding or build task.**
+
+## Your Workflow (Steps 1–8, executed after Step 0 approval)
+
 1. **Analyze** the incoming task
 2. **Check relay health** with check_relay_health to see which relays are available
 3. **Break down** complex tasks into subtasks if needed
 4. **Build prompts** — For EVERY delegation, call build_prompt BEFORE delegate_to_relay:
    - Pass the raw instruction or subtask description as rawInstruction
+   - After Step 0 approval, pass targetRepo + targetApp + targetPath in additionalContext so the relay bot is correctly grounded
    - Specify the targetHarness you plan to delegate to
    - If you detect a project name in the instruction, pass it as projectName
    - The tool gathers vault context (preferences, memory, project notes, relevant knowledge)
@@ -1115,9 +1190,15 @@ Your role is to analyze tasks, check relay health, delegate work, monitor progre
    - **opencode**: Multi-model queries, quick code generation, model comparison
    - **gemini-cli**: Google Workspace (Docs, Sheets, Drive, Gmail, Calendar, Keep, Chat), research, analysis, summarization. NEVER delegate coding tasks to gemini-cli.
    - **any**: Auto-select the healthiest available relay
-6. **Monitor** with check_delegation_status (poll every few seconds)
-7. **Aggregate** results with aggregate_results when all tasks complete
-8. **Report** a synthesized response to the user
+6. **Wait for completion** — Call wait_for_delegation ONCE, immediately after delegate_to_relay:
+   - taskIds: the EXACT list of taskIds you dispatched in delegate_to_relay
+   - instructionSummary: a short title like "Building QA Dashboard" (shown in Discord notifications)
+   - The tool polls internally every 15s — does NOT consume tool call budget
+   - Discord progress updates are sent automatically as each task completes
+   - Returns when all tasks are done or timeout is reached (default 30 min)
+7. **Report** a synthesized response to the user based on wait_for_delegation's returned results.
+   You may call aggregate_results for deeper analysis if needed.
+   check_delegation_status remains available for one-off status queries if asked mid-run.
 
 ## Self-Execute ONLY For
 - Relay health monitoring and diagnostics
@@ -1127,12 +1208,14 @@ Your role is to analyze tasks, check relay health, delegate work, monitor progre
 ## Monitoring & Control
 - Use **get_trace_status** to see the full orchestration tree at a glance (status, timing, per-task progress)
 - Use **cancel_delegation** to abort tasks that are stuck, no longer needed, or running too long
-- **Proactively report progress** — don't wait until all tasks finish; report milestones (e.g., "3/5 tasks complete, waiting on synthesis")
+- **wait_for_delegation sends proactive Discord updates automatically** — no manual polling needed; call it once after delegate_to_relay
+- Use **check_delegation_status** for one-off status queries only (e.g., if user asks mid-run) — never in a loop
 - If a task fails, consider retrying with a different relay or adjusted instruction
 - You can pass **securityConstraints** per task in delegate_to_relay (e.g., noGit: true, filesystemAccess: "read-only", maxExecutionMs: 60000)
 
 ## Rules
-- ALWAYS check relay health before delegating
+- ALWAYS run Step 0 before delegating any coding or build task — skipping it is the most common source of wrong-target errors
+- ALWAYS check relay health before delegating (Step 2)
 - ALWAYS call build_prompt before delegate_to_relay — raw instructions without context lead to poor results from sub-agents
 - For trivial, self-contained tasks (e.g., "what is 2+2") you may skip build_prompt
 - NEVER try to write code or run bash commands — delegate those tasks
@@ -1142,11 +1225,14 @@ Your role is to analyze tasks, check relay health, delegate work, monitor progre
 - NEVER delegate coding or git tasks to gemini-cli — use claude-code or opencode instead
 
 ${pinnedContext}
+
+${recentActivityContext}
+
 ${historyBlock}
 # ${job.type === "interactive" ? "CURRENT TASK" : "USER INSTRUCTION"}
 ${promptText}
 
-Remember: You are the ORCHESTRATOR. Delegate the work, monitor progress, and report results.`;
+Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progress, and report results.`;
         }
 
         // Pre-compaction: uses session.compact() with context-aware instructions
@@ -1161,7 +1247,7 @@ Remember: You are the ORCHESTRATOR. Delegate the work, monitor progress, and rep
         // Run the Agent — Pi SDK handles retry internally via SettingsManager.retry config
         // auto_retry_start/auto_retry_end events are emitted and logged via the event handler
         await session.prompt(promptText);
-        
+
         // Final completion message for interactive mode
         if (job.type === "interactive" && !currentAgentText.toLowerCase().includes("completed")) {
             const completionMsg = "\n\n✓ Task completed. Let me know if you need anything else!";
@@ -1351,7 +1437,7 @@ async function shutdown() {
         process.exit(1);
     }
     shutdownAttempted = true;
-    
+
     console.log("\n👋 Shutting down...");
     logger.info("Agent shutting down", { workerId: WORKER_ID });
     if (heartbeatInterval) clearInterval(heartbeatInterval);

@@ -14,6 +14,8 @@ const SETTINGS_FILE = "channel-settings.json";
 const USAGE_FILE = "usage.json";
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const DEFAULT_MAX_TURNS = 15;
+/** Sessions older than this are not resumed — prevents silent fresh starts with stale IDs */
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DEFAULT_MAX_BUDGET_USD = 2.0;
 const DEFAULT_MODEL = "sonnet";
 const MAX_CONCURRENT_CALLS = 3;
@@ -232,12 +234,24 @@ export class ClaudeHarness implements BaseHarness {
       "--max-turns", String(DEFAULT_MAX_TURNS),
     ];
 
-    // Session continuity
+    // Session continuity — only resume sessions within TTL to avoid silent fresh starts
     const existingSession = this.sessions.sessions[channelId];
+    const sessionAge = existingSession?.lastActivity
+      ? Date.now() - new Date(existingSession.lastActivity).getTime()
+      : Infinity;
+    const sessionIsLive = existingSession?.sessionId && sessionAge < SESSION_TTL_MS;
+
     if (isAutoContinue || options?.continueSession) {
       args.push("--continue");
-    } else if (existingSession?.sessionId) {
+    } else if (sessionIsLive && existingSession?.sessionId) {
       args.push("--resume", existingSession.sessionId);
+    } else if (existingSession?.sessionId) {
+      // Session exists but is too old — clear it so vault history is the sole context
+      console.log(
+        `[Claude] Session expired (${Math.round(sessionAge / 3600000)}h old) for channel ${channelId.substring(0, 8)} — starting fresh`,
+      );
+      delete this.sessions.sessions[channelId];
+      await this.persistSessions();
     }
 
     args.push("--output-format", "json");

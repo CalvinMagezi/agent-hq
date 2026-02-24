@@ -1,7 +1,7 @@
 import { spawn } from "bun";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import type { BaseHarness, HarnessCallOptions, HarnessUsageStats } from "./base.js";
+import type { BaseHarness, ChunkCallback, HarnessCallOptions, HarnessUsageStats } from "./base.js";
 import type { ChannelSettings } from "../types.js";
 
 const SESSION_FILE = "sessions.json";
@@ -102,10 +102,35 @@ export class OpenCodeHarness implements BaseHarness {
     }
   }
 
+  async callWithChunks(
+    prompt: string,
+    channelId: string,
+    options?: HarnessCallOptions,
+    onChunk?: ChunkCallback,
+  ): Promise<string> {
+    if (this.activeProcesses.has(channelId)) {
+      return "I'm still working on your previous message. Please wait, or use `!reset` to start fresh.";
+    }
+    if (this.globalActiveCount >= MAX_CONCURRENT_CALLS) {
+      return "All OpenCode slots are busy right now. Please try again in a moment.";
+    }
+
+    this.activeProcesses.add(channelId);
+    this.globalActiveCount++;
+
+    try {
+      return await this.spawnOnce(prompt, channelId, options, onChunk);
+    } finally {
+      this.activeProcesses.delete(channelId);
+      this.globalActiveCount--;
+    }
+  }
+
   private async spawnOnce(
     prompt: string,
     channelId: string,
     options?: HarnessCallOptions,
+    onChunk?: ChunkCallback,
   ): Promise<string> {
     const settings = {
       ...this.channelSettings[channelId],
@@ -168,8 +193,24 @@ export class OpenCodeHarness implements BaseHarness {
       this.activeProcs.set(channelId, proc);
 
       const outputPromise = (async () => {
-        const output = await new Response(proc.stdout).text();
-        const stderr = await new Response(proc.stderr).text();
+        // Drain stderr concurrently to avoid pipe deadlock
+        const stderrPromise = new Response(proc.stderr).text();
+
+        // Stream stdout with optional chunk callback
+        let output = "";
+        const reader = proc.stdout!.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          output += chunk;
+          onChunk?.(chunk);
+        }
+        const tail = decoder.decode();
+        if (tail) { output += tail; onChunk?.(tail); }
+
+        const stderr = await stderrPromise;
         const exitCode = await proc.exited;
 
         if (exitCode !== 0) {

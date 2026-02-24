@@ -28,8 +28,6 @@ import type {
 } from "@repo/agent-relay-protocol";
 import { chunkMessage } from "./chunker.js";
 
-const STREAMING_EDIT_INTERVAL_MS = 800; // How often to edit the Discord message during streaming
-
 export interface RelayDiscordBotConfig {
   discordBotToken: string;
   discordUserId: string;
@@ -289,88 +287,78 @@ export class RelayDiscordBot {
     const threadId = this.channelThreads.get(channelId);
     const modelOverride = this.channelModels.get(channelId);
 
-    // Send typing indicator
-    if ("sendTyping" in msg.channel) {
-      (msg.channel as any).sendTyping();
-    }
+    let buffer = "";
+    let charsSent = 0;
 
-    let placeholder: Message | null = null;
-    let accumulated = "";
-    let lastEdit = 0;
-    let editTimer: ReturnType<typeof setInterval> | null = null;
+    // Keep typing indicator alive while waiting
+    if ("sendTyping" in msg.channel) (msg.channel as any).sendTyping();
+    const typingInterval = setInterval(() => {
+      if ("sendTyping" in msg.channel) (msg.channel as any).sendTyping();
+    }, 8000);
 
-    const startStreaming = async () => {
-      placeholder = await msg.reply("...");
-      // Edit message periodically as tokens stream in
-      editTimer = setInterval(async () => {
-        if (placeholder && accumulated && Date.now() - lastEdit > STREAMING_EDIT_INTERVAL_MS) {
-          try {
-            const preview = accumulated.length > 1900
-              ? accumulated.substring(0, 1900) + "..."
-              : accumulated;
-            await placeholder.edit(preview);
-            lastEdit = Date.now();
-          } catch {
-            // Ignore edit failures
-          }
+    // Send buffer to Discord when a natural break is ready
+    const flushBuffer = async (force = false) => {
+      const hasParagraph = buffer.includes("\n\n") && buffer.length > 300;
+      const overLimit = buffer.length > 1600;
+
+      if (hasParagraph) {
+        const splitAt = buffer.lastIndexOf("\n\n");
+        const toSend = buffer.substring(0, splitAt);
+        buffer = buffer.substring(splitAt + 2);
+        for (const chunk of chunkMessage(toSend)) {
+          await msg.reply(chunk);
+          charsSent += chunk.length;
         }
-      }, STREAMING_EDIT_INTERVAL_MS);
+      } else if (overLimit) {
+        for (const chunk of chunkMessage(buffer)) {
+          await msg.reply(chunk);
+          charsSent += chunk.length;
+        }
+        buffer = "";
+      } else if (force && buffer.trim()) {
+        for (const chunk of chunkMessage(buffer)) {
+          await msg.reply(chunk);
+          charsSent += chunk.length;
+        }
+        buffer = "";
+      }
     };
 
     try {
-      let streamStarted = false;
-
-      // Set up delta listener before sending
-      const unsubDelta = this.relay.on<ChatDeltaMessage>("chat:delta", (deltaMsg) => {
-        if (deltaMsg.requestId === requestId) {
-          accumulated += deltaMsg.delta;
-          if (!streamStarted) {
-            streamStarted = true;
-            startStreaming();
-          }
-        }
+      const unsubDelta = this.relay.on<ChatDeltaMessage>("chat:delta", async (deltaMsg) => {
+        if (deltaMsg.requestId !== requestId) return;
+        buffer += deltaMsg.delta;
+        await flushBuffer();
       });
 
       const unsubFinal = this.relay.on<ChatFinalMessage>("chat:final", async (finalMsg) => {
-        if (finalMsg.requestId === requestId) {
-          unsubDelta();
-          unsubFinal();
-          if (editTimer) clearInterval(editTimer);
+        if (finalMsg.requestId !== requestId) return;
+        unsubDelta();
+        unsubFinal();
+        clearInterval(typingInterval);
 
-          // Save thread ID if provided
-          if (finalMsg.threadId && !threadId) {
-            this.channelThreads.set(channelId, finalMsg.threadId);
+        if (finalMsg.threadId && !threadId) {
+          this.channelThreads.set(channelId, finalMsg.threadId);
+        }
+
+        if (charsSent === 0) {
+          // Short response — nothing streamed yet, send full content
+          for (const chunk of chunkMessage(finalMsg.content)) {
+            await msg.reply(chunk);
           }
-
-          const response = finalMsg.content;
-          const chunks = chunkMessage(response);
-
-          if (placeholder) {
-            await placeholder.edit(chunks[0]);
-            for (const chunk of chunks.slice(1)) {
-              await msg.reply(chunk);
-            }
-          } else {
-            for (const chunk of chunks) {
-              await msg.reply(chunk);
-            }
-          }
+        } else {
+          // Flush any remaining buffered content
+          await flushBuffer(true);
         }
       });
 
       const unsubError = this.relay.on("error", async (errMsg) => {
-        if ((errMsg as any).requestId === requestId) {
-          unsubDelta();
-          unsubFinal();
-          unsubError();
-          if (editTimer) clearInterval(editTimer);
-          const errText = (errMsg as any).message ?? "Unknown error";
-          if (placeholder) {
-            await placeholder.edit(`Error: ${errText}`);
-          } else {
-            await msg.reply(`Error: ${errText}`);
-          }
-        }
+        if ((errMsg as any).requestId !== requestId) return;
+        unsubDelta();
+        unsubFinal();
+        unsubError();
+        clearInterval(typingInterval);
+        await msg.reply(`Error: ${(errMsg as any).message ?? "Unknown error"}`);
       });
 
       // Send chat message
@@ -387,13 +375,13 @@ export class RelayDiscordBot {
         unsubDelta();
         unsubFinal();
         unsubError();
-        if (editTimer) clearInterval(editTimer);
-        if (placeholder && !accumulated) {
-          await placeholder.edit("Request timed out.").catch(() => {});
+        clearInterval(typingInterval);
+        if (charsSent === 0) {
+          await msg.reply("Request timed out.").catch(() => {});
         }
       }, 5 * 60 * 1000);
     } catch (err) {
-      if (editTimer) clearInterval(editTimer);
+      clearInterval(typingInterval);
       await msg.reply(`Error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }

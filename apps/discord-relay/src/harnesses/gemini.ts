@@ -1,7 +1,7 @@
 import { spawn } from "bun";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { join } from "path";
-import type { BaseHarness, HarnessCallOptions, HarnessUsageStats } from "./base.js";
+import type { BaseHarness, ChunkCallback, HarnessCallOptions, HarnessUsageStats } from "./base.js";
 import type { ChannelSettings } from "../types.js";
 
 const SETTINGS_FILE = "channel-settings.json";
@@ -124,10 +124,35 @@ export class GeminiHarness implements BaseHarness {
     }
   }
 
+  async callWithChunks(
+    prompt: string,
+    channelId: string,
+    options?: HarnessCallOptions,
+    onChunk?: ChunkCallback,
+  ): Promise<string> {
+    if (this.activeProcesses.has(channelId)) {
+      return "I'm still working on your previous message. Please wait, or use `!reset` to start fresh.";
+    }
+    if (this.globalActiveCount >= MAX_CONCURRENT_CALLS) {
+      return "All Gemini slots are busy right now. Please try again in a moment.";
+    }
+
+    this.activeProcesses.add(channelId);
+    this.globalActiveCount++;
+
+    try {
+      return await this.spawnOnce(prompt, channelId, options, onChunk);
+    } finally {
+      this.activeProcesses.delete(channelId);
+      this.globalActiveCount--;
+    }
+  }
+
   private async spawnOnce(
     prompt: string,
     channelId: string,
     options?: HarnessCallOptions,
+    onChunk?: ChunkCallback,
   ): Promise<string> {
     const settings = {
       ...this.channelSettings[channelId],
@@ -174,12 +199,25 @@ export class GeminiHarness implements BaseHarness {
       this.activeProcs.set(channelId, proc);
 
       const outputPromise = (async () => {
-        // Read stdout and stderr concurrently to avoid pipe deadlock
-        const [output, stderr, exitCode] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-          proc.exited,
-        ]);
+        // Drain stderr concurrently to avoid pipe deadlock while streaming stdout
+        const stderrPromise = new Response(proc.stderr).text();
+        const exitedPromise = proc.exited;
+
+        // Stream stdout with optional chunk callback
+        let output = "";
+        const reader = proc.stdout!.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          output += chunk;
+          onChunk?.(chunk);
+        }
+        const tail = decoder.decode();
+        if (tail) { output += tail; onChunk?.(tail); }
+
+        const [stderr, exitCode] = await Promise.all([stderrPromise, exitedPromise]);
 
         // Always try parsing stdout first — Gemini CLI often exits with code 1
         // due to non-fatal MCP discovery errors while still producing valid output

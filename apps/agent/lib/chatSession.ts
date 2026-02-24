@@ -148,7 +148,7 @@ export class ChatSessionManager {
             // Prepend system context to the first message
             let promptText = text;
             if (this.isFirstMessage) {
-                promptText = this.buildSystemContext() + "\n\nUser message: " + text;
+                promptText = await this.buildSystemContext() + "\n\nUser message: " + text;
                 this.isFirstMessage = false;
             }
 
@@ -244,7 +244,7 @@ export class ChatSessionManager {
         }
     }
 
-    private buildSystemContext(): string {
+private async buildSystemContext(): Promise<string> {
         // Auto-load existing local context for memory continuity
         let existingContext = "";
         try {
@@ -253,6 +253,43 @@ export class ChatSessionManager {
             }
         } catch {
             // ignore read errors
+        }
+
+        // Load recent activity for cross-session continuity
+        let recentActivity = "";
+        try {
+            if (this.config.vaultClient) {
+                recentActivity = await this.config.vaultClient.getRecentActivityContext(15);
+            }
+        } catch {
+            // Non-critical
+        }
+
+        // Load vault context (memory, preferences, pinned notes)
+        let vaultContext = "";
+        try {
+            if (this.config.vaultClient) {
+                const ctx = await this.config.vaultClient.getAgentContext();
+                if (ctx.memory || ctx.preferences || ctx.pinnedNotes?.length > 0) {
+                    const parts: string[] = [];
+                    if (ctx.memory) {
+                        parts.push(`## Memory\n${ctx.memory.substring(0, 500)}`);
+                    }
+                    if (ctx.preferences) {
+                        parts.push(`## Preferences\n${ctx.preferences.substring(0, 300)}`);
+                    }
+                    if (ctx.pinnedNotes && ctx.pinnedNotes.length > 0) {
+                        const pinnedSummary = ctx.pinnedNotes
+                            .slice(0, 3)
+                            .map((n: { title: string; content?: string }) => `- **${n.title}**: ${n.content?.substring(0, 100) || ""}`)
+                            .join("\n");
+                        parts.push(`## Pinned Notes\n${pinnedSummary}`);
+                    }
+                    vaultContext = parts.join("\n\n");
+                }
+            }
+        } catch {
+            // Non-critical
         }
 
         const lines = [
@@ -289,6 +326,22 @@ export class ChatSessionManager {
                 existingContext.length > 2000
                     ? existingContext.substring(0, 2000) + "\n...(truncated)"
                     : existingContext,
+            );
+        }
+
+        if (recentActivity) {
+            lines.push(
+                ``,
+                `## Recent Conversation History (for continuity)`,
+                recentActivity,
+            );
+        }
+
+        if (vaultContext) {
+            lines.push(
+                ``,
+                `## Vault Context`,
+                vaultContext,
             );
         }
 

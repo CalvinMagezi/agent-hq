@@ -334,19 +334,26 @@ export class BotInstance {
             }, 2000);
           }
 
+          // ── Live output streaming callback ────────────────────────────
+          const liveChunkCallback = (chunk: string) => {
+            this.convex.writeLiveChunk(task.taskId, this.agentId, chunk);
+          };
+
           // ── Execute via harness (with optional timeout) ───────────────
           const maxMs = sc?.maxExecutionMs;
+          const executeHarness = () =>
+            this.harness.callWithChunks
+              ? this.harness.callWithChunks(instruction, channelId, options, liveChunkCallback)
+              : this.harness.call(instruction, channelId, options);
+
           let result: string;
           if (maxMs) {
             const timeoutPromise = new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error(`Task timed out after ${maxMs}ms`)), maxMs),
             );
-            result = await Promise.race([
-              this.harness.call(instruction, channelId, options),
-              timeoutPromise,
-            ]);
+            result = await Promise.race([executeHarness(), timeoutPromise]);
           } else {
-            result = await this.harness.call(instruction, channelId, options);
+            result = await executeHarness();
           }
 
           // Stop cancellation polling
@@ -359,6 +366,7 @@ export class BotInstance {
           if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
             wasCancelled = true;
             const partial = result.substring(0, 500);
+            this.convex.deleteLiveOutput(task.taskId);
             await this.convex.updateDelegation(task._id, "cancelled", partial, "Cancelled by HQ");
             if (signalPath && fs.existsSync(signalPath)) {
               try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
@@ -389,6 +397,7 @@ export class BotInstance {
           }
 
           // Report success
+          this.convex.deleteLiveOutput(task.taskId);
           await this.convex.updateDelegation(task._id, "completed", inlineResult);
 
           if (traceDb && relaySpanId && task.traceId) {
@@ -427,6 +436,7 @@ export class BotInstance {
 
           if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
             // Harness threw because it was killed by cancellation
+            this.convex.deleteLiveOutput(task.taskId);
             await this.convex.updateDelegation(task._id, "cancelled", undefined, "Cancelled by HQ");
             if (signalPath && fs.existsSync(signalPath)) {
               try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
@@ -437,6 +447,7 @@ export class BotInstance {
             }
             console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled (harness killed)`);
           } else {
+            this.convex.deleteLiveOutput(task.taskId);
             await this.convex.updateDelegation(
               task._id,
               "failed",
@@ -630,16 +641,38 @@ export class BotInstance {
           content;
       }
 
+      // Resolve reply-to context: if the user replied to a specific prior message,
+      // fetch that message's content so the agent knows exactly what they're responding to.
+      let replyToContent: string | undefined;
+      if (message.reference?.messageId) {
+        try {
+          const refMsg = await message.channel.messages.fetch(message.reference.messageId);
+          if (refMsg && refMsg.content) {
+            replyToContent = refMsg.content.length > 1200
+              ? refMsg.content.substring(0, 1200) + "..."
+              : refMsg.content;
+          }
+        } catch {
+          // Non-fatal — reference may have been deleted or unavailable
+        }
+      }
+
       // Build enriched prompt BEFORE saving user message to avoid duplication:
       // getRecentMessages() reads from disk, so saving first would include
       // the current message in both the conversation history AND as the prompt.
-      const enrichedPrompt = await this.enricher.buildPrompt(promptText, message.channelId);
+      const enrichedPrompt = await this.enricher.buildPrompt(promptText, message.channelId, replyToContent);
 
       await this.convex.saveMessage("user", content, message.channelId);
 
+      // Split: stable system instruction goes through --append-system-prompt,
+      // dynamic context stays in the user prompt (-p)
+      const systemInstruction = this.enricher.buildSystemInstruction();
       const rawResponse = await this.harness.call(enrichedPrompt, message.channelId, {
         filePaths,
         continueSession: isContinue,
+        channelSettings: {
+          systemPrompt: systemInstruction,
+        },
       });
 
       const response = await processMemoryIntents(this.convex, rawResponse);

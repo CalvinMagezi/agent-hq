@@ -88,7 +88,6 @@ interface Message {
 
 let currentThreadId: string | null = null;
 let messages: Message[] = [];
-let systemPrompt = "";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -134,33 +133,105 @@ function printHelp(): void {
 
 // ─── System Context ──────────────────────────────────────────────────
 
-async function loadSystemContext(): Promise<string> {
+async function getDynamicSystemPrompt(userMessage: string): Promise<string> {
   const ctx = await vault.getAgentContext();
-
   const parts: string[] = [];
 
-  if (ctx.soul) {
-    parts.push("## Identity\n" + ctx.soul);
-  }
-  if (ctx.memory) {
-    parts.push("## Memory\n" + ctx.memory);
-  }
-  if (ctx.preferences) {
-    parts.push("## User Preferences\n" + ctx.preferences);
-  }
+  if (ctx.soul) parts.push("## Identity\n" + ctx.soul);
+  if (ctx.memory) parts.push("## Memory\n" + ctx.memory);
+  if (ctx.preferences) parts.push("## User Preferences\n" + ctx.preferences);
+
   if (ctx.pinnedNotes.length > 0) {
-    const pinned = ctx.pinnedNotes
-      .map((n) => `### ${n.title}\n${n.content}`)
-      .join("\n\n");
+    const pinned = ctx.pinnedNotes.map((n) => `### ${n.title}\n${n.content}`).join("\n\n");
     parts.push("## Pinned Notes\n" + pinned);
   }
 
-  const model = ctx.config.default_model ?? DEFAULT_MODEL;
-  parts.push(
-    `## Configuration\nModel: ${model}\nDate: ${new Date().toLocaleDateString()}\nVault: ${VAULT_PATH}`,
-  );
+  const model = (globalThis as any).__currentModel ?? ctx.config.default_model ?? DEFAULT_MODEL;
+
+  // Full time string
+  const now = new Date();
+  const timeString = now.toLocaleString("en-US", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZoneName: 'short' });
+  parts.push(`## Configuration\nModel: ${model}\nDate: ${timeString}\nVault: ${VAULT_PATH}`);
+
+  // Recent Activity
+  const recentActivity = await vault.getRecentActivityContext(10);
+  if (recentActivity) {
+    parts.push(recentActivity);
+  }
+
+  // Semantic Search Context
+  if (search) {
+    try {
+      const results = search.keywordSearch(userMessage, 3);
+      if (results.length > 0) {
+        const searchContext = `## Relevant Vault Notes\n${results.map((r: any) => `### [${r.notebook}] ${r.title}\n${r.snippet}`).join("\n\n")}`;
+        parts.push(searchContext);
+      }
+    } catch {
+      // Ignore search errors
+    }
+  }
+
+  // Add memory intent instructions
+  parts.push(`## Memory Intents
+You can save information to your long-term memory using these exact strings anywhere in your response:
+- To save a fact: [REMEMBER: fact to store]
+- To save a goal: [GOAL: goal text]
+- To complete a goal: [DONE: search text for completed goal]`);
 
   return parts.join("\n\n---\n\n");
+}
+
+// ─── Memory Processing ───────────────────────────────────────────────
+
+async function processMemoryIntents(response: string): Promise<string> {
+  let clean = response;
+  const memoryPath = path.join(VAULT_PATH, "_system", "MEMORY.md");
+
+  if (!require("fs").existsSync(memoryPath)) return clean.trim();
+
+  let rawMemory = require("fs").readFileSync(memoryPath, "utf-8");
+
+  // Facts
+  const rememberMatches = [...response.matchAll(/\[REMEMBER:\s*([^\]]{5,}?)\]/gi)];
+  for (const match of rememberMatches) {
+    const fact = match[1].trim();
+    if (fact && /[a-zA-Z]{3,}/.test(fact)) {
+      rawMemory = rawMemory.replace("## Key Facts\n", `## Key Facts\n\n- ${fact}\n`);
+    }
+    clean = clean.replace(match[0], "");
+  }
+
+  // Goals
+  const goalMatches = [...response.matchAll(/\[GOAL:\s*([^\]]{5,}?)\]/gi)];
+  for (const match of goalMatches) {
+    const goal = match[1].trim();
+    if (goal && /[a-zA-Z]{3,}/.test(goal)) {
+      rawMemory = rawMemory.replace("## Active Goals\n", `## Active Goals\n\n- ${goal}\n`);
+    }
+    clean = clean.replace(match[0], "");
+  }
+
+  // Completions
+  const doneMatches = [...response.matchAll(/\[DONE:\s*([^\]]{3,}?)\]/gi)];
+  for (const match of doneMatches) {
+    const text = match[1].trim();
+    if (text && /[a-zA-Z]{3,}/.test(text)) {
+      // Find a goal matching this and strike it out
+      const lines = rawMemory.split("\n");
+      const newLines = lines.map((line: string) => {
+        if (line.startsWith("- ") && !line.includes("~~") && line.toLowerCase().includes(text.toLowerCase())) {
+          return `- ~~${line.substring(2)}~~`;
+        }
+        return line;
+      });
+      rawMemory = newLines.join("\n");
+    }
+    clean = clean.replace(match[0], "");
+  }
+
+  require("fs").writeFileSync(memoryPath, rawMemory, "utf-8");
+  return clean.trim();
 }
 
 // ─── Chat ────────────────────────────────────────────────────────────
@@ -193,8 +264,9 @@ async function streamChat(userMessage: string): Promise<string> {
         currentThreadId = final.threadId;
       }
 
-      messages.push({ role: "assistant", content: final.content });
-      return final.content;
+      const cleanResponse = await processMemoryIntents(final.content);
+      messages.push({ role: "assistant", content: cleanResponse });
+      return cleanResponse;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       console.error(colorText(`\n  Error: ${errMsg}`, "red"));
@@ -205,8 +277,12 @@ async function streamChat(userMessage: string): Promise<string> {
 
   // ── Direct OpenRouter path ────────────────────────────────────────
   const model = (globalThis as any).__currentModel ?? DEFAULT_MODEL;
+
+  // Dynamically load enriched system context per turn
+  const dynamicSystemPrompt = await getDynamicSystemPrompt(userMessage);
+
   const requestMessages = [
-    { role: "system" as const, content: systemPrompt },
+    { role: "system" as const, content: dynamicSystemPrompt },
     ...messages.map((m) => ({
       role: m.role as "user" | "assistant",
       content: m.content,
@@ -314,7 +390,6 @@ async function handleCommand(input: string): Promise<boolean> {
       const title = args || undefined;
       currentThreadId = await vault.createThread(title);
       messages = [];
-      systemPrompt = await loadSystemContext();
       console.log(
         colorText(
           `\n  New thread: ${currentThreadId}${title ? ` — "${title}"` : ""}`,
@@ -350,7 +425,6 @@ async function handleCommand(input: string): Promise<boolean> {
         const note = await vault.readNote(`_threads/active/${args}.md`);
         currentThreadId = args;
         messages = []; // TODO: Parse existing messages from thread file
-        systemPrompt = await loadSystemContext();
         console.log(colorText(`\n  Switched to thread: ${args}`, "green"));
       } catch {
         console.log(colorText(`\n  Thread not found: ${args}`, "red"));
@@ -375,7 +449,7 @@ async function handleCommand(input: string): Promise<boolean> {
           `${currentThreadId}.md`,
         );
         const { rename } = await import("fs");
-        rename(src, dest, () => {});
+        rename(src, dest, () => { });
         console.log(
           colorText(`\n  Archived thread: ${currentThreadId}`, "green"),
         );
@@ -510,9 +584,8 @@ async function main(): Promise<void> {
     }
   }
 
-  // Load system context
-  console.log(colorText("  Loading system context...", "dim"));
-  systemPrompt = await loadSystemContext();
+  // System context is loaded dynamically per-turn
+  console.log(colorText("  Ready.", "dim"));
 
   // Create initial thread
   currentThreadId = await vault.createThread();

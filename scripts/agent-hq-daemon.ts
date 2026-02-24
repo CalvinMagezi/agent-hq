@@ -693,6 +693,21 @@ async function cleanupDelegationArtifacts(): Promise<void> {
     }
   }
 
+  // Clean up stale live output files (relay crashed mid-task and never deleted)
+  const liveDir = path.join(VAULT_PATH, "_delegation/live");
+  if (fs.existsSync(liveDir)) {
+    for (const file of fs.readdirSync(liveDir).filter(f => f.endsWith(".md"))) {
+      try {
+        const filePath = path.join(liveDir, file);
+        const stat = fs.statSync(filePath);
+        if (now - stat.mtimeMs > signalMaxAge) {
+          fs.unlinkSync(filePath);
+          cleaned++;
+        }
+      } catch { /* skip */ }
+    }
+  }
+
   if (cleaned > 0) {
     console.log(`[delegation-cleanup] Removed ${cleaned} stale artifact(s)`);
   }

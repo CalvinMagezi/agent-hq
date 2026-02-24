@@ -52,7 +52,7 @@ const BUDGET = {
 
 const TASK_PATTERNS: Array<[TaskType, RegExp]> = [
     ["coding", /\b(refactor|debug|fix\s?bug|implement|code|function|class|api|endpoint|component|module|test|lint|typescript|javascript|python|rust|go|compile|build|dependency|package|import|migrate|schema|database|query|sql)\b/i],
-    ["devops", /\b(deploy|ci[\/-]?cd|docker|kubernetes|k8s|pipeline|infrastructure|terraform|ansible|nginx|ssl|dns|server|hosting|vercel|aws|gcp)\b/i],
+    ["devops", /\b(deploy|ci[/-]?cd|docker|kubernetes|k8s|pipeline|infrastructure|terraform|ansible|nginx|ssl|dns|server|hosting|vercel|aws|gcp)\b/i],
     ["workspace", /\b(google\s?doc|spreadsheet|sheet|gmail|calendar|drive|slides|keep|workspace|form)\b/i],
     ["research", /\b(research|investigate|find\s?out|look\s?up|compare|evaluate|survey|review|explore\s?options|alternatives)\b/i],
     ["analysis", /\b(analyze|analysis|summarize|summary|report|statistics|metrics|dashboard|audit|review\s?data)\b/i],

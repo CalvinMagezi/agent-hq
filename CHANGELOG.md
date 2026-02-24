@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Context budget accounting** (`apps/agent/index.ts`): Pre-calculates prompt component sizes and dynamically truncates pinned notes and skills when approaching the ~100K character limit
+- **Adaptive safety breaker** (`apps/agent/index.ts`): `MAX_TOOL_CALLS` now scales per security profile — ADMIN: 50, GUARDED/STANDARD: 20, MINIMAL: 5
+- **Timestamp injection** (`apps/agent/index.ts`): HQ agent prompts now include `Current time: <ISO timestamp>` for time-aware reasoning
+- **Terminal chat dynamic context** (`scripts/agent-hq-chat.ts`): Refactored from static system prompt to per-turn dynamic context with recent activity, semantic search, and full timestamp
+- **Terminal chat memory intents** (`scripts/agent-hq-chat.ts`): `[REMEMBER:]`, `[GOAL:]`, and `[DONE:]` tags now processed in CLI responses, matching Discord relay behavior
+- **MEMORY.md auto-rotation** (`packages/vault-client/src/agentAdapter.ts`): Work log entries capped at 20 — oldest entries automatically pruned on append
+- **RECENT_ACTIVITY.md entry types** (`packages/vault-client/src/types.ts`): `RecentActivityEntry` and `LiveTaskOutput` interfaces
+- **Recent activity context API** (`packages/vault-client/src/index.ts`): `getRecentActivity()` and `getRecentActivityContext()` methods for cross-surface conversation history
+- **Delegation planner tool** (`apps/agent/lib/delegationPlannerTool.ts`): Clarification-first protocol for orchestrator task planning
+- **Delegation tools (vault)** (`apps/agent/lib/delegationToolsVault.ts`): Full vault-based delegation tool implementations
+- **Live task output tracking** (`packages/vault-client/src/index.ts`): `writeLiveOutput()` and `readLiveOutput()` for streaming delegation results
+- **Stale live output cleanup** (`scripts/agent-hq-daemon.ts`): Daemon now purges stale `_delegation/live/*.md` files older than 1 hour
+- **Discord bot for HQ agent** (`apps/agent/discordBot.ts`): Direct Discord integration for the HQ agent
+- **Chat session manager** (`apps/agent/lib/chatSession.ts`): Async system context building with vault integration
+
+### Changed
+- **Discord relay streaming** (`apps/relay-adapter-discord/src/bot.ts`): Replaced single-message-edit pattern with progressive multi-message delivery — sends reply chunks at paragraph boundaries instead of editing a placeholder
+- **Discord relay context enrichment** (`apps/discord-relay/src/context.ts`): Enhanced system instructions for claude-code, gemini-cli, and opencode harnesses with clarification-first protocol and delegation guidelines
+- **Gemini harness** (`apps/discord-relay/src/harnesses/gemini.ts`): Improved prompt construction and tool integration
+- **OpenCode harness** (`apps/discord-relay/src/harnesses/opencode.ts`): Enhanced streaming and context handling
+- **RECENT_ACTIVITY.md frontmatter** (`packages/vault-client/src/index.ts`): Content truncated to 200 chars in YAML frontmatter to prevent file bloat while keeping full text in markdown body
+- **Health check** (`scripts/hq.ts`): Fixed `opencode` version check flag (`--version` instead of `version`)
+
+### Security
+- **Env var scrubbing expanded** (`apps/agent/governance.ts`): Added `DISCORD_BOT_TOKEN_OPENCODE` and `DISCORD_BOT_TOKEN_GEMINI` to `SENSITIVE_ENV_VARS` — prevents leakage to child processes
+- **Network egress logging** (`apps/agent/governance.ts`): Bash spawn hook now logs when child processes use `curl`, `wget`, `nc`, `ping`, or `ssh`
+- **Path sandboxing** (`apps/agent/governance.ts`): `ToolGuardian` accepts `allowedPaths` and blocks file write operations outside `TARGET_DIR` and `VAULT_PATH`
+
 ## [0.4.0] - 2026-02-24
 
 ### Added

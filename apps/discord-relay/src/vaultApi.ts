@@ -196,8 +196,11 @@ export class VaultAPI {
       const raw = fs.readFileSync(channelFile, "utf-8");
       const messages: Array<{ role: string; content: string; timestamp: number }> = [];
 
-      // Parse message sections
-      const msgRegex = /## (\w+) \(([^)]+)\)\s*\n([\s\S]*?)(?=\n## |$)/g;
+      // Parse message sections.
+      // IMPORTANT: Only match "user" or "assistant" as the role — this prevents
+      // markdown headings (## Section Title) inside bot responses from being
+      // misinterpreted as message boundaries, which would corrupt the history.
+      const msgRegex = /## (user|assistant) \(([^)]+)\)\s*\n([\s\S]*?)(?=\n## (?:user|assistant) \(|$)/g;
       let match;
       while ((match = msgRegex.exec(raw)) !== null) {
         messages.push({
@@ -258,6 +261,15 @@ export class VaultAPI {
       } else {
         fs.appendFileSync(channelFile, entry, "utf-8");
       }
+
+      // Also append to recent activity log for HQ agent context continuity
+      await this.vault.appendRecentActivity({
+        role: role as "user" | "assistant",
+        content,
+        timestamp,
+        source: "discord",
+        channel: channelId,
+      });
     } catch (err: any) {
       console.warn("[VaultAPI] Save message error:", err.message);
     }
@@ -335,6 +347,24 @@ export class VaultAPI {
       });
     } catch (err: any) {
       console.warn("[VaultAPI] Update relay health error:", err.message);
+    }
+  }
+
+  /** Write a live stdout chunk for a running delegated task */
+  writeLiveChunk(taskId: string, claimedBy: string, chunk: string): void {
+    try {
+      this.vault.writeLiveChunk(taskId, claimedBy, chunk);
+    } catch {
+      // Non-fatal — live output is best-effort
+    }
+  }
+
+  /** Delete the live output file for a task (call at completion or failure) */
+  deleteLiveOutput(taskId: string): void {
+    try {
+      this.vault.deleteLiveOutput(taskId);
+    } catch {
+      // Non-fatal
     }
   }
 

@@ -60,3 +60,6 @@ yarn-error.log*
 
 # Vault (local Obsidian data — not tracked)
 .vault/
+
+# Custom commands (private, local-only Discord relay commands)
+**/custom-commands/

@@ -1,0 +1,33 @@
+/**
+ * Example custom command template
+ *
+ * To use:
+ * 1. Copy this file to `custom-commands/my-command.ts`
+ * 2. Modify the names, description, and handler
+ * 3. Restart the Discord relay
+ *
+ * Custom commands in `custom-commands/` are gitignored and never pushed.
+ */
+import type { CustomCommandDef } from "../src/customCommandLoader.js";
+
+export function register(): CustomCommandDef[] {
+  return [
+    {
+      names: ["!my-command", "!mc"],
+      description: "My custom command — does something useful",
+      handler: async ({ arg, channelId, harness }) => {
+        // Your command logic here
+        // `arg` contains everything after the command name
+        // `channelId` is the Discord channel ID
+        // `harness` is the active harness (Claude Code, OpenCode, Gemini CLI)
+
+        return {
+          handled: true,
+          response: `✅ Custom command executed with arg: ${arg || "(none)"}`,
+          // Optional file attachment:
+          // file: { name: "output.csv", buffer: Buffer.from("col1,col2\nval1,val2") },
+        };
+      },
+    },
+  ];
+}

@@ -2,6 +2,7 @@ import type { BaseHarness } from "./harnesses/base.js";
 import type { GeminiHarness } from "./harnesses/gemini.js";
 import type { ConvexAPI } from "./vaultApi.js";
 import type { ChannelSettings, RelayConfig } from "./types.js";
+import { handleCustomCommand, getCustomCommands } from "./customCommandLoader.js";
 
 function formatTimeAgo(isoString: string | null): string {
   if (!isoString) return "never";
@@ -903,9 +904,20 @@ export async function handleCommand(
       };
     }
 
+    // ── Custom Commands (loaded from custom-commands/ — not tracked in git) ──
 
-    default:
+    default: {
+      // Try custom commands before falling through to harness
+      const customResult = await handleCustomCommand(cmd, {
+        arg,
+        channelId,
+        harness,
+        convex: convex ?? null,
+      });
+      if (customResult) return customResult;
+
       // Unknown !command — don't eat it, pass to harness
       return { handled: false };
+    }
   }
 }

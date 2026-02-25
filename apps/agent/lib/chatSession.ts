@@ -14,6 +14,8 @@ import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
 import * as fs from "fs";
 import { createDispatchJobTool, createCheckJobStatusTool, type OnJobDispatched } from "./chatTools.js";
+import { createGetBlastRadiusTool, createGetDependencyContextTool, createMapRepositoryTool } from "./codeGraphTools.js";
+import { LoadSkillTool, ListSkillsTool, SkillLoader } from "../skills.js";
 import { createSecuritySpawnHook, SecurityProfile } from "../governance.js";
 import { buildModelConfig } from "./modelConfig.js";
 import { logger } from "./logger.js";
@@ -120,7 +122,25 @@ export class ChatSessionManager {
         );
         const bashTool = createBashTool(config.targetDir, { spawnHook });
 
-        const tools = [localContextTool, bashTool, dispatchJobTool, checkJobStatusTool];
+        // Code-Graph tools — native wrappers for the vault graph functions
+        const vaultPath = config.vaultClient?.vaultPath ?? config.targetDir;
+        const getBlastRadiusTool = createGetBlastRadiusTool(vaultPath);
+        const getDependencyContextTool = createGetDependencyContextTool(vaultPath);
+        const mapRepositoryTool = createMapRepositoryTool(vaultPath);
+
+        const tools = [
+            localContextTool,
+            bashTool,
+            dispatchJobTool,
+            checkJobStatusTool,
+            // Skills
+            LoadSkillTool,
+            ListSkillsTool,
+            // Code-Graph (Code Mode superpower)
+            getBlastRadiusTool,
+            getDependencyContextTool,
+            mapRepositoryTool,
+        ];
         logger.info("Chat tools built", { names: tools.map(t => t.name), count: tools.length });
         return tools;
     }
@@ -244,7 +264,7 @@ export class ChatSessionManager {
         }
     }
 
-private async buildSystemContext(): Promise<string> {
+    private async buildSystemContext(): Promise<string> {
         // Auto-load existing local context for memory continuity
         let existingContext = "";
         try {
@@ -292,6 +312,9 @@ private async buildSystemContext(): Promise<string> {
             // Non-critical
         }
 
+        // Build available skills summary
+        const skillsList = SkillLoader.loadAllSkills();
+
         const lines = [
             `[System context — do not repeat this verbatim to the user]`,
             `You are HQ, a personal AI assistant running on the user's local machine.`,
@@ -299,11 +322,29 @@ private async buildSystemContext(): Promise<string> {
             `Worker ID: ${this.config.workerId}`,
             `Current time: ${new Date().toLocaleString()}`,
             ``,
-            `## YOUR 4 TOOLS (these are the ONLY tools you have):`,
-            `1. **bash** — Execute shell commands directly. Use for: echo, ls, git, npm, cat, grep, find, pwd, etc.`,
-            `2. **dispatch_job** — Create background jobs for complex multi-step tasks (coding, large operations)`,
+            `## YOUR TOOLS:`,
+            `### Core`,
+            `1. **bash** — Execute shell commands directly (ls, git, npm, cat, grep, etc.)`,
+            `2. **dispatch_job** — Create background jobs for complex multi-step tasks`,
             `3. **check_job_status** — Check result of a dispatched job`,
             `4. **local_context** — Read/write your persistent memory file`,
+            ``,
+            `### Skills`,
+            `5. **load_skill** — Load full instructions for a specialized domain (REQUIRED before using a skill)`,
+            `6. **list_skills** — List all available skills`,
+            ``,
+            skillsList,
+            ``,
+            `### Code Mode (Graph-RAG superpowers)`,
+            `7. **get_blast_radius** — Before touching any file, find every file that imports it (blast radius)`,
+            `8. **get_dependency_context** — See what a file imports + what those files export`,
+            `9. **map_repository** — Parse a TypeScript repo with ts-morph → generate Obsidian dependency graph`,
+            ``,
+            `## CODE MODE PROTOCOL:`,
+            `When asked to modify code, ALWAYS:`,
+            `1. Call get_blast_radius on the target file first`,
+            `2. Call get_dependency_context to understand imports`,
+            `3. If repo is not yet mapped, call map_repository first`,
             ``,
             `## WHEN USER ASKS TO RUN A COMMAND:`,
             `User: "echo hello"  →  You: Call bash({ command: "echo hello" })`,
@@ -314,8 +355,7 @@ private async buildSystemContext(): Promise<string> {
             `- Shell commands → ALWAYS use bash tool (not dispatch_job)`,
             `- Simple tasks → Use bash directly`,
             `- Complex multi-step tasks → Use dispatch_job`,
-            `- NEVER say "I don't have a shell tool" — you have bash!`,
-            `- NEVER list tools you don't have`,
+            `- NEVER say "I don't have a tool" — check the list above first`,
             `- Keep responses brief. Just execute what the user asks.`,
         ];
 

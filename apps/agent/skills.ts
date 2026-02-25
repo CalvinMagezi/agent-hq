@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 const SKILLS_DIR = path.join(__dirname, "skills");
 
 // Skills that are auto-loaded into context for every HQ task (no need to call load_skill)
-const AUTO_LOAD_SKILLS = ["obsidian"];
+const AUTO_LOAD_SKILLS = ["obsidian", "code-mapper"];
 
 export interface Skill {
     name: string;
@@ -22,12 +22,12 @@ export class SkillLoader {
     static getSkill(name: string): Skill | null {
         // Try exact match, then kebab-case, then snake_case
         const namesToTry = [name, name.replace(/\s+/g, "-"), name.replace(/\s+/g, "_")];
-        
+
         for (const n of namesToTry) {
             const skillPath = path.join(SKILLS_DIR, n, "SKILL.md");
             if (fs.existsSync(skillPath)) {
                 const content = fs.readFileSync(skillPath, "utf-8");
-                
+
                 // Basic YAML frontmatter parsing for description
                 let description = `Specialized skill for ${n}`;
                 const match = content.match(/^---\s*\n([\s\S]*?)\n---/);

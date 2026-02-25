@@ -21,6 +21,7 @@ import { registerNoteTools } from "./tools/notes.js";
 import { registerConcurrencyTools } from "./tools/concurrency.js";
 import { registerRestApiTools } from "./tools/rest-api.js";
 import { registerAdvancedTools } from "./tools/advanced.js";
+import { registerCodeGraphTools } from "./tools/code-graph.js";
 
 // ── Configuration ────────────────────────────────────────────────────
 const VAULT_PATH = process.env.VAULT_PATH || path.resolve(process.cwd(), "../../.vault");
@@ -43,6 +44,7 @@ registerNoteTools(server, VAULT_PATH);
 registerConcurrencyTools(server, VAULT_PATH);
 registerRestApiTools(server);
 registerAdvancedTools(server, VAULT_PATH);
+registerCodeGraphTools(server, VAULT_PATH);
 
 // ── Start ────────────────────────────────────────────────────────────
 const transport = new StdioServerTransport();

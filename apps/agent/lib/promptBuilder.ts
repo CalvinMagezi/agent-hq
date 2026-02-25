@@ -141,6 +141,9 @@ function getTaskTypeGuidance(taskType: TaskType): { steps: string; dod: string }
         case "coding":
             return {
                 steps: [
+                    "[CODE MODE PROTOCOL] CALL `mcp:map_repository` if the repository isn't mapped to Obsidian yet",
+                    "[CODE MODE PROTOCOL] CALL `mcp:get_blast_radius` on target files FIRST to understand breakages",
+                    "[CODE MODE PROTOCOL] CALL `mcp:get_dependency_context` to understand imports and dependencies",
                     "Read and understand the existing code in the relevant files",
                     "Identify the specific changes needed",
                     "Implement the changes surgically — edit only what's necessary",
@@ -150,6 +153,7 @@ function getTaskTypeGuidance(taskType: TaskType): { steps: string; dod: string }
                 dod: [
                     "Code compiles without errors",
                     "Changes are minimal and focused on the task",
+                    "Code Mode structural graph queried before modifications",
                     "Existing tests pass (if applicable)",
                     "Files follow the project's naming and style conventions",
                 ].map(c => `- [ ] ${c}`).join("\n"),

@@ -16,6 +16,7 @@
         "dotenv": "^16.4.5",
         "gray-matter": "^4.0.3",
         "node-pty": "^1.1.0",
+        "ts-morph": "^27.0.2",
         "ws": "^8.19.0"
     },
     "devDependencies": {

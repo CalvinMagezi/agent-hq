@@ -63,11 +63,24 @@ export class VaultClient {
     filePath: string,
     frontmatter: Record<string, any>,
     content: string,
+    metadata?: Partial<{ modifiedBy: string, isCreate: boolean }>
   ): void {
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+
+    // Inject optimistic concurrency / tracking fields
+    if (frontmatter.version === undefined) {
+      frontmatter.version = 1;
+    } else if (typeof frontmatter.version === "number" && !metadata?.isCreate) {
+      frontmatter.version += 1;
+    }
+
+    if (metadata?.modifiedBy) {
+      frontmatter.lastModifiedBy = metadata.modifiedBy;
+    }
+
     const output = matter.stringify("\n" + content + "\n", frontmatter);
     fs.writeFileSync(filePath, output, "utf-8");
   }
@@ -75,10 +88,11 @@ export class VaultClient {
   private updateFrontmatter(
     filePath: string,
     updates: Record<string, any>,
+    metadata?: Partial<{ modifiedBy: string }>
   ): void {
     const { data, content } = this.readMdFile(filePath);
     Object.assign(data, updates);
-    this.writeMdFile(filePath, data, content);
+    this.writeMdFile(filePath, data, content, metadata);
   }
 
   private listMdFiles(dirPath: string): string[] {
@@ -98,6 +112,69 @@ export class VaultClient {
 
   private nowISO(): string {
     return new Date().toISOString();
+  }
+
+  // ─── Locking ───────────────────────────────────────────────────────
+
+  /**
+   * Acquire a lock for a specific file path.
+   * If the lock exists and is younger than maxAgeMs, throws an error.
+   */
+  async acquireLock(filepath: string, maxAgeMs: number = 30000): Promise<string> {
+    const lockDir = this.resolve("_locks");
+    if (!fs.existsSync(lockDir)) {
+      fs.mkdirSync(lockDir, { recursive: true });
+    }
+
+    // Hash the absolute path so we can lock files outside the vault if needed,
+    // but typically it's relative. We'll base64 encode the path to be safe.
+    const safeName = Buffer.from(filepath).toString("base64").replace(/[/+=]/g, "-");
+    const lockPath = path.join(lockDir, `${safeName}.lock`);
+    const lockToken = this.generateId();
+
+    try {
+      // Try to read existing lock
+      if (fs.existsSync(lockPath)) {
+        const stat = fs.statSync(lockPath);
+        const age = Date.now() - stat.mtimeMs;
+        if (age < maxAgeMs) {
+          throw new Error(`File is locked: ${filepath}`);
+        }
+        // Lock is stale, we can overwrite it
+      }
+
+      // Write lock token atomically (wx flag fails if file exists, 
+      // but we just checked for stale locks, so we unlink first if stale)
+      if (fs.existsSync(lockPath)) {
+        fs.unlinkSync(lockPath);
+      }
+      fs.writeFileSync(lockPath, lockToken, { flag: "wx" });
+      return lockToken;
+    } catch (err: any) {
+      if (err.code === "EEXIST") {
+        throw new Error(`File is locked: ${filepath}`);
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Release a lock using the token returned by acquireLock.
+   */
+  async releaseLock(filepath: string, token: string): Promise<void> {
+    const safeName = Buffer.from(filepath).toString("base64").replace(/[/+=]/g, "-");
+    const lockPath = this.resolve("_locks", `${safeName}.lock`);
+
+    try {
+      if (fs.existsSync(lockPath)) {
+        const existingToken = fs.readFileSync(lockPath, "utf-8");
+        if (existingToken === token) {
+          fs.unlinkSync(lockPath);
+        }
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
   }
 
   // ─── Job Queue ─────────────────────────────────────────────────────
@@ -478,6 +555,8 @@ export class VaultClient {
       relatedNotes: [],
       createdAt: this.nowISO(),
       updatedAt: this.nowISO(),
+      version: 1,
+      lastModifiedBy: "hq-agent",
     };
 
     // Append graph link sentinel so the daemon can inject wikilinks later
@@ -486,7 +565,7 @@ export class VaultClient {
       ? `# ${title}\n\n${content}`
       : `# ${title}\n\n${content}\n\n${GRAPH_MARKER}\n## Related Notes\n\n_Links will be auto-generated after embedding._\n`;
 
-    this.writeMdFile(filePath, frontmatter, body);
+    this.writeMdFile(filePath, frontmatter, body, { modifiedBy: "hq-agent", isCreate: true });
     return filePath;
   }
 
@@ -518,19 +597,24 @@ export class VaultClient {
       ? notePath
       : this.resolve(notePath);
 
-    const { data, content: existingContent } = this.readMdFile(filePath);
+    const token = await this.acquireLock(filePath);
+    try {
+      const { data, content: existingContent } = this.readMdFile(filePath);
 
-    if (frontmatterUpdates) {
-      Object.assign(data, frontmatterUpdates);
+      if (frontmatterUpdates) {
+        Object.assign(data, frontmatterUpdates);
+      }
+      data.updatedAt = this.nowISO();
+
+      // Mark for re-embedding if content changed
+      if (content && content !== existingContent) {
+        data.embeddingStatus = "pending";
+      }
+
+      this.writeMdFile(filePath, data, content ?? existingContent, { modifiedBy: "hq-agent" });
+    } finally {
+      await this.releaseLock(filePath, token);
     }
-    data.updatedAt = this.nowISO();
-
-    // Mark for re-embedding if content changed
-    if (content && content !== existingContent) {
-      data.embeddingStatus = "pending";
-    }
-
-    this.writeMdFile(filePath, data, content ?? existingContent);
   }
 
   /**

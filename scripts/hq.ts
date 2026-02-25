@@ -16,10 +16,10 @@ import { execSync, spawnSync } from "child_process";
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT   = path.resolve(import.meta.dir, "..");
-const AGENT_DIR   = path.join(REPO_ROOT, "apps/discord-relay");  // kept for relay lock
-const RELAY_DIR   = path.join(REPO_ROOT, "apps/discord-relay");
-const HQ_DIR      = path.join(REPO_ROOT, "apps/agent");
+const REPO_ROOT = path.resolve(import.meta.dir, "..");
+const AGENT_DIR = path.join(REPO_ROOT, "apps/discord-relay");  // kept for relay lock
+const RELAY_DIR = path.join(REPO_ROOT, "apps/discord-relay");
+const HQ_DIR = path.join(REPO_ROOT, "apps/agent");
 const SCRIPTS_DIR = import.meta.dir;
 const LAUNCH_AGENTS = path.join(os.homedir(), "Library/LaunchAgents");
 
@@ -36,14 +36,14 @@ const RELAY_LOCK = path.join(RELAY_DIR, ".discord-relay/bot.lock");
 // ─── ANSI colours ─────────────────────────────────────────────────────────────
 
 const c = {
-  reset:  "\x1b[0m",
-  bold:   "\x1b[1m",
-  dim:    "\x1b[2m",
-  green:  "\x1b[32m",
-  red:    "\x1b[31m",
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
   yellow: "\x1b[33m",
-  cyan:   "\x1b[36m",
-  gray:   "\x1b[90m",
+  cyan: "\x1b[36m",
+  gray: "\x1b[90m",
 };
 
 // Strip ANSI codes for length calculation
@@ -67,11 +67,11 @@ function sleep(ms: number): Promise<void> {
 
 // ─── Output helpers ───────────────────────────────────────────────────────────
 
-const ok   = (msg: string) => console.log(`${c.green}✅${c.reset}  ${msg}`);
+const ok = (msg: string) => console.log(`${c.green}✅${c.reset}  ${msg}`);
 const fail = (msg: string) => console.log(`${c.red}❌${c.reset}  ${msg}`);
 const warn = (msg: string) => console.log(`${c.yellow}⚠️ ${c.reset}  ${msg}`);
 const info = (msg: string) => console.log(`${c.cyan}ℹ️ ${c.reset}  ${msg}`);
-const dim  = (msg: string) => console.log(`${c.gray}${msg}${c.reset}`);
+const dim = (msg: string) => console.log(`${c.gray}${msg}${c.reset}`);
 
 function section(title: string) {
   console.log(`\n${c.bold}── ${title} ──${c.reset}`);
@@ -86,7 +86,7 @@ function daemonPid(daemon: string): string | null {
   return pid && pid !== "-" && isAlive(pid) ? pid : null;
 }
 
-function agentPid():  string | null { return daemonPid(AGENT_DAEMON); }
+function agentPid(): string | null { return daemonPid(AGENT_DAEMON); }
 
 function relayPid(): string | null {
   // Try lock file first (most reliable)
@@ -107,6 +107,89 @@ function resolveTargets(target?: string): Array<"agent" | "relay"> {
   if (target === "relay") return ["relay"];
   warn(`Unknown target "${target}" — expected agent, relay, or all`);
   return [];
+}
+
+/**
+ * Find all PIDs matching a pgrep pattern, kill their children first,
+ * then kill them. Returns the count of processes killed.
+ */
+function killProcessTree(pid: string, label: string): number {
+  let killed = 0;
+  // Find and kill children recursively
+  const children = sh(`pgrep -P ${pid} 2>/dev/null`).split("\n").filter(Boolean);
+  for (const child of children) {
+    killed += killProcessTree(child, `${label} child`);
+  }
+  // Kill the process itself
+  if (isAlive(pid)) {
+    sh(`kill -9 ${pid} 2>/dev/null`);
+    info(`Killed ${label} (PID ${pid})`);
+    killed++;
+  }
+  return killed;
+}
+
+/**
+ * Find ALL instances of a service by scanning process table.
+ * Returns unique PIDs matching the service's working directory or entry script.
+ */
+function findAllInstances(target: "agent" | "relay"): string[] {
+  const dir = target === "agent" ? HQ_DIR : RELAY_DIR;
+  const pids = new Set<string>();
+
+  // Method 1: pgrep by command matching the app directory
+  for (const pid of sh(`pgrep -f "${dir}" 2>/dev/null`).split("\n").filter(Boolean)) {
+    // Exclude our own hq.ts process
+    const cmdline = sh(`ps -o command= -p ${pid} 2>/dev/null`);
+    if (cmdline && !cmdline.includes("hq.ts") && !cmdline.includes("scripts/hq")) {
+      pids.add(pid);
+    }
+  }
+
+  // Method 2: lsof to find processes with cwd in the app directory
+  for (const line of sh(`lsof +D "${dir}" -t 2>/dev/null`).split("\n").filter(Boolean)) {
+    const cmdline = sh(`ps -o command= -p ${line} 2>/dev/null`);
+    if (cmdline && !cmdline.includes("hq.ts") && !cmdline.includes("scripts/hq")) {
+      pids.add(line);
+    }
+  }
+
+  return [...pids];
+}
+
+/**
+ * Aggressively stop all instances of a target service.
+ * Kills daemon PID + children, then sweeps for any remaining instances.
+ */
+async function killAllInstances(target: "agent" | "relay"): Promise<number> {
+  const daemon = target === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+  const label = target === "agent" ? "HQ Agent" : "Relay";
+  let killed = 0;
+
+  // 1. Stop via launchctl
+  sh(`launchctl stop "${daemon}" 2>/dev/null`);
+
+  // 2. Kill the primary daemon PID and its entire process tree
+  const primaryPid = target === "agent" ? agentPid() : relayPid();
+  if (primaryPid) {
+    killed += killProcessTree(primaryPid, `${label} (primary)`);
+  }
+
+  // 3. Sweep for any remaining instances (duplicates, orphans, zombies)
+  await sleep(300);
+  const remaining = findAllInstances(target);
+  for (const pid of remaining) {
+    if (isAlive(pid)) {
+      killed += killProcessTree(pid, `${label} (stale instance)`);
+    }
+  }
+
+  // 4. Final pkill sweep as a safety net
+  const dir = target === "agent" ? HQ_DIR : RELAY_DIR;
+  sh(`pkill -9 -f "bun.*${dir}/index.ts" 2>/dev/null`);
+  sh(`pkill -9 -f "node.*${dir}/index.ts" 2>/dev/null`);
+
+  return killed;
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
@@ -139,8 +222,8 @@ async function cmdStatus(): Promise<void> {
 async function cmdStart(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
     const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-    const label  = t === "agent" ? "HQ Agent"   : "Relay";
-    const pid    = t === "agent" ? agentPid()   : relayPid();
+    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const pid = t === "agent" ? agentPid() : relayPid();
 
     if (pid) { warn(`${label} already running (PID: ${pid})`); continue; }
 
@@ -157,21 +240,33 @@ async function cmdStart(target?: string): Promise<void> {
 // hq stop [agent|relay|all]
 async function cmdStop(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-    const label  = t === "agent" ? "HQ Agent"   : "Relay";
-    const pid    = t === "agent" ? agentPid()   : relayPid();
+    const label = t === "agent" ? "HQ Agent" : "Relay";
 
-    sh(`launchctl stop "${daemon}" 2>/dev/null`);
-    if (pid) sh(`kill ${pid} 2>/dev/null`);
-    await sleep(800);
-    console.log(`⏹️   ${label} stopped`);
+    const killed = await killAllInstances(t);
+    await sleep(500);
+
+    // Verify nothing survived
+    const survivors = findAllInstances(t).filter(p => isAlive(p));
+    if (survivors.length > 0) {
+      warn(`${label}: ${survivors.length} process(es) still alive after stop, force-killing...`);
+      for (const pid of survivors) {
+        sh(`kill -9 ${pid} 2>/dev/null`);
+      }
+      await sleep(300);
+    }
+
+    killed > 0
+      ? console.log(`⏹️   ${label} stopped (killed ${killed} process${killed > 1 ? "es" : ""})`)
+      : console.log(`⏹️   ${label} stopped (was not running)`);
   }
 }
 
 // hq restart [agent|relay|all]  |  hq r
 async function cmdRestart(target?: string): Promise<void> {
+  section("Stopping all instances");
   await cmdStop(target);
   await sleep(1000);
+
   // Clean stale relay lock
   if ((!target || target === "all" || target === "relay") && fs.existsSync(RELAY_LOCK)) {
     const lockPid = fs.readFileSync(RELAY_LOCK, "utf-8").trim();
@@ -180,13 +275,46 @@ async function cmdRestart(target?: string): Promise<void> {
       info("Cleaned stale relay lock");
     }
   }
+
+  // Final sanity check — ensure nothing survived
+  for (const t of resolveTargets(target)) {
+    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const zombies = findAllInstances(t).filter(p => isAlive(p));
+    if (zombies.length > 0) {
+      warn(`${label}: ${zombies.length} zombie(s) found, force-killing before start...`);
+      for (const pid of zombies) {
+        sh(`kill -9 ${pid} 2>/dev/null`);
+      }
+      await sleep(500);
+    }
+  }
+
+  section("Starting fresh");
   await cmdStart(target);
+
+  // Confirm only one instance per target is running
+  await sleep(1500);
+  for (const t of resolveTargets(target)) {
+    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const allPids = findAllInstances(t).filter(p => isAlive(p));
+    if (allPids.length > 1) {
+      warn(`${label}: detected ${allPids.length} instances — killing extras...`);
+      const primary = t === "agent" ? agentPid() : relayPid();
+      for (const pid of allPids) {
+        if (pid !== primary) {
+          killProcessTree(pid, `${label} (duplicate)`);
+        }
+      }
+    } else if (allPids.length === 1) {
+      ok(`${label}: single instance confirmed (PID ${allPids[0]})`);
+    }
+  }
 }
 
 // hq logs [agent|relay|all] [N]  |  hq l
 async function cmdLogs(target?: string, n = 30): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const file  = t === "agent" ? AGENT_LOG : RELAY_LOG;
+    const file = t === "agent" ? AGENT_LOG : RELAY_LOG;
     const label = t === "agent" ? "HQ Agent" : "Relay";
     section(`${label} — last ${n} lines`);
     if (fs.existsSync(file)) {
@@ -201,7 +329,7 @@ async function cmdLogs(target?: string, n = 30): Promise<void> {
 // hq errors [agent|relay|all] [N]  |  hq e
 async function cmdErrors(target?: string, n = 20): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const file  = t === "agent" ? AGENT_ERR : RELAY_ERR;
+    const file = t === "agent" ? AGENT_ERR : RELAY_ERR;
     const label = t === "agent" ? "HQ Agent" : "Relay";
     section(`${label} errors — last ${n} lines`);
     if (fs.existsSync(file)) {
@@ -239,8 +367,8 @@ async function cmdPs(): Promise<void> {
 
   for (const [icon, label, pattern] of [
     ["🟣", "Claude Code", "claude.*--resume|claude.*--print|claude.*--output-format"],
-    ["🟢", "OpenCode",    "opencode run"],
-    ["🔵", "Gemini CLI",  "gemini.*--output-format|gemini.*--yolo"],
+    ["🟢", "OpenCode", "opencode run"],
+    ["🔵", "Gemini CLI", "gemini.*--output-format|gemini.*--yolo"],
   ] as const) {
     const pids = sh(`pgrep -f "${pattern}" 2>/dev/null`).split("\n").filter(Boolean);
     if (pids.length) {
@@ -274,19 +402,19 @@ async function cmdHealth(): Promise<void> {
   section("CLI Tools");
   const claudeV = sh("claude --version 2>/dev/null");
   const geminiV = sh("gemini --version 2>/dev/null");
-  const ocV     = sh("opencode --version 2>/dev/null | head -1");
-  const bunV    = sh("bun --version 2>/dev/null");
+  const ocV = sh("opencode --version 2>/dev/null | head -1");
+  const bunV = sh("bun --version 2>/dev/null");
 
-  claudeV ? ok(`Claude CLI: ${claudeV}`)               : fail("Claude CLI: not found");
-  geminiV ? ok(`Gemini CLI: ${geminiV}`)                : warn("Gemini CLI: not found (optional)");
-  ocV     ? ok(`OpenCode CLI: ${ocV}`)                  : warn("OpenCode CLI: not found (optional)");
-  bunV    ? ok(`Bun: ${bunV}`)                          : fail("Bun: not found");
+  claudeV ? ok(`Claude CLI: ${claudeV}`) : fail("Claude CLI: not found");
+  geminiV ? ok(`Gemini CLI: ${geminiV}`) : warn("Gemini CLI: not found (optional)");
+  ocV ? ok(`OpenCode CLI: ${ocV}`) : warn("OpenCode CLI: not found (optional)");
+  bunV ? ok(`Bun: ${bunV}`) : fail("Bun: not found");
 
   section("Daemons");
   const ap = path.join(LAUNCH_AGENTS, `${AGENT_DAEMON}.plist`);
   const rp = path.join(LAUNCH_AGENTS, `${RELAY_DAEMON}.plist`);
   fs.existsSync(ap) ? ok("HQ Agent daemon: installed") : warn("HQ Agent daemon: not installed  (run: hq install agent)");
-  fs.existsSync(rp) ? ok("Relay daemon: installed")    : warn("Relay daemon: not installed     (run: hq install relay)");
+  fs.existsSync(rp) ? ok("Relay daemon: installed") : warn("Relay daemon: not installed     (run: hq install relay)");
 
   section("Recent HQ Agent Logs");
   dim(fs.existsSync(AGENT_LOG)
@@ -304,11 +432,11 @@ async function cmdHealth(): Promise<void> {
 // hq install [agent|relay|all]
 async function cmdInstall(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const daemon   = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-    const srcDir   = t === "agent" ? HQ_DIR       : RELAY_DIR;
+    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+    const srcDir = t === "agent" ? HQ_DIR : RELAY_DIR;
     const plistSrc = path.join(srcDir, `${daemon}.plist`);
     const plistDst = path.join(LAUNCH_AGENTS, `${daemon}.plist`);
-    const label    = t === "agent" ? "HQ Agent"   : "Relay";
+    const label = t === "agent" ? "HQ Agent" : "Relay";
 
     if (!fs.existsSync(plistSrc)) {
       fail(`${label} plist not found: ${plistSrc}`);
@@ -324,9 +452,9 @@ async function cmdInstall(target?: string): Promise<void> {
 // hq uninstall [agent|relay|all]
 async function cmdUninstall(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const daemon   = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
+    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
     const plistDst = path.join(LAUNCH_AGENTS, `${daemon}.plist`);
-    const label    = t === "agent" ? "HQ Agent"   : "Relay";
+    const label = t === "agent" ? "HQ Agent" : "Relay";
 
     sh(`launchctl unload "${plistDst}" 2>/dev/null`);
     if (fs.existsSync(plistDst)) {
@@ -402,10 +530,10 @@ async function cmdClean(): Promise<void> {
 // hq fg [agent|relay]
 async function cmdFg(target = "agent"): Promise<void> {
   const isAgent = target === "agent";
-  const daemon  = isAgent ? AGENT_DAEMON : RELAY_DAEMON;
-  const dir     = isAgent ? HQ_DIR       : RELAY_DIR;
-  const label   = isAgent ? "HQ Agent"   : "Relay";
-  const pid     = isAgent ? agentPid()   : relayPid();
+  const daemon = isAgent ? AGENT_DAEMON : RELAY_DAEMON;
+  const dir = isAgent ? HQ_DIR : RELAY_DIR;
+  const label = isAgent ? "HQ Agent" : "Relay";
+  const pid = isAgent ? agentPid() : relayPid();
 
   sh(`launchctl stop "${daemon}" 2>/dev/null`);
   if (pid) sh(`kill ${pid} 2>/dev/null`);
@@ -418,8 +546,8 @@ async function cmdFg(target = "agent"): Promise<void> {
 // hq install-cli
 async function cmdInstallCli(): Promise<void> {
   const hqScript = path.join(SCRIPTS_DIR, "hq.ts");
-  const binDir   = path.join(os.homedir(), ".local/bin");
-  const binPath  = path.join(binDir, "hq");
+  const binDir = path.join(os.homedir(), ".local/bin");
+  const binPath = path.join(binDir, "hq");
 
   fs.mkdirSync(binDir, { recursive: true });
   fs.chmodSync(hqScript, 0o755);

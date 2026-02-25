@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stale live output cleanup** (`scripts/agent-hq-daemon.ts`): Daemon now purges stale `_delegation/live/*.md` files older than 1 hour
 - **Discord bot for HQ agent** (`apps/agent/discordBot.ts`): Direct Discord integration for the HQ agent
 - **Chat session manager** (`apps/agent/lib/chatSession.ts`): Async system context building with vault integration
+- **`vault-gateway` package** (`packages/vault-gateway/`): New authenticated proxy between HQ agents and the Obsidian Local REST API. Hono-based server with bearer-token ACL middleware (admin / relay / readonly roles), path-based ACL for relay agents, and transparent HTTPS proxying with self-signed cert support
+- **`vault-mcp` package** (`packages/vault-mcp/`): New MCP server exposing the vault over the Model Context Protocol. Tools: filesystem CRUD, note read/write with auto-locking, advisory lock acquire/release, REST API passthrough, advanced batch-read, and tag/frontmatter management
+- **`VaultEventBus`** (`packages/vault-client/src/events.ts`): File-system event bus using `fs.watch` — emits typed `VaultEvent` objects (`note:created`, `note:modified`, `note:deleted`, `system:modified`, `job:created`, `approval:created`) with debouncing and path filtering
 
 ### Changed
 - **Discord relay streaming** (`apps/relay-adapter-discord/src/bot.ts`): Replaced single-message-edit pattern with progressive multi-message delivery — sends reply chunks at paragraph boundaries instead of editing a placeholder
@@ -30,11 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OpenCode harness** (`apps/discord-relay/src/harnesses/opencode.ts`): Enhanced streaming and context handling
 - **RECENT_ACTIVITY.md frontmatter** (`packages/vault-client/src/index.ts`): Content truncated to 200 chars in YAML frontmatter to prevent file bloat while keeping full text in markdown body
 - **Health check** (`scripts/hq.ts`): Fixed `opencode` version check flag (`--version` instead of `version`)
+- **`hq restart` single-instance enforcement** (`scripts/hq.ts`): Restart now runs `findAllInstances()` before and after stop, force-kills any survivors with `kill -9`, then confirms exactly one process per target is alive after start — eliminates duplicate agent/relay processes
 
 ### Security
 - **Env var scrubbing expanded** (`apps/agent/governance.ts`): Added `DISCORD_BOT_TOKEN_OPENCODE` and `DISCORD_BOT_TOKEN_GEMINI` to `SENSITIVE_ENV_VARS` — prevents leakage to child processes
 - **Network egress logging** (`apps/agent/governance.ts`): Bash spawn hook now logs when child processes use `curl`, `wget`, `nc`, `ping`, or `ssh`
 - **Path sandboxing** (`apps/agent/governance.ts`): `ToolGuardian` accepts `allowedPaths` and blocks file write operations outside `TARGET_DIR` and `VAULT_PATH`
+- **`vault-gateway` agent token auth hardened** (`packages/vault-gateway/src/server.ts`): Replaced hardcoded placeholder tokens (`admin-secret-token`, `relay-secret-token`) with env-var-driven parsing via `AGENT_TOKENS`. Format: comma-separated `token:role:id` triples. Server exits immediately on startup if no tokens are configured outside of mock/test mode
+- **`vault-gateway` `.env.example`** (`packages/vault-gateway/.env.example`): Added environment template documenting all required variables; includes `openssl rand -hex 32` tip for generating secure tokens
 
 ## [0.4.0] - 2026-02-24
 

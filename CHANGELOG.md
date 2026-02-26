@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **HQ Control Center (React/Electron App)** (`apps/hq-control-center/`): Added a new desktop interface featuring a Simulation Room with pixel-art avatars, a responsive VaultGraph view, layout + furniture management, settings page and a backend Electron Daemon Manager.
+- **Ignored Build Outputs**: Added `.gitignore` rules for `release/` in Control Center to prevent committing built binaries.
 - **Code Mode & Graph-RAG** (`apps/agent/skills/code-mapper/`, `packages/vault-client/src/graph.ts`, `packages/vault-mcp/src/tools/code-graph.ts`): Implemented a deterministic codebase mapping system that translates architecture into Obsidian notes. Features include blast radius analysis, outbound dependency context, and native HQ Agent tool integration (no MCP hop required for basic graph queries).
 - **Skill Awareness for HQ Agent** (`apps/agent/lib/chatSession.ts`, `apps/agent/skills.ts`): HQ Agent now has native `load_skill` and `list_skills` tools. Added `code-mapper` to `AUTO_LOAD_SKILLS` to ensure the Code Mode protocol is always in-context during coding tasks.
 - **Context budget accounting** (`apps/agent/index.ts`): Pre-calculates prompt component sizes and dynamically truncates pinned notes and skills when approaching the ~100K character limit

@@ -1,0 +1,434 @@
+/* src/styles/index.css */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+  --app-black: #0D0F10;
+  --primary-bg: #131619;
+  --brand-black: #231F20;
+  --brand-gray: #dfdfdf;
+  --gray-text: #828282;
+  --brand-blue: #00C6FA;
+  --brand-green: #1DE52F;
+
+  --bg-dark: var(--app-black);
+  --bg-panel: var(--primary-bg);
+  --text-main: var(--brand-gray);
+  --text-muted: var(--gray-text);
+  --accent-blue: var(--brand-blue);
+  --accent-blue-hover: #33d1fb;
+  --accent-green: var(--brand-green);
+  --border-color: var(--brand-black);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', sans-serif;
+  background-color: var(--bg-dark);
+  color: var(--text-main);
+  overflow: hidden;
+  /* App Shell manages overflow */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Tab Shell */
+.app-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+.tab-header {
+  display: flex;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+  backdrop-filter: blur(12px);
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.95rem;
+  font-weight: 500;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tab-btn.active {
+  color: var(--app-black);
+  background: var(--accent-blue);
+  box-shadow: 0 0 10px rgba(0, 198, 250, 0.3);
+}
+
+.tab-content {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+}
+
+/* Dashboard */
+.dashboard-container {
+  padding: 2rem;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.dash-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.badges {
+  display: flex;
+  gap: 1rem;
+}
+
+.badge {
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.badge.active {
+  background: rgba(29, 229, 47, 0.1);
+  color: var(--accent-green);
+  border: 1px solid rgba(29, 229, 47, 0.2);
+}
+
+.badge.inactive {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.metric-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.metric-card h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.metric-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: white;
+}
+
+.sub-text {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.progress-bar {
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 0.5rem;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent-blue);
+  transition: width 0.3s ease;
+}
+
+.jobs-section {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1.5rem;
+}
+
+.jobs-section h3 {
+  margin-top: 0;
+  margin-bottom: 1.5rem;
+}
+
+.trace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.trace-card {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.trace-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.trace-latest {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  font-family: monospace;
+}
+
+/* Utilities for Setup / Terminal */
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.p-4 {
+  padding: 1rem;
+}
+
+.border-b {
+  border-bottom-width: 1px;
+}
+
+.border-gray-800 {
+  border-color: #1f2937;
+}
+
+.h-full {
+  height: 100%;
+}
+
+.bg-dark {
+  background-color: var(--bg-dark);
+}
+
+.text-main {
+  color: var(--text-main);
+}
+
+.text-xl {
+  font-size: 1.25rem;
+}
+
+.font-bold {
+  font-weight: 700;
+}
+
+.px-4 {
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+.py-2 {
+  padding-top: 0.5rem;
+  padding-bottom: 0.5rem;
+}
+
+.rounded {
+  border-radius: 0.25rem;
+}
+
+.font-semibold {
+  font-weight: 600;
+}
+
+.transition-colors {
+  transition-property: background-color, border-color, color, fill, stroke;
+  transition-duration: 200ms;
+}
+
+.bg-red-500 {
+  background-color: #ef4444;
+}
+
+.hover\\:bg-red-600:hover {
+  background-color: #dc2626;
+}
+
+.text-white {
+  color: #fff;
+}
+
+.bg-green-500 {
+  background-color: var(--accent-green);
+  color: var(--app-black);
+}
+
+.hover\:bg-green-600:hover {
+  background-color: #17c625;
+}
+
+.flex-1 {
+  flex: 1 1 0%;
+}
+
+.overflow-y-auto {
+  overflow-y: auto;
+}
+
+.font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.text-sm {
+  font-size: 0.875rem;
+}
+
+.text-gray-500 {
+  color: var(--text-muted);
+}
+
+.italic {
+  font-style: italic;
+}
+
+.mb-1 {
+  margin-bottom: 0.25rem;
+}
+
+.text-red-400 {
+  color: #f87171;
+}
+
+.text-gray-300 {
+  color: #d1d5db;
+}
+
+.text-gray-600 {
+  color: #4b5563;
+}
+
+.mr-2 {
+  margin-right: 0.5rem;
+}
+
+/* SetupWizard minimal utility classes */
+.max-w-2xl {
+  max-width: 42rem;
+}
+
+.mx-auto {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.p-8 {
+  padding: 2rem;
+}
+
+.mt-10 {
+  margin-top: 2.5rem;
+}
+
+.bg-gray-900 {
+  background-color: var(--bg-panel);
+}
+
+.rounded-xl {
+  border-radius: 0.75rem;
+}
+
+.shadow-2xl {
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+}
+
+.mb-2 {
+  margin-bottom: 0.5rem;
+}
+
+.mb-8 {
+  margin-bottom: 2rem;
+}
+
+.text-gray-400 {
+  color: var(--text-muted);
+}
+
+.space-y-6>*+* {
+  margin-top: 1.5rem;
+}
+
+.block {
+  display: block;
+}
+
+.font-medium {
+  font-weight: 500;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.bg-gray-950 {
+  background-color: var(--bg-dark);
+}
+
+.border {
+  border-width: 1px;
+}
+
+.border-gray-700 {
+  border-color: var(--brand-black);
+}
+
+.bg-blue-600 {
+  background-color: var(--accent-blue);
+  color: var(--app-black);
+}
+
+.hover\:bg-blue-700:hover {
+  background-color: var(--accent-blue-hover);
+  color: var(--app-black);
+}
+
+.py-3 {
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+}
+
+.disabled\\:opacity-50:disabled {
+  opacity: 0.5;
+}

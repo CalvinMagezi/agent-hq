@@ -7,10 +7,8 @@
 
 import type {
   RelayMessage,
-  RelayMessageType,
   AuthAckMessage,
   JobSubmittedMessage,
-  JobStatusMessage,
   JobStreamMessage,
   JobCompleteMessage,
   SystemStatusResponseMessage,
@@ -25,7 +23,6 @@ import {
   RELAY_PING_INTERVAL_MS,
   RELAY_RECONNECT_INITIAL_MS,
   RELAY_RECONNECT_MAX_MS,
-  RELAY_CLIENT_VERSION,
 } from "./constants";
 
 export interface RelayClientConfig {

@@ -1,0 +1,59 @@
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* Custom Brand Colors */
+  --primary-bg: #131619;
+  --brand-green: #1DE52F;
+  --brand-blue: #00C6FA;
+  --brand-black: #231F20;
+  --brand-gray: #dfdfdf;
+  --app-black: #0D0F10;
+  --gray-text: #828282;
+
+  color-scheme: dark;
+  color: var(--brand-gray);
+  background-color: var(--app-black);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--app-black);
+  color: var(--brand-gray);
+}
+
+a {
+  font-weight: 500;
+  color: var(--brand-blue);
+  text-decoration: inherit;
+}
+
+a:hover {
+  color: var(--brand-green);
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid var(--brand-black);
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: var(--brand-black);
+  color: var(--brand-gray);
+  cursor: pointer;
+  transition: all 0.25s;
+}
+
+button:hover {
+  border-color: var(--brand-blue);
+  color: var(--brand-green);
+}

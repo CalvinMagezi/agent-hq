@@ -177,8 +177,9 @@ const BLOCKED_PREFIXES = [
 
 // ─── Adapter ───────────────────────────────────────────────────────
 
-export class OpenClawAdapter {
+export class OrchestratorAdapter {
   readonly vaultPath: string;
+  readonly cooName: string;
   readonly namespacePath: string;
   readonly notesPath: string;
   readonly healthPath: string;
@@ -187,14 +188,20 @@ export class OpenClawAdapter {
 
   private rateLimiter = new SlidingWindowRateLimiter();
   private activeCaps = new Set<string>();
+  private ephemeralToken: string | null = null;
 
-  constructor(vaultPath: string) {
+  constructor(vaultPath: string, cooName: string = "openclaw") {
+    this.cooName = cooName;
     this.vaultPath = path.resolve(vaultPath);
-    this.namespacePath = path.join(this.vaultPath, "_external", "openclaw");
+    this.namespacePath = path.join(this.vaultPath, "_external", cooName);
     this.notesPath = path.join(this.namespacePath, "notes");
     this.healthPath = path.join(this.namespacePath, "_health");
     this.auditPath = path.join(this.namespacePath, "_audit");
     this.configPath = path.join(this.namespacePath, "_config.md");
+  }
+
+  setEphemeralToken(token: string): void {
+    this.ephemeralToken = token;
   }
 
   // ─── Init ──────────────────────────────────────────────────────
@@ -224,7 +231,7 @@ export class OpenClawAdapter {
     const now = Date.now();
     if (
       this._configCache &&
-      now - this._configCache.loadedAt < OpenClawAdapter.CONFIG_CACHE_MS
+      now - this._configCache.loadedAt < OrchestratorAdapter.CONFIG_CACHE_MS
     ) {
       return this._configCache.config;
     }
@@ -281,12 +288,18 @@ export class OpenClawAdapter {
 
   /** Validate bearer token */
   validateToken(token: string): boolean {
+    if (this.ephemeralToken && token === this.ephemeralToken) return true;
     const config = this.getConfig();
     return config.enabled && config.token.length > 0 && token === config.token;
   }
 
   /** Check if integration is enabled and circuit breaker allows requests */
   checkAccess(): { allowed: boolean; reason?: string } {
+    // Ephemeral token = daemon-authorized COO — bypass enabled flag entirely
+    if (this.ephemeralToken) {
+      return { allowed: true };
+    }
+
     const config = this.getConfig();
 
     if (!config.enabled) {
@@ -459,8 +472,8 @@ export class OpenClawAdapter {
         const snippet =
           idx >= 0
             ? (start > 0 ? "..." : "") +
-              n.content.substring(start, end) +
-              (end < n.content.length ? "..." : "")
+            n.content.substring(start, end) +
+            (end < n.content.length ? "..." : "")
             : n.content.substring(0, 200);
 
         return {
@@ -609,6 +622,118 @@ export class OpenClawAdapter {
     return { requestId, status: "failed", error: "Request not found" };
   }
 
+  /** List available specialized sub-agents (harnesses) */
+  listSpecialists(): Array<{ id: string; name: string; description: string }> {
+    return [
+      { id: "gemini-cli", name: "Gemini Workspace", description: "Google Workspace & Research" },
+      { id: "claude-code", name: "Claude Code", description: "Efficient code editing & debugging" },
+      { id: "opencode", name: "OpenCode", description: "Generic code generation (multi-model)" }
+    ];
+  }
+
+  /** Create a delegation task directly */
+  delegateToHarness(args: {
+    instruction: string;
+    targetHarnessType: HarnessType;
+    priority?: number;
+    dependsOn?: string[];
+    metadata?: Record<string, any>;
+  }): string {
+    const taskId = `${this.cooName}-delegated-${Date.now()}`;
+    const filename = `task-${taskId}.md`;
+    const filePath = path.join(this.vaultPath, "_delegation", "pending", filename);
+
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const frontmatter = {
+      taskId,
+      targetHarnessType: args.targetHarnessType,
+      status: "pending",
+      priority: args.priority ?? 50,
+      deadlineMs: 3600000, // 1 hour
+      dependsOn: args.dependsOn ?? [],
+      originActor: this.cooName,
+      metadata: args.metadata || {},
+      createdAt: new Date().toISOString()
+    };
+
+    const output = matter.stringify("\n# Task Instruction\n\n" + args.instruction + "\n", frontmatter);
+    fs.writeFileSync(filePath, output, "utf-8");
+
+    return taskId;
+  }
+
+  /** Read recently completed tasks from _delegation/completed/ scoped to this COO */
+  getRecentCompletedTasks(limit = 20): Array<{
+    taskId: string;
+    status: string;
+    result?: string;
+    error?: string;
+    completedAt?: string;
+  }> {
+    const completedDir = path.join(this.vaultPath, "_delegation", "completed");
+    if (!fs.existsSync(completedDir)) return [];
+
+    const files = fs.readdirSync(completedDir)
+      .filter(f => f.endsWith(".md"))
+      .map(f => ({
+        name: f,
+        mtime: fs.statSync(path.join(completedDir, f)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, limit * 3); // over-fetch to allow filtering by actor
+
+    const results: Array<{ taskId: string; status: string; result?: string; error?: string; completedAt?: string }> = [];
+
+    for (const { name } of files) {
+      if (results.length >= limit) break;
+      try {
+        const raw = fs.readFileSync(path.join(completedDir, name), "utf-8");
+        const { data, content } = matter(raw);
+        if (data.originActor !== this.cooName) continue;
+        results.push({
+          taskId: data.taskId ?? name.replace(/^task-/, "").replace(/\.md$/, ""),
+          status: data.status ?? "completed",
+          result: data.status !== "failed" ? content.trim() || undefined : undefined,
+          error: data.error ?? undefined,
+          completedAt: data.completedAt ?? undefined,
+        });
+      } catch {
+        // skip unreadable files
+      }
+    }
+
+    return results;
+  }
+
+  /** Explicitly mark a task as completed (for relays) */
+  markTaskCompleted(args: {
+    taskId: string;
+    result?: string;
+    error?: string;
+    status: "completed" | "failed";
+  }): void {
+    // Logic to move task from pending/claimed to completed
+    // and write the result. Similar to VaultClient.updateDelegatedTask.
+    // However, since this is a bridge, we'll just write it to completed.
+
+    const completedPath = path.join(this.vaultPath, "_delegation", "completed", `task-${args.taskId}.md`);
+    const dir = path.dirname(completedPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const frontmatter = {
+      taskId: args.taskId,
+      status: args.status,
+      error: args.error,
+      completedAt: new Date().toISOString(),
+      originActor: "openclaw"
+    };
+
+    const output = matter.stringify("\n# Result\n\n" + (args.result || "") + "\n", frontmatter);
+    fs.writeFileSync(completedPath, output, "utf-8");
+  }
+
   // ─── Heartbeat ────────────────────────────────────────────────
 
   /** Record OpenClaw heartbeat */
@@ -616,11 +741,11 @@ export class OpenClawAdapter {
     const filePath = path.join(this.healthPath, "heartbeat.md");
     const now = new Date().toISOString();
 
-    const frontmatter: Record<string, unknown> = {
-      lastHeartbeat: now,
-      status: "online",
-      ...metadata,
-    };
+    // Filter out undefined values — js-yaml (used by gray-matter) cannot dump undefined
+    const rawFrontmatter = { lastHeartbeat: now, status: "online", ...metadata };
+    const frontmatter: Record<string, unknown> = Object.fromEntries(
+      Object.entries(rawFrontmatter).filter(([, v]) => v !== undefined)
+    );
 
     const output = matter.stringify(
       "\n# OpenClaw Heartbeat\n\nLast seen: " + now + "\n",
@@ -705,3 +830,5 @@ export class OpenClawAdapter {
     return this.activeCaps.size;
   }
 }
+
+export { OrchestratorAdapter as OpenClawAdapter };

@@ -9,7 +9,7 @@ import {
   OpenClawAdapter,
   SecurityError,
   RateLimitError,
-} from "@repo/vault-client/openclaw-adapter";
+} from "@repo/vault-client/orchestrator-adapter";
 import { validateRequest } from "./auth";
 import { AuditLogger } from "./audit";
 import { filterResult } from "./resultFilter";
@@ -18,6 +18,8 @@ import type {
   NoteCreateBody,
   NoteUpdateBody,
   HeartbeatBody,
+  DelegateBody,
+  CompletedBody,
 } from "./types";
 
 export function createRouter(adapter: OpenClawAdapter, audit: AuditLogger) {
@@ -267,6 +269,62 @@ export function createRouter(adapter: OpenClawAdapter, audit: AuditLogger) {
       return withAuth(req, "context", async () => {
         const context = adapter.getFilteredContext();
         return Response.json(context);
+      });
+    }
+
+    // ─── Agents ───────────────────────────────────────────────
+    if (method === "GET" && pathname === "/api/agents") {
+      return withAuth(req, "agents_list", async () => {
+        const agents = adapter.listSpecialists();
+        return Response.json({ agents });
+      });
+    }
+
+    // ─── Delegate ──────────────────────────────────────────────
+    if (method === "POST" && pathname === "/api/delegate") {
+      return withAuth(req, "delegate", async () => {
+        const body = (await req.json()) as DelegateBody;
+        if (!body.instruction || !body.targetAgentId) {
+          return Response.json({ error: "Missing instruction or targetAgentId" }, { status: 400 });
+        }
+
+        const taskId = adapter.delegateToHarness({
+          instruction: body.instruction,
+          targetHarnessType: body.targetAgentId as any,
+          priority: body.priority,
+          dependsOn: body.dependsOn,
+          metadata: body.metadata
+        });
+
+        return Response.json({ status: "pending", taskId });
+      });
+    }
+
+    // ─── Review Completed (GET) ────────────────────────────────
+    if (method === "GET" && pathname === "/api/completed") {
+      return withAuth(req, "completed_review", async () => {
+        const limit = parseInt(url.searchParams.get("limit") ?? "20", 10);
+        const tasks = adapter.getRecentCompletedTasks(Math.min(limit, 50));
+        return Response.json({ tasks });
+      });
+    }
+
+    // ─── Mark Completed (POST) ────────────────────────────────
+    if (method === "POST" && pathname === "/api/completed") {
+      return withAuth(req, "completed", async () => {
+        const body = (await req.json()) as CompletedBody;
+        if (!body.taskId) {
+          return Response.json({ error: "Missing taskId" }, { status: 400 });
+        }
+
+        adapter.markTaskCompleted({
+          taskId: body.taskId,
+          result: body.result,
+          error: body.error,
+          status: body.status || "completed"
+        });
+
+        return Response.json({ status: "ok" });
       });
     }
 

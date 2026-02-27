@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Pluggable COO Architecture** (`apps/agent/lib/cooRouter.ts`, `packages/vault-client/src/orchestratorAdapter.ts`): Implementation of the Chief Operating Officer (COO) routing pattern. Allows delegating intent planning to external orchestrators while maintaining a secure sandboxed bridge.
+- **`fbmq` Queue Integration** (`packages/vault-sync/src/eventBus.ts`, `scripts/setup.ts`): Transitioned delegation and job queues to `fbmq` for improved reliability and performance. Added `_fbmq/` directory monitoring to `EventBus`.
+- **COO Watchdog & Bridge** (`scripts/agent-hq-daemon.ts`, `scripts/orchestrator-bridge/`): New daemon task for monitoring external orchestrators with heartbeat tracking, dead man's switch (auto-revert to internal mode), and circuit breakers for rate/error anomalies.
+- **Queue Migration Utility** (`scripts/migrate-queues.ts`): CLI tool to migrate legacy file-based pending tasks and jobs to the new `fbmq` system.
+- **COO CLI Command** (`scripts/hq.ts`): Added `hq coo` command for orchestrator management.
 - **HQ Control Center (React/Electron App)** (`apps/hq-control-center/`): Added a new desktop interface featuring a Simulation Room with pixel-art avatars, a responsive VaultGraph view, layout + furniture management, settings page and a backend Electron Daemon Manager.
 - **Ignored Build Outputs**: Added `.gitignore` rules for `release/` in Control Center to prevent committing built binaries.
 - **Code Mode & Graph-RAG** (`apps/agent/skills/code-mapper/`, `packages/vault-client/src/graph.ts`, `packages/vault-mcp/src/tools/code-graph.ts`): Implemented a deterministic codebase mapping system that translates architecture into Obsidian notes. Features include blast radius analysis, outbound dependency context, and native HQ Agent tool integration (no MCP hop required for basic graph queries).
@@ -38,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RECENT_ACTIVITY.md frontmatter** (`packages/vault-client/src/index.ts`): Content truncated to 200 chars in YAML frontmatter to prevent file bloat while keeping full text in markdown body
 - **Health check** (`scripts/hq.ts`): Fixed `opencode` version check flag (`--version` instead of `version`)
 - **`hq restart` single-instance enforcement** (`scripts/hq.ts`): Restart now runs `findAllInstances()` before and after stop, force-kills any survivors with `kill -9`, then confirms exactly one process per target is alive after start — eliminates duplicate agent/relay processes
+- **Vault Sync Ignore Pattern** (`packages/vault-sync/src/utils.ts`): Added `.tmp/` to ignored sync patterns.
+
+### Removed
+- **Legacy OpenClaw Bridge** (`scripts/openclaw-bridge.ts`): Replaced by the unified `orchestrator-bridge`.
 
 ### Security
 - **Env var scrubbing expanded** (`apps/agent/governance.ts`): Added `DISCORD_BOT_TOKEN_OPENCODE` and `DISCORD_BOT_TOKEN_GEMINI` to `SENSITIVE_ENV_VARS` — prevents leakage to child processes

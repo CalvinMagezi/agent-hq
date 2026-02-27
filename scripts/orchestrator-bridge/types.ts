@@ -41,3 +41,18 @@ export interface AuditEntry {
   details: Record<string, unknown>;
   status: "accepted" | "rejected" | "error" | "blocked";
 }
+
+export interface DelegateBody {
+  instruction: string;
+  targetAgentId: string;
+  priority?: number;
+  dependsOn?: string[];
+  metadata?: Record<string, any>;
+}
+
+export interface CompletedBody {
+  taskId: string;
+  result?: string;
+  error?: string;
+  status?: "completed" | "failed";
+}

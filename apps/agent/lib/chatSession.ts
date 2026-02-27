@@ -158,6 +158,24 @@ export class ChatSessionManager {
 
         this.isProcessing = true;
         try {
+            // Check for external orchestration mode
+            if (this.config.vaultClient) {
+                const context = await this.config.vaultClient.getAgentContext();
+                if (context.config?.["orchestration_mode"] === "external") {
+                    const intentId = await this.config.vaultClient.sendToCoo({
+                        jobId: "",
+                        instruction: text,
+                        priority: 50,
+                        metadata: {
+                            discordChannelId: this.discordContext?.channelId,
+                            discordIsDM: this.discordContext?.isDM,
+                            source: "chat"
+                        }
+                    });
+                    return `Message routed to external COO (Intent ID: ${intentId}). You will be notified when the response is ready.`;
+                }
+            }
+
             if (!this.session) {
                 await this.createSession();
             }

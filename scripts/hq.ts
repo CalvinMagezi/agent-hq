@@ -566,40 +566,139 @@ async function cmdInstallCli(): Promise<void> {
   }
 }
 
+// hq coo
+async function cmdCoo(subcommand?: string, arg?: string): Promise<void> {
+  const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+
+  function setCooMode(vaultPath: string, mode: string, cooName?: string) {
+    const configPath = path.join(vaultPath, "_system/CONFIG.md");
+    if (!fs.existsSync(configPath)) {
+      fail("CONFIG.md not found in _system");
+      return;
+    }
+    let content = fs.readFileSync(configPath, "utf-8");
+    content = content.replace(
+      /\| orchestration_mode\s*\|\s*[a-zA-Z0-9_\-]*\s*\|/,
+      `| orchestration_mode | ${mode} |`
+    );
+    if (cooName !== undefined) {
+      content = content.replace(
+        /\| active_coo\s*\|\s*[a-zA-Z0-9_\-]*\s*\|/,
+        `| active_coo | ${cooName} |`
+      );
+    }
+    fs.writeFileSync(configPath, content, "utf-8");
+  }
+
+  const sysOrchestrators = path.join(VAULT_PATH, "_system/orchestrators");
+  const extMemories = path.join(VAULT_PATH, "_external");
+
+  if (subcommand === "install" && arg) {
+    fs.mkdirSync(sysOrchestrators, { recursive: true });
+    const name = path.basename(arg, '.git');
+    const targetDir = path.join(sysOrchestrators, name);
+    if (fs.existsSync(targetDir)) {
+      fail(`COO ${name} is already installed`);
+      return;
+    }
+    console.log(`Installing COO: ${name}...`);
+    try {
+      execSync(`git clone ${arg} ${targetDir}`, { stdio: "inherit" });
+      execSync(`bun install`, { cwd: targetDir, stdio: "inherit" });
+      const memoryDir = path.join(extMemories, name);
+      fs.mkdirSync(memoryDir, { recursive: true });
+      ok(`Installed ${name}`);
+    } catch (e: any) {
+      fail(`Installation failed: ${e.message}`);
+    }
+  } else if (subcommand === "uninstall" && arg) {
+    const targetDir = path.join(sysOrchestrators, arg);
+    if (!fs.existsSync(targetDir)) {
+      fail(`COO ${arg} not found`);
+      return;
+    }
+    fs.rmSync(targetDir, { recursive: true, force: true });
+    ok(`Uninstalled sandbox for ${arg} (memory preserved)`);
+  } else if (subcommand === "activate" && arg) {
+    setCooMode(VAULT_PATH, "external", arg);
+    ok(`Activated COO: ${arg}`);
+  } else if (subcommand === "deactivate") {
+    setCooMode(VAULT_PATH, "internal");
+    ok("Deactivated COO (internal orchestration engaged)");
+  } else if (subcommand === "status") {
+    const configPath = path.join(VAULT_PATH, "_system/CONFIG.md");
+    let mode = "internal";
+    let active = "none";
+    if (fs.existsSync(configPath)) {
+      const content = fs.readFileSync(configPath, "utf-8");
+      const modeMatch = content.match(/\| orchestration_mode\s*\|\s*([a-zA-Z0-9_\-]+)\s*\|/);
+      if (modeMatch) mode = modeMatch[1];
+      const activeMatch = content.match(/\| active_coo\s*\|\s*([a-zA-Z0-9_\-]+)\s*\|/);
+      if (activeMatch) active = activeMatch[1];
+    }
+    section("COO Status");
+    console.log(`Mode:       ${c.bold}${mode}${c.reset}`);
+    console.log(`Active COO: ${c.bold}${active}${c.reset}\n`);
+    console.log("Installed Orchestrators:");
+    if (fs.existsSync(sysOrchestrators)) {
+      let count = 0;
+      for (const entry of fs.readdirSync(sysOrchestrators, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) {
+          console.log(`  - ${entry.name}`);
+          count++;
+        }
+      }
+      if (count === 0) console.log("  (none)");
+    } else {
+      console.log("  (none)");
+    }
+    console.log();
+  } else {
+    fail(`Unknown coo subcommand: ${subcommand}`);
+  }
+}
+
 // hq help
 function cmdHelp(): void {
   console.log(`
 ${c.bold}hq${c.reset} — Agent HQ CLI
 
 ${c.bold}USAGE${c.reset}
-  hq [command] [target] [options]
+  hq[command][target][options]
 
-${c.bold}CHAT (default when no command given)${c.reset}
+${c.bold}CHAT(default when no command given)${c.reset}
   hq                            Interactive chat session
   hq chat                       Interactive chat session
 
 ${c.bold}SERVICE MANAGEMENT${c.reset}
-  hq status                     Status of all services            (alias: s)
-  hq start  [agent|relay|all]   Start services
-  hq stop   [agent|relay|all]   Stop services
-  hq restart [agent|relay|all]  Restart services                  (alias: r)
-  hq fg [agent|relay]           Run a service in foreground
+  hq status                     Status of all services(alias: s)
+  hq start[agent | relay | all]   Start services
+  hq stop[agent | relay | all]   Stop services
+  hq restart[agent | relay | all]  Restart services(alias: r)
+  hq fg[agent | relay]           Run a service in foreground
 
 ${c.bold}LOGS${c.reset}
-  hq logs   [agent|relay|all] [N]  Last N log lines (default 30)  (alias: l)
-  hq errors [agent|relay|all] [N]  Last N error lines (default 20)(alias: e)
-  hq follow [agent|relay|all]      Live tail logs                  (alias: f)
+  hq logs[agent | relay | all][N]  Last N log lines(default 30)(alias: l)
+  hq errors[agent | relay | all][N]  Last N error lines(default 20)(alias: e)
+  hq follow[agent | relay | all]      Live tail logs(alias: f)
 
 ${c.bold}PROCESSES & HEALTH${c.reset}
-  hq ps                         All managed processes              (alias: p)
-  hq health                     Full health check                  (alias: h)
-  hq kill                       Force-kill all processes           (alias: k)
-  hq clean                      Remove stale locks & orphans       (alias: c)
+  hq ps                         All managed processes(alias: p)
+  hq health                     Full health check(alias: h)
+  hq kill                       Force - kill all processes(alias: k)
+  hq clean                      Remove stale locks & orphans(alias: c)
 
 ${c.bold}SETUP${c.reset}
-  hq install   [agent|relay|all]  Install launchd daemons (auto-start on login)
-  hq uninstall [agent|relay|all]  Remove launchd daemons
-  hq install-cli                  Symlink hq to ~/.local/bin/hq
+  hq install[agent | relay | all]  Install launchd daemons(auto - start on login)
+  hq uninstall[agent | relay | all]  Remove launchd daemons
+  hq install - cli                  Symlink hq to ~/.local/bin / hq
+
+${c.bold}COO MANAGEMENT${c.reset}
+  hq coo install < url > Install a new COO orchestrator
+  hq coo uninstall < name > Remove COO(preserves memory)
+  hq coo activate < name > Switch to external orchestration
+  hq coo deactivate             Switch to internal orchestration
+  hq coo status                 Show status and installed COOs
 
 ${c.bold}EXAMPLES${c.reset}
   hq                    # Start chatting
@@ -609,9 +708,9 @@ ${c.bold}EXAMPLES${c.reset}
   hq follow             # Live tail all logs
   hq ps                 # See all running processes
   hq health             # Full system health report
-  hq install            # Install both daemons (first-time setup)
-  hq install-cli        # Add 'hq' to PATH
-`);
+  hq install            # Install both daemons(first - time setup)
+  hq install - cli        # Add 'hq' to PATH
+      `);
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -667,6 +766,9 @@ switch (cmd) {
 
   case "install-cli":
     await cmdInstallCli(); break;
+
+  case "coo":
+    await cmdCoo(arg1, arg2); break;
 
   case "help": case "--help": case "-h":
     cmdHelp(); break;

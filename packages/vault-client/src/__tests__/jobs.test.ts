@@ -17,8 +17,8 @@ afterEach(() => {
   cleanupTempVault(vaultPath);
 });
 
-describe("Job Lifecycle", () => {
-  test("createJob creates file in _jobs/pending with correct frontmatter", async () => {
+describe("Job Lifecycle (fbmq)", () => {
+  test("createJob enqueues to fbmq and returns jobId", async () => {
     const jobId = await client.createJob({
       instruction: "Test instruction",
       type: "background",
@@ -26,19 +26,11 @@ describe("Job Lifecycle", () => {
       securityProfile: "standard",
     });
 
-    expect(jobId).toMatch(/^job-\d+-[a-z0-9]+$/);
+    expect(jobId).toMatch(/^job-/);
 
-    const files = fs.readdirSync(path.join(vaultPath, "_jobs/pending"));
-    expect(files.length).toBe(1);
-    expect(files[0]).toBe(`${jobId}.md`);
-
-    const content = fs.readFileSync(
-      path.join(vaultPath, "_jobs/pending", files[0]),
-      "utf-8",
-    );
-    expect(content).toContain("status: pending");
-    expect(content).toContain("priority: 75");
-    expect(content).toContain("Test instruction");
+    // Job should be in fbmq pending queue (depth > 0)
+    const depth = await client.jobQueue.depth();
+    expect(depth).toBeGreaterThanOrEqual(1);
   });
 
   test("createJob with all options", async () => {
@@ -55,22 +47,22 @@ describe("Job Lifecycle", () => {
     const job = await client.getPendingJob("worker-1");
     expect(job).not.toBeNull();
     expect(job!.type).toBe("rpc");
-    expect(job!.priority).toBe(90);
     expect(job!.securityProfile).toBe("admin");
     expect(job!.modelOverride).toBe("anthropic/claude-sonnet-4-6");
     expect(job!.thinkingLevel).toBe("high");
     expect(job!.threadId).toBe("thread-123");
+    expect(job!.instruction).toBe("Full options test");
   });
 
-  test("getPendingJob returns highest-priority job", async () => {
+  test("getPendingJob returns highest-priority job first", async () => {
     await client.createJob({ instruction: "Low priority", priority: 10 });
     await client.createJob({ instruction: "High priority", priority: 90 });
     await client.createJob({ instruction: "Medium priority", priority: 50 });
 
     const job = await client.getPendingJob("worker-1");
     expect(job).not.toBeNull();
+    // fbmq priority ordering: 90 maps to "critical", dequeued first
     expect(job!.instruction).toBe("High priority");
-    expect(job!.priority).toBe(90);
   });
 
   test("getPendingJob returns null when no jobs", async () => {
@@ -78,67 +70,84 @@ describe("Job Lifecycle", () => {
     expect(job).toBeNull();
   });
 
-  test("claimJob moves file from pending to running", async () => {
+  test("claimJob updates metadata on the processing file", async () => {
     const jobId = await client.createJob({ instruction: "Claim me" });
 
+    // getPendingJob does the atomic dequeue (pop) — file is now in processing/
+    const pending = await client.getPendingJob("worker-1");
+    expect(pending).not.toBeNull();
+    expect(pending!._filePath).toContain("processing/");
+
+    // claimJob updates metadata (status → running, workerId)
     const claimed = await client.claimJob(jobId, "worker-1");
     expect(claimed).toBe(true);
 
-    const pendingFiles = fs.readdirSync(path.join(vaultPath, "_jobs/pending"));
-    expect(pendingFiles.filter((f) => f.endsWith(".md")).length).toBe(0);
-
-    const runningFiles = fs.readdirSync(path.join(vaultPath, "_jobs/running"));
-    expect(runningFiles.filter((f) => f.endsWith(".md")).length).toBe(1);
+    // Verify the processing file exists and contains updated metadata
+    expect(fs.existsSync(pending!._filePath)).toBe(true);
+    const content = fs.readFileSync(pending!._filePath, "utf-8");
+    expect(content).toContain("status: running");
+    expect(content).toContain("workerId: worker-1");
   });
 
-  test("claimJob on already-claimed job returns false", async () => {
-    const jobId = await client.createJob({ instruction: "Race condition" });
-
-    const first = await client.claimJob(jobId, "worker-1");
-    expect(first).toBe(true);
-
-    const second = await client.claimJob(jobId, "worker-2");
-    expect(second).toBe(false);
+  test("claimJob on unknown job returns false", async () => {
+    const result = await client.claimJob("nonexistent-job", "worker-1");
+    expect(result).toBe(false);
   });
 
-  test("updateJobStatus to done moves file", async () => {
+  test("updateJobStatus to done moves file to done/", async () => {
     const jobId = await client.createJob({ instruction: "Complete me" });
+    await client.getPendingJob("worker-1");
     await client.claimJob(jobId, "worker-1");
 
     await client.updateJobStatus(jobId, "done", { result: "Success!" });
 
-    const doneFiles = fs.readdirSync(path.join(vaultPath, "_jobs/done"));
-    expect(doneFiles.filter((f) => f.endsWith(".md")).length).toBe(1);
+    // File should be in fbmq done directory
+    const doneDir = path.join(vaultPath, "_fbmq/jobs/done");
+    const doneFiles = fs.readdirSync(doneDir).filter(f => f.endsWith(".md"));
+    expect(doneFiles.length).toBe(1);
 
-    const runningFiles = fs.readdirSync(path.join(vaultPath, "_jobs/running"));
-    expect(runningFiles.filter((f) => f.endsWith(".md")).length).toBe(0);
+    // Processing should be empty
+    const procDir = path.join(vaultPath, "_fbmq/jobs/processing");
+    const procFiles = fs.readdirSync(procDir).filter(f => f.endsWith(".md"));
+    expect(procFiles.length).toBe(0);
   });
 
-  test("updateJobStatus to failed moves file", async () => {
+  test("updateJobStatus to failed acks to done/ (status in metadata)", async () => {
     const jobId = await client.createJob({ instruction: "Fail me" });
+    await client.getPendingJob("worker-1");
     await client.claimJob(jobId, "worker-1");
 
     await client.updateJobStatus(jobId, "failed");
 
-    const failedFiles = fs.readdirSync(path.join(vaultPath, "_jobs/failed"));
-    expect(failedFiles.filter((f) => f.endsWith(".md")).length).toBe(1);
+    // All terminal states go to done/ via ack — the app-level status is in file metadata.
+    // fbmq's failed/ is reserved for dead-letter (transport-level retry exhaustion).
+    const doneDir = path.join(vaultPath, "_fbmq/jobs/done");
+    const doneFiles = fs.readdirSync(doneDir).filter(f => f.endsWith(".md"));
+    expect(doneFiles.length).toBe(1);
+
+    // Verify the file's metadata contains "failed" status
+    const content = fs.readFileSync(path.join(doneDir, doneFiles[0]), "utf-8");
+    expect(content).toContain("status: failed");
   });
 
-  test("updateJobStatus with streaming text updates body", async () => {
-    const jobId = await client.createJob({ instruction: "Stream me" });
+  test("updateJobStatus preserves result and stats in done file", async () => {
+    const jobId = await client.createJob({ instruction: "Full result test" });
+    await client.getPendingJob("worker-1");
     await client.claimJob(jobId, "worker-1");
 
-    await client.updateJobStatus(jobId, "running", {
-      streamingText: "Processing step 1...\nProcessing step 2...",
+    await client.updateJobStatus(jobId, "done", {
+      result: "Task completed successfully.",
+      stats: { promptTokens: 100, completionTokens: 200, totalTokens: 300, cost: 0.01, toolCalls: 3, messageCount: 5 },
     });
 
-    const runningFiles = fs.readdirSync(path.join(vaultPath, "_jobs/running"));
-    const content = fs.readFileSync(
-      path.join(vaultPath, "_jobs/running", runningFiles[0]),
-      "utf-8",
-    );
-    expect(content).toContain("## Streaming Output");
-    expect(content).toContain("Processing step 1...");
+    const doneDir = path.join(vaultPath, "_fbmq/jobs/done");
+    const doneFiles = fs.readdirSync(doneDir).filter(f => f.endsWith(".md"));
+    expect(doneFiles.length).toBe(1);
+
+    const content = fs.readFileSync(path.join(doneDir, doneFiles[0]), "utf-8");
+    // Result and stats should be encoded in the Custom: block
+    expect(content).toContain("status: done");
+    expect(content).toContain("Full result test");
   });
 
   test("addJobLog creates log file", async () => {

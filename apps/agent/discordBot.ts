@@ -164,6 +164,27 @@ export class DiscordBot {
     }
 
     /**
+     * Send a plain text message to a specific channel.
+     * Public wrapper for internal discordApi call.
+     */
+    async sendChatMessage(channelId: string, content: string): Promise<void> {
+        try {
+            // Truncate if too long (Discord limit is 2000 chars)
+            let text = content;
+            if (text.length > 1900) {
+                text = text.substring(0, 1900) + "...";
+            }
+
+            await this.discordApi("POST", `/channels/${channelId}/messages`, {
+                content: text,
+            });
+            console.log(`✅ Sent chat message to channel ${channelId}`);
+        } catch (err: any) {
+            console.error(`❌ Failed to send chat message to ${channelId}: ${err.message}`);
+        }
+    }
+
+    /**
      * Start typing indicator for a job in a channel.
      * The indicator will refresh every 8 seconds until stopped.
      */

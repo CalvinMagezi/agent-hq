@@ -16,13 +16,15 @@
 
 import * as path from "path";
 import * as fs from "fs";
+import { spawn, type ChildProcess } from "child_process";
+import { randomBytes } from "crypto";
 import { VaultClient } from "@repo/vault-client";
 import { SyncedVaultClient } from "@repo/vault-sync";
 import { SearchClient } from "@repo/vault-client/search";
 import { calculateCost } from "@repo/vault-client/pricing";
-import { startBridge, stopBridge, type BridgeContext } from "./openclaw-bridge";
-import { OpenClawAdapter } from "@repo/vault-client/openclaw-adapter";
-import { AuditLogger } from "./openclaw-bridge/audit";
+import { startBridge, stopBridge, type BridgeContext } from "./orchestrator-bridge";
+import { OpenClawAdapter } from "@repo/vault-client/orchestrator-adapter";
+import { AuditLogger } from "./orchestrator-bridge/audit";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -615,23 +617,14 @@ async function cleanupStaleJobs(): Promise<void> {
   const maxAge = STALE_JOB_DAYS * 24 * 3600 * 1000;
   let cleaned = 0;
 
-  for (const dir of ["done", "failed"]) {
-    const fullDir = path.join(VAULT_PATH, `_jobs/${dir}`);
-    if (!fs.existsSync(fullDir)) continue;
-
-    const files = fs.readdirSync(fullDir).filter((f) => f.endsWith(".md"));
-    for (const file of files) {
-      try {
-        const filePath = path.join(fullDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > maxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch {
-        // Skip
-      }
-    }
+  try {
+    // fbmq: reap jobs stuck in processing > 2 hours (7200s)
+    await vault.jobQueue.reap(7200);
+    // fbmq: purge done/failed messages older than maxAge
+    await vault.jobQueue.purge(STALE_JOB_DAYS * 24 * 3600);
+    cleaned++;
+  } catch (err) {
+    console.error("[cleanup] fbmq job queue cleanup failed:", err);
   }
 
   // Clean old log files
@@ -651,7 +644,7 @@ async function cleanupStaleJobs(): Promise<void> {
   }
 
   if (cleaned > 0) {
-    console.log(`[cleanup] Removed ${cleaned} stale item(s)`);
+    console.log(`[cleanup] FBMQ reap/purge completed and removed ${cleaned} stale item(s)`);
   }
 }
 
@@ -662,6 +655,15 @@ async function cleanupDelegationArtifacts(): Promise<void> {
   const signalMaxAge = 60 * 60 * 1000;     // 1 hour — signals should be consumed fast
   const resultMaxAge = 7 * 24 * 3600 * 1000; // 7 days — same as job files
   let cleaned = 0;
+
+  try {
+    // fbmq delegation queues cleanup
+    await vault.delegationQueue.reap(7200);
+    await vault.delegationQueue.purge(7 * 24 * 3600);
+    cleaned++;
+  } catch (err) {
+    console.error("[delegation-cleanup] fbmq delegation queue cleanup failed:", err);
+  }
 
   // Clean up stale cancellation signals
   const signalsDir = path.join(VAULT_PATH, "_delegation/signals");
@@ -1063,37 +1065,166 @@ async function processTopicMOCs(): Promise<void> {
   }
 }
 
-// ─── OpenClaw Bridge & Watchdog ──────────────────────────────────────
+// ─── COO Bridge & Watchdog ───────────────────────────────────────────
 
 let bridgeCtx: BridgeContext | null = null;
+let activeCooProcess: ChildProcess | null = null;
+let currentCooName: string | null = null;
+let cooMissedHeartbeats = 0;
 
 function initBridge(): void {
   try {
     bridgeCtx = startBridge(VAULT_PATH);
   } catch (err) {
-    console.error("[openclaw-bridge] Failed to start:", err);
+    console.error("[coo-bridge] Failed to start:", err);
     bridgeCtx = null;
   }
 }
 
-async function openclawWatchdog(): Promise<void> {
+function initCooProcess(cooName: string): void {
+  const orchestratorsDir = path.join(VAULT_PATH, "_system/orchestrators");
+  const cooDir = path.join(orchestratorsDir, cooName);
+  const indexPath = path.join(cooDir, "index.ts");
+
+  if (!fs.existsSync(indexPath)) {
+    console.error(`[coo] Cannot start ${cooName}, index.ts not found`);
+    return;
+  }
+
+  // Generate an ephemeral token for this session
+  const ephemeralToken = randomBytes(32).toString("hex");
+
+  // Restart bridge with the active COO's namespace so paths point to _external/<cooName>/
+  const bridgePort = bridgeCtx?.port ?? 18790;
+  if (bridgeCtx) {
+    stopBridge(bridgeCtx);
+    bridgeCtx = null;
+  }
+  try {
+    bridgeCtx = startBridge(VAULT_PATH, bridgePort, cooName, ephemeralToken);
+  } catch (err) {
+    console.error(`[coo] Failed to restart bridge for ${cooName}:`, err);
+    return;
+  }
+  console.log(`[coo] Starting orchestrator ${cooName} (bridge: http://127.0.0.1:${bridgePort})...`);
+  activeCooProcess = spawn(process.execPath, ["run", "index.ts"], {
+    cwd: cooDir,
+    env: {
+      ...process.env,
+      AGENT_HQ_BRIDGE_URL: `http://127.0.0.1:${bridgePort}`,
+      AGENT_HQ_BRIDGE_TOKEN: ephemeralToken,
+      HQ_EPHEMERAL_TOKEN: ephemeralToken,
+      AGENT_HQ_COO_NAME: cooName,
+      AGENT_HQ_VAULT_PATH: VAULT_PATH,
+      VAULT_PATH,
+    },
+    stdio: "inherit",
+    detached: true,
+  });
+
+  currentCooName = cooName;
+  activeCooProcess.on("exit", (code) => {
+    console.log(`[coo] Orchestrator ${cooName} exited with code ${code}`);
+    if (activeCooProcess) activeCooProcess = null;
+  });
+}
+
+async function cooWatchdog(): Promise<void> {
+  // Read config to check mode
+  let mode = "internal";
+  let activeCoo = "";
+  try {
+    const rawConfig = fs.readFileSync(path.join(VAULT_PATH, "_system/CONFIG.md"), "utf-8");
+    const modeMatch = rawConfig.match(/\| orchestration_mode\s*\|\s*([a-zA-Z0-9_\-]+)\s*\|/);
+    const activeMatch = rawConfig.match(/\| active_coo\s*\|\s*([a-zA-Z0-9_\-]+)\s*\|/);
+    if (modeMatch) mode = modeMatch[1];
+    if (activeMatch) activeCoo = activeMatch[1];
+  } catch (err) {
+    // Ignore issues checking config
+  }
+
+  if (mode === "internal" || !activeCoo) {
+    if (activeCooProcess) {
+      console.log(`[coo] Mode switched to internal, stopping ${currentCooName}...`);
+      activeCooProcess.kill();
+      activeCooProcess = null;
+      currentCooName = null;
+    }
+    return;
+  }
+
+  // External mode: Ensure COO is running
+  if (mode === "external" && activeCoo) {
+    if (!activeCooProcess || currentCooName !== activeCoo) {
+      if (activeCooProcess) {
+        console.log(`[coo] Switching COO from ${currentCooName} to ${activeCoo}...`);
+        activeCooProcess.kill();
+      }
+      initCooProcess(activeCoo);
+    }
+  }
+
   if (!bridgeCtx) return;
 
   const adapter = bridgeCtx.adapter;
   const audit = bridgeCtx.audit;
   const config = adapter.getConfig();
 
-  // Skip if integration is disabled
-  if (!config.enabled) return;
+  // Skip if integration is disabled AND no COO is active (ephemeral token means COO mode)
+  if (!config.enabled && !activeCooProcess) return;
 
-  // 1. Check heartbeat staleness
+  // 1. Check heartbeat staleness — dead man's switch (3 missed → revert to internal)
   const heartbeat = adapter.readHeartbeat();
   if (heartbeat && heartbeat.lastHeartbeat) {
     const elapsed = Date.now() - new Date(heartbeat.lastHeartbeat).getTime();
-    if (elapsed > 10 * 60_000) {
-      console.warn("[openclaw-watchdog] OpenClaw offline (no heartbeat for >10 min)");
-    } else if (elapsed > 2 * 60_000) {
-      console.warn("[openclaw-watchdog] OpenClaw degraded (no heartbeat for >2 min)");
+    // watchdog runs every 2 min; treat >3 min stale as a miss
+    if (elapsed > 3 * 60_000) {
+      cooMissedHeartbeats++;
+      console.warn(
+        `[coo-watchdog] ${currentCooName} heartbeat stale (${Math.round(elapsed / 1000)}s). Miss ${cooMissedHeartbeats}/3`,
+      );
+
+      if (cooMissedHeartbeats >= 3) {
+        console.error(
+          `[coo-watchdog] DEAD MAN'S SWITCH: ${currentCooName} missed 3 heartbeats. Reverting to internal mode.`,
+        );
+
+        // Kill COO process
+        if (activeCooProcess) {
+          activeCooProcess.kill();
+          activeCooProcess = null;
+        }
+        currentCooName = null;
+        cooMissedHeartbeats = 0;
+
+        // Move coo_inbox items back to delegation/pending (atomic rename)
+        const inboxDir = path.join(VAULT_PATH, "_delegation", "coo_inbox");
+        if (fs.existsSync(inboxDir)) {
+          const pendingDir = path.join(VAULT_PATH, "_delegation", "pending");
+          if (!fs.existsSync(pendingDir)) fs.mkdirSync(pendingDir, { recursive: true });
+          for (const f of fs.readdirSync(inboxDir)) {
+            try {
+              fs.renameSync(path.join(inboxDir, f), path.join(pendingDir, f));
+            } catch { /* best-effort */ }
+          }
+          console.log("[coo-watchdog] Moved coo_inbox items back to pending/");
+        }
+
+        // Revert CONFIG.md to internal mode
+        const configPath = path.join(VAULT_PATH, "_system", "CONFIG.md");
+        if (fs.existsSync(configPath)) {
+          let raw = fs.readFileSync(configPath, "utf-8");
+          raw = raw.replace(
+            /\| orchestration_mode\s*\|\s*[a-zA-Z0-9_\-]*\s*\|/,
+            "| orchestration_mode | internal |",
+          );
+          fs.writeFileSync(configPath, raw, "utf-8");
+        }
+
+        return;
+      }
+    } else {
+      cooMissedHeartbeats = 0; // healthy heartbeat — reset counter
     }
   }
 
@@ -1112,7 +1243,7 @@ async function openclawWatchdog(): Promise<void> {
   // Circuit breaker: too many requests/hour
   if (requestCount > (config.rateLimit.perHour || 500)) {
     console.error(
-      `[openclaw-watchdog] CIRCUIT BREAKER: ${requestCount} requests in last hour exceeds limit`,
+      `[coo-watchdog] CIRCUIT BREAKER: ${requestCount} requests in last hour exceeds limit`,
     );
     adapter.tripCircuitBreaker("rate_limit_exceeded");
     return;
@@ -1121,7 +1252,7 @@ async function openclawWatchdog(): Promise<void> {
   // Circuit breaker: high error rate
   if (requestCount > 10 && errorCount / requestCount > 0.5) {
     console.error(
-      `[openclaw-watchdog] CIRCUIT BREAKER: Error rate ${Math.round((errorCount / requestCount) * 100)}% exceeds 50%`,
+      `[coo-watchdog] CIRCUIT BREAKER: Error rate ${Math.round((errorCount / requestCount) * 100)}% exceeds 50%`,
     );
     adapter.tripCircuitBreaker("high_error_rate");
     return;
@@ -1130,7 +1261,7 @@ async function openclawWatchdog(): Promise<void> {
   // Circuit breaker: blocked access attempts
   if (blockedCount > 5) {
     console.error(
-      `[openclaw-watchdog] CIRCUIT BREAKER: ${blockedCount} blocked access attempts in last hour`,
+      `[coo-watchdog] CIRCUIT BREAKER: ${blockedCount} blocked access attempts in last hour`,
     );
     adapter.tripCircuitBreaker("unauthorized_access_pattern");
     return;
@@ -1139,12 +1270,12 @@ async function openclawWatchdog(): Promise<void> {
   // 3. Check delegation task backlog
   const pendingDir = path.join(VAULT_PATH, "_delegation", "pending");
   if (fs.existsSync(pendingDir)) {
-    const openclawPending = fs
+    const cooPending = fs
       .readdirSync(pendingDir)
-      .filter((f) => f.includes("openclaw-"));
-    if (openclawPending.length > 20) {
+      .filter((f) => f.includes(`${currentCooName}-`));
+    if (cooPending.length > 20) {
       console.warn(
-        `[openclaw-watchdog] High delegation backlog: ${openclawPending.length} pending OpenClaw tasks`,
+        `[coo-watchdog] High delegation backlog: ${cooPending.length} pending tasks`,
       );
     }
   }
@@ -1155,84 +1286,183 @@ async function openclawWatchdog(): Promise<void> {
       Date.now() - new Date(config.circuitBreaker.openedAt).getTime();
     if (elapsed > (config.circuitBreaker.cooldownMinutes ?? 30) * 60_000) {
       console.log(
-        "[openclaw-watchdog] Circuit breaker cooldown elapsed, resetting to closed",
+        "[coo-watchdog] Circuit breaker cooldown elapsed, resetting to closed",
       );
-      adapter.resetCircuitBreaker();
+      // Note: OpenClaw bridge handles agent spawning and orchestration externally
+      // in normal operation, but the internal jobs queue still runs inside agent-hq via workers.
     }
+  }
+}
+
+/**
+ * Process COO responses from _delegation/coo_outbox/.
+ * When an external COO writes a response JSON to coo_outbox/, this function reads it,
+ * dispatches the encoded job/tasks into the queue, then archives the file.
+ */
+async function processCooPlanResponses(): Promise<void> {
+  const outboxDir = path.join(VAULT_PATH, "_delegation", "coo_outbox");
+  if (!fs.existsSync(outboxDir)) return;
+
+  const files = fs.readdirSync(outboxDir).filter(
+    f => (f.endsWith(".json") || f.endsWith(".md")) && !f.startsWith("_"),
+  );
+
+  for (const file of files) {
+    const filePath = path.join(outboxDir, file);
+    try {
+      const raw = fs.readFileSync(filePath, "utf-8");
+      let response: Record<string, any>;
+
+      if (file.endsWith(".json")) {
+        response = JSON.parse(raw);
+      } else {
+        // Gray-matter markdown
+        const { default: matter } = await import("gray-matter");
+        const { data, content } = matter(raw);
+        response = { ...data, instruction: content.trim() || data.instruction };
+      }
+
+      if (response.instruction) {
+        await vault.createJob({
+          instruction: response.instruction,
+          type: "background",
+          priority: response.priority ?? 50,
+          securityProfile: (response.securityProfile as any) ?? "guarded",
+        });
+        console.log(
+          `[coo-outbox] Dispatched job for intent ${response.intentId ?? file}`,
+        );
+      }
+
+      // Archive to _done/ so we don't reprocess
+      const doneDir = path.join(outboxDir, "_done");
+      if (!fs.existsSync(doneDir)) fs.mkdirSync(doneDir, { recursive: true });
+      fs.renameSync(filePath, path.join(doneDir, file));
+    } catch (err) {
+      console.error(`[coo-outbox] Failed to process ${file}:`, err);
+    }
+  }
+}
+
+async function promoteDelegationReady(): Promise<void> {
+  try {
+    // Find all completed task IDs from fbmq's flat done/ directory
+    const completedIds = new Set<string>();
+    const completedDir = path.join(VAULT_PATH, "_fbmq/delegation/done");
+    if (fs.existsSync(completedDir)) {
+      const files = fs.readdirSync(completedDir).filter(f => f.endsWith(".md"));
+      for (const file of files) {
+        try {
+          const raw = fs.readFileSync(path.join(completedDir, file), "utf-8");
+          // taskId is in the Custom: continuation block, e.g. "  taskId: research-1"
+          const match = raw.match(/^\s+taskId:\s*(.+)$/m);
+          if (match) completedIds.add(match[1].trim());
+        } catch { }
+      }
+    }
+
+    // Also check legacy _delegation/completed/ for tasks completed before migration
+    const legacyDir = path.join(VAULT_PATH, "_delegation/completed");
+    if (fs.existsSync(legacyDir)) {
+      const files = fs.readdirSync(legacyDir).filter(f => f.endsWith(".md"));
+      for (const file of files) {
+        try {
+          const raw = fs.readFileSync(path.join(legacyDir, file), "utf-8");
+          const match = raw.match(/taskId:\s*["']?([^"'\n]+)/);
+          if (match) completedIds.add(match[1].trim());
+        } catch { }
+      }
+    }
+
+    if (completedIds.size > 0) {
+      await vault.delegationQueue.promoteReady(completedIds);
+    }
+  } catch (err) {
+    console.error("[promote] Error promoting delegated tasks:", err);
   }
 }
 
 // ─── Scheduler ───────────────────────────────────────────────────────
 
-interface ScheduledTask {
+const tasks: {
   name: string;
   intervalMs: number;
   fn: () => Promise<void>;
   lastRun: number;
-}
-
-const tasks: ScheduledTask[] = [
-  {
-    name: "expire-approvals",
-    intervalMs: 60 * 1000,
-    fn: expireApprovals,
-    lastRun: 0,
-  },
-  {
-    name: "heartbeat",
-    intervalMs: 5 * 60 * 1000, // Lengthened from 2min; events handle fast path
-    fn: processHeartbeat,
-    lastRun: 0,
-  },
-  {
-    name: "health-check",
-    intervalMs: 5 * 60 * 1000,
-    fn: healthCheck,
-    lastRun: 0,
-  },
-  {
-    name: "relay-health",
-    intervalMs: 5 * 60 * 1000,
-    fn: relayHealthCheck,
-    lastRun: 0,
-  },
-  {
-    name: "embeddings",
-    intervalMs: 30 * 60 * 1000, // Lengthened from 10min; events handle fast path
-    fn: processEmbeddings,
-    lastRun: 0,
-  },
-  {
-    name: "stale-cleanup",
-    intervalMs: 60 * 60 * 1000,
-    fn: cleanupStaleJobs,
-    lastRun: 0,
-  },
-  {
-    name: "delegation-cleanup",
-    intervalMs: 60 * 60 * 1000,
-    fn: cleanupDelegationArtifacts,
-    lastRun: 0,
-  },
-  {
-    name: "note-linking",
-    intervalMs: 2 * 60 * 60 * 1000,
-    fn: processNoteLinking,
-    lastRun: 0,
-  },
-  {
-    name: "topic-mocs",
-    intervalMs: 12 * 60 * 60 * 1000,
-    fn: processTopicMOCs,
-    lastRun: 0,
-  },
-  {
-    name: "openclaw-watchdog",
-    intervalMs: 2 * 60 * 1000,
-    fn: openclawWatchdog,
-    lastRun: 0,
-  },
-];
+}[] = [
+    {
+      name: "promote-delegation",
+      intervalMs: 30 * 1000,
+      fn: promoteDelegationReady,
+      lastRun: 0,
+    },
+    {
+      name: "expire-approvals",
+      intervalMs: 60 * 1000,
+      fn: expireApprovals,
+      lastRun: 0,
+    },
+    {
+      name: "heartbeat",
+      intervalMs: 5 * 60 * 1000, // Lengthened from 2min; events handle fast path
+      fn: processHeartbeat,
+      lastRun: 0,
+    },
+    {
+      name: "health-check",
+      intervalMs: 5 * 60 * 1000,
+      fn: healthCheck,
+      lastRun: 0,
+    },
+    {
+      name: "relay-health",
+      intervalMs: 5 * 60 * 1000,
+      fn: relayHealthCheck,
+      lastRun: 0,
+    },
+    {
+      name: "embeddings",
+      intervalMs: 30 * 60 * 1000, // Lengthened from 10min; events handle fast path
+      fn: processEmbeddings,
+      lastRun: 0,
+    },
+    {
+      name: "stale-cleanup",
+      intervalMs: 60 * 60 * 1000,
+      fn: cleanupStaleJobs,
+      lastRun: 0,
+    },
+    {
+      name: "delegation-cleanup",
+      intervalMs: 60 * 60 * 1000,
+      fn: cleanupDelegationArtifacts,
+      lastRun: 0,
+    },
+    {
+      name: "note-linking",
+      intervalMs: 2 * 60 * 60 * 1000,
+      fn: processNoteLinking,
+      lastRun: 0,
+    },
+    {
+      name: "topic-mocs",
+      intervalMs: 12 * 60 * 60 * 1000,
+      fn: processTopicMOCs,
+      lastRun: 0,
+    },
+    {
+      name: "coo-watchdog",
+      intervalMs: 2 * 60 * 1000,
+      fn: cooWatchdog,
+      lastRun: 0,
+    },
+    {
+      name: "coo-outbox",
+      intervalMs: 30 * 1000, // poll every 30s for COO responses
+      fn: processCooPlanResponses,
+      lastRun: 0,
+    },
+  ];
 
 async function runScheduler(): Promise<void> {
   // Start the vault sync engine (file watching + change detection)
@@ -1336,7 +1566,8 @@ async function runScheduler(): Promise<void> {
 process.on("SIGINT", async () => {
   console.log("\n[daemon] Shutting down...");
   if (bridgeCtx) stopBridge(bridgeCtx);
-  await vault.stopSync().catch(() => {});
+  if (activeCooProcess) activeCooProcess.kill();
+  await vault.stopSync().catch(() => { });
   search.close();
   process.exit(0);
 });
@@ -1344,7 +1575,8 @@ process.on("SIGINT", async () => {
 process.on("SIGTERM", async () => {
   console.log("[daemon] Received SIGTERM, shutting down...");
   if (bridgeCtx) stopBridge(bridgeCtx);
-  await vault.stopSync().catch(() => {});
+  if (activeCooProcess) activeCooProcess.kill();
+  await vault.stopSync().catch(() => { });
   search.close();
   process.exit(0);
 });

@@ -18,7 +18,8 @@ export type ThinkingLevel =
   | "xhigh";
 export type NoteType = "note" | "digest" | "system-file" | "report";
 export type EmbeddingStatus = "pending" | "processing" | "embedded" | "failed";
-export type HarnessType = "claude-code" | "opencode" | "gemini-cli" | "openclaw" | "any";
+export type HarnessType = "claude-code" | "opencode" | "gemini-cli" | "openclaw" | "coo" | "any";
+export type OrchestrationMode = "internal" | "external";
 export type TaskStatus =
   | "pending"
   | "claimed"
@@ -28,6 +29,23 @@ export type TaskStatus =
   | "cancelled"
   | "timeout";
 export type RelayStatus = "healthy" | "degraded" | "offline";
+
+export interface CooManifest {
+  name: string;
+  version: string;
+  entryPoint: string;
+  capabilities?: string[];
+}
+
+export interface MasterIntent {
+  intentId: string;
+  jobId: string;
+  instruction: string;
+  priority: number;
+  createdAt: string;
+  status: string;
+  metadata?: Record<string, any>;
+}
 
 export interface Job {
   jobId: string;

@@ -5,7 +5,7 @@
  * The OpenClawAdapter handles the actual config caching.
  */
 
-import type { OpenClawAdapter } from "@repo/vault-client/openclaw-adapter";
+import type { OpenClawAdapter } from "@repo/vault-client/orchestrator-adapter";
 
 /** Extract bearer token from Authorization header */
 export function extractBearerToken(authHeader: string | null): string | null {

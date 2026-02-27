@@ -41,6 +41,18 @@ function createMinimalVault(vaultPath: string): void {
   for (const dir of dirs) {
     fs.mkdirSync(path.join(vaultPath, dir), { recursive: true });
   }
+
+  // Initialize fbmq queues
+  const jobsPath = path.join(vaultPath, "_fbmq/jobs");
+  const delegationPath = path.join(vaultPath, "_fbmq/delegation");
+  const stagedPath = path.join(vaultPath, "_fbmq/staged");
+  fs.mkdirSync(jobsPath, { recursive: true });
+  fs.mkdirSync(delegationPath, { recursive: true });
+  fs.mkdirSync(stagedPath, { recursive: true });
+  Bun.spawnSync(["fbmq", "init", jobsPath, "--priority"]);
+  Bun.spawnSync(["fbmq", "init", delegationPath, "--priority"]);
+  Bun.spawnSync(["fbmq", "init", stagedPath]);
+
   // Create minimal system files
   fs.writeFileSync(
     path.join(vaultPath, "_system/SOUL.md"),
@@ -236,10 +248,10 @@ describe("WebSocket job submission", () => {
     expect(response.requestId).toBe("ws-req-001");
     expect(response.status).toBe("pending");
 
-    // Verify job file was created
-    const pendingDir = path.join(TEST_VAULT_PATH, "_jobs/pending");
-    const files = fs.readdirSync(pendingDir);
-    expect(files.some((f) => f.endsWith(".md"))).toBe(true);
+    // Verify job was enqueued to fbmq
+    const result = Bun.spawnSync(["fbmq", "depth", path.join(TEST_VAULT_PATH, "_fbmq/jobs")]);
+    const depth = parseInt(new TextDecoder().decode(result.stdout).trim(), 10);
+    expect(depth).toBeGreaterThanOrEqual(1);
 
     ws.close();
   });

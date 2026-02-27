@@ -46,6 +46,22 @@ export function createTempVault(): { vaultPath: string; client: VaultClient } {
     fs.mkdirSync(path.join(vaultPath, dir), { recursive: true });
   }
 
+  // Initialize fbmq queues with correct paths matching VaultClient constructor:
+  //   jobQueue → _fbmq/jobs (with priority)
+  //   delegationQueue main → _fbmq/delegation (with priority)
+  //   delegationQueue staged → _fbmq/staged (no priority, FIFO)
+  const jobsPath = path.join(vaultPath, "_fbmq/jobs");
+  const delegationPath = path.join(vaultPath, "_fbmq/delegation");
+  const stagedPath = path.join(vaultPath, "_fbmq/staged");
+
+  fs.mkdirSync(jobsPath, { recursive: true });
+  fs.mkdirSync(delegationPath, { recursive: true });
+  fs.mkdirSync(stagedPath, { recursive: true });
+
+  Bun.spawnSync(["fbmq", "init", jobsPath, "--priority"]);
+  Bun.spawnSync(["fbmq", "init", delegationPath, "--priority"]);
+  Bun.spawnSync(["fbmq", "init", stagedPath]);
+
   // Create minimal system files
   fs.writeFileSync(
     path.join(vaultPath, "_system/SOUL.md"),

@@ -233,4 +233,153 @@ export function registerTools(api: PluginAPI, client: AgentHQClient): void {
       ].join("\n");
     },
   });
+
+  // ─── List Specialists ────────────────────────────────────────
+
+  api.registerTool({
+    name: "hq_list_specialists",
+    description: "List specialized sub-agents available in Agent-HQ for task delegation.",
+    parameters: {},
+    execute: async () => {
+      const { agents } = await client.listAgents();
+      if (agents.length === 0) return "No specialized agents available.";
+
+      return agents.map(a => `- **${a.id}**: ${a.name} - ${a.description}`).join("\n");
+    }
+  });
+
+  // ─── List Available Agents (COO-oriented) ────────────────────
+
+  api.registerTool({
+    name: "hq_list_available_agents",
+    description: [
+      "List all available Agent-HQ relay harnesses and their current status.",
+      "Use this before delegating tasks to choose the right harness.",
+      "Returns harness ID, name, and description.",
+    ].join("\n"),
+    parameters: {},
+    execute: async () => {
+      const { agents } = await client.listAvailableAgents();
+      if (agents.length === 0) return "No relay agents available.";
+
+      return agents
+        .map(a => `- **${a.id}** — ${a.name}: ${a.description}`)
+        .join("\n");
+    },
+  });
+
+  // ─── Delegate Task ───────────────────────────────────────────
+
+  api.registerTool({
+    name: "hq_delegate_task",
+    description: [
+      "Delegate a complex task to a specialized sub-agent (e.g., gemini-cli, claude-code).",
+      "The task is processed asynchronously. You will NOT get an immediate result.",
+      "The sub-agent will write its response back to the vault when done.",
+      "Use dependsOn to chain tasks — a task will not start until all its dependencies complete.",
+    ].join("\n"),
+    parameters: {
+      targetAgentId: {
+        type: "string",
+        description: "The ID of the target agent (see hq_list_available_agents)",
+      },
+      instruction: {
+        type: "string",
+        description: "Detailed instruction for the sub-agent",
+      },
+      priority: {
+        type: "number",
+        description: "Priority (1-100). Default: 50",
+        optional: true,
+      },
+      dependsOn: {
+        type: "array",
+        items: { type: "string" },
+        description: "Task IDs that must complete before this task starts",
+        optional: true,
+      },
+      metadata: {
+        type: "object",
+        description: "Optional metadata to pass to the sub-agent",
+        optional: true,
+      }
+    },
+    execute: async (args) => {
+      const result = await client.delegateTask({
+        instruction: args.instruction as string,
+        targetAgentId: args.targetAgentId as string,
+        priority: args.priority as number,
+        dependsOn: (args.dependsOn as string[]) ?? [],
+        metadata: args.metadata as Record<string, any>
+      });
+      return `Task delegated successfully.\n- Task ID: ${result.taskId}\n- Status: ${result.status}\nUse hq_review_completed_tasks to check results when ready.`;
+    }
+  });
+
+  // ─── Review Completed Tasks ──────────────────────────────────
+
+  api.registerTool({
+    name: "hq_review_completed_tasks",
+    description: [
+      "Review recently completed delegation tasks from your COO namespace.",
+      "Use this to check on work your delegated sub-agents have finished.",
+      "Returns up to 20 most recent completed tasks with their results.",
+    ].join("\n"),
+    parameters: {
+      limit: {
+        type: "number",
+        description: "Max tasks to return (default 10, max 50)",
+        optional: true,
+      },
+    },
+    execute: async (args) => {
+      const { tasks } = await client.reviewCompletedTasks((args.limit as number) ?? 10);
+      if (tasks.length === 0) return "No completed tasks found in your namespace.";
+
+      return tasks
+        .map((t, i) => {
+          const preview = (t.result ?? t.error ?? "").substring(0, 300);
+          return `${i + 1}. **${t.taskId}** [${t.status}]${t.completedAt ? ` — ${t.completedAt}` : ""}\n   ${preview}${preview.length >= 300 ? "..." : ""}`;
+        })
+        .join("\n\n");
+    },
+  });
+
+  // ─── Mark Task Completed ──────────────────────────────────────
+
+  api.registerTool({
+    name: "hq_mark_task_completed",
+    description: "Mark a delegated task as completed or failed with a result.",
+    parameters: {
+      taskId: {
+        type: "string",
+        description: "The ID of the task to mark as completed",
+      },
+      result: {
+        type: "string",
+        description: "The final result or output of the task",
+        optional: true,
+      },
+      error: {
+        type: "string",
+        description: "Error message if the task failed",
+        optional: true,
+      },
+      status: {
+        type: "string",
+        enum: ["completed", "failed"],
+        description: "Final status. Default: completed",
+        optional: true,
+      }
+    },
+    execute: async (args) => {
+      await client.markCompleted({
+        taskId: args.taskId as string,
+        result: args.result as string,
+        error: args.error as string,
+        status: (args.status as "completed" | "failed") || "completed"
+      });
+      return `Task ${args.taskId} has been marked as ${args.status || "completed"}.`;
+    }
+  });
 }

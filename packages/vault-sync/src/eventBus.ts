@@ -132,6 +132,20 @@ export class EventBus {
       return { ...base, type: "job:status-changed" };
     }
 
+    // ─── fbmq job queue events ──────────────────────────
+    // pending/ has 256 hash-sharded buckets (00-ff); processing/, done/, failed/ are flat
+    if (path.match(/^_fbmq\/jobs\/pending\/[0-9a-f]{2}\//)) {
+      if (type === "create") return { ...base, type: "job:created" };
+      if (type === "delete") return { ...base, type: "job:claimed" };
+    }
+    if (path.startsWith("_fbmq/jobs/processing/")) {
+      if (type === "create") return { ...base, type: "job:claimed" };
+      if (type === "modify") return { ...base, type: "job:status-changed" };
+    }
+    if (path.startsWith("_fbmq/jobs/done/") || path.startsWith("_fbmq/jobs/failed/")) {
+      return { ...base, type: "job:status-changed" };
+    }
+
     // ─── Delegation events ─────────────────────────────────────
     if (path.startsWith("_delegation/pending/")) {
       if (type === "create") {
@@ -153,6 +167,19 @@ export class EventBus {
     }
 
     if (path.startsWith("_delegation/completed/")) {
+      return { ...base, type: "task:completed" };
+    }
+
+    // ─── fbmq delegation queue events ───────────────────
+    // pending/ has 256 hash-sharded buckets (00-ff); processing/, done/, failed/ are flat
+    if (path.match(/^_fbmq\/delegation\/pending\/[0-9a-f]{2}\//)) {
+      if (type === "create") return { ...base, type: "task:created" };
+      if (type === "delete") return { ...base, type: "task:claimed" };
+    }
+    if (path.startsWith("_fbmq/delegation/processing/")) {
+      return { ...base, type: "task:claimed" };
+    }
+    if (path.startsWith("_fbmq/delegation/done/")) {
       return { ...base, type: "task:completed" };
     }
 

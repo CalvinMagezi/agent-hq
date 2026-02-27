@@ -53,6 +53,8 @@ export const BUILTIN_IGNORE_PATTERNS = [
   "node_modules/",
   "node_modules\\",
   ".sync-conflict-",
+  ".tmp/",
+  ".tmp\\"
 ];
 
 /** Check if a relative path should be ignored by the watcher. */

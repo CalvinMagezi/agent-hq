@@ -7,6 +7,7 @@
 import { Type } from "@sinclair/typebox";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { logger } from "./logger.js";
+import { routeUserMessage } from "./cooRouter.js";
 
 /** Callback fired when a job is dispatched, so the Discord bot can track it */
 export type OnJobDispatched = (jobId: string) => void;
@@ -35,18 +36,20 @@ export function createDispatchJobTool(config: {
         execute: async (toolCallId, args) => {
             logger.info("dispatch_job CALLED", { instruction: args.instruction.substring(0, 100), baseUrl: config.baseUrl ?? "vault" });
             try {
-                // Vault mode: use VaultClient directly
+                // Vault mode: use cooRouter
                 if (config.vaultClient) {
-                    const jobId = await config.vaultClient.createJob({
-                        instruction: args.instruction,
-                        type: "background",
-                        priority: args.priority ?? 50,
-                        securityProfile: args.securityProfile ?? "guarded",
-                    });
-                    config.onJobDispatched?.(jobId);
+                    const { jobId, intentId, message } = await routeUserMessage(
+                        config.vaultClient,
+                        args.instruction,
+                        args.priority ?? 50,
+                        args.securityProfile ?? "guarded"
+                    );
+
+                    if (jobId) config.onJobDispatched?.(jobId);
+
                     return {
-                        content: [{ type: "text", text: `Job dispatched (ID: ${jobId}). Running in the background.` }],
-                        details: { jobId },
+                        content: [{ type: "text", text: message }],
+                        details: { jobId, intentId },
                     };
                 }
 

@@ -8,6 +8,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import matter from "gray-matter";
+import { JobQueue, DelegationQueue, FbmqCli, jobCodec, delegationCodec } from "@repo/queue-transport";
 import { calculateCost } from "./pricing";
 import type {
   Job,
@@ -39,12 +40,24 @@ export * from "./types";
 
 export class VaultClient {
   readonly vaultPath: string;
+  readonly jobQueue: JobQueue;
+  readonly delegationQueue: DelegationQueue;
+
+  // Track claimed paths for ack/nack
+  private claimedJobs = new Map<string, string>();
+  private claimedTasks = new Map<string, string>();
 
   constructor(vaultPath: string) {
     this.vaultPath = path.resolve(vaultPath);
     if (!fs.existsSync(this.vaultPath)) {
       throw new Error(`Vault not found at: ${this.vaultPath}`);
     }
+
+    this.jobQueue = new JobQueue({ queueRoot: this.resolve("_fbmq/jobs") });
+    this.delegationQueue = new DelegationQueue(
+      { queueRoot: this.resolve("_fbmq/delegation") },
+      this.resolve("_fbmq/staged")
+    );
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────
@@ -177,6 +190,26 @@ export class VaultClient {
     }
   }
 
+  // Helper to write RFC822 inline (since fbmq CLI push creates new files, we modify processing files directly)
+  private writeRFC822(filePath: string, item: any, codec: any) {
+    const { body, priority, tags, correlationId, custom, ttl } = codec.serialize(item);
+    let rfc822 = `Priority: ${priority}\n`;
+    if (tags) rfc822 += `Tags: ${tags}\n`;
+    if (correlationId) rfc822 += `Correlation-Id: ${correlationId}\n`;
+    if (ttl) rfc822 += `TTL: ${ttl}\n`;
+    if (custom && Object.keys(custom).length > 0) {
+      rfc822 += `Custom:\n`;
+      for (const [k, v] of Object.entries(custom)) {
+        rfc822 += `  ${k}: ${v}\n`;
+      }
+    }
+    rfc822 += `\n${body}`;
+    fs.writeFileSync(filePath, rfc822, "utf-8");
+  }
+
+  // Helper to parse RFC822 inline or from fbmqCli
+  // For simplicity, if we have the Item already, we just modify it and serialize.
+
   // ─── Job Queue ─────────────────────────────────────────────────────
 
   /**
@@ -184,33 +217,11 @@ export class VaultClient {
    * Returns null if no jobs are pending.
    */
   async getPendingJob(workerId: string): Promise<Job | null> {
-    const files = this.listMdFiles("_jobs/pending");
-    if (files.length === 0) return null;
-
-    // Parse all pending jobs and sort by priority DESC, then createdAt ASC
-    const jobs: { file: string; data: Record<string, any>; content: string }[] = [];
-    for (const file of files) {
-      try {
-        const { data, content } = this.readMdFile(file);
-        jobs.push({ file, data, content });
-      } catch {
-        // Skip malformed files
-      }
+    const job = await this.jobQueue.dequeue();
+    if (job) {
+      this.claimedJobs.set(job.jobId, job._filePath);
     }
-
-    if (jobs.length === 0) return null;
-
-    jobs.sort((a, b) => {
-      const priDiff = (b.data.priority ?? 50) - (a.data.priority ?? 50);
-      if (priDiff !== 0) return priDiff;
-      return (
-        new Date(a.data.createdAt ?? 0).getTime() -
-        new Date(b.data.createdAt ?? 0).getTime()
-      );
-    });
-
-    const best = jobs[0];
-    return this.parseJob(best.file, best.data, best.content);
+    return job;
   }
 
   /**
@@ -218,38 +229,24 @@ export class VaultClient {
    * Returns true if successfully claimed, false if another worker got it first.
    */
   async claimJob(jobId: string, workerId: string): Promise<boolean> {
-    const pendingDir = this.resolve("_jobs/pending");
-    const runningDir = this.resolve("_jobs/running");
+    const claimedPath = this.claimedJobs.get(jobId);
+    if (!claimedPath) return false;
 
-    const files = this.listMdFiles("_jobs/pending");
-    const target = files.find((f) => {
-      try {
-        const { data } = this.readMdFile(f);
-        return data.jobId === jobId;
-      } catch {
-        return false;
-      }
-    });
-
-    if (!target) return false;
-
-    const filename = path.basename(target);
-    const dest = path.join(runningDir, filename);
-
+    // We can't use updateFrontmatter. Read via CLI or raw, modify, rewrite.
     try {
-      // Atomic rename — only one process succeeds
-      fs.renameSync(target, dest);
+      const headers = await this.jobQueue["cli"].inspect(claimedPath);
+      const rawBody = await this.jobQueue["cli"].cat(claimedPath);
+      const { custom, cleanBody } = FbmqCli.parseBodyCustom(rawBody);
+      headers.custom = { ...headers.custom, ...custom };
+      const job = jobCodec.deserialize(claimedPath, cleanBody, headers);
 
-      // Update frontmatter with worker info
-      this.updateFrontmatter(dest, {
-        status: "running",
-        workerId,
-        updatedAt: this.nowISO(),
-      });
+      job.status = "running";
+      job.workerId = workerId;
+      job.updatedAt = this.nowISO();
 
+      this.writeRFC822(claimedPath, job, jobCodec);
       return true;
     } catch {
-      // Another worker claimed it (ENOENT)
       return false;
     }
   }
@@ -269,76 +266,38 @@ export class VaultClient {
       conversationHistory: ConversationMessage[];
     }>,
   ): Promise<void> {
-    // Find the job file in any status directory
-    const statusDirs = ["pending", "running", "done", "failed"];
-    let currentPath: string | null = null;
-
-    for (const dir of statusDirs) {
-      const files = this.listMdFiles(`_jobs/${dir}`);
-      const found = files.find((f) => {
-        try {
-          const { data: fm } = this.readMdFile(f);
-          return fm.jobId === jobId;
-        } catch {
-          return false;
-        }
-      });
-      if (found) {
-        currentPath = found;
-        break;
-      }
+    const claimedPath = this.claimedJobs.get(jobId);
+    if (!claimedPath) {
+      throw new Error(`Job not found or not claimed by this process: ${jobId}`);
     }
 
-    if (!currentPath) {
-      throw new Error(`Job not found: ${jobId}`);
-    }
+    // Update file contents BEFORE ack/nack (which moves the file via atomic rename)
+    const headers = await this.jobQueue["cli"].inspect(claimedPath);
+    const rawBodyStr = await this.jobQueue["cli"].cat(claimedPath);
+    const { custom: jobCustom, cleanBody: jobCleanBody } = FbmqCli.parseBodyCustom(rawBodyStr);
+    headers.custom = { ...headers.custom, ...jobCustom };
+    const job = jobCodec.deserialize(claimedPath, jobCleanBody, headers);
 
-    const filename = path.basename(currentPath);
-    const targetDir = this.resolve(`_jobs/${status === "waiting_for_user" ? "running" : status}`);
-    const targetPath = path.join(targetDir, filename);
+    job.status = status;
+    job.updatedAt = this.nowISO();
 
-    // Update frontmatter
-    const { data: fm, content } = this.readMdFile(currentPath);
-    Object.assign(fm, { status, updatedAt: this.nowISO() });
-
-    if (data?.result) fm.result = data.result;
-    if (data?.stats) fm.stats = data.stats;
-    if (data?.steeringMessage) fm.steeringMessage = data.steeringMessage;
-
-    // Write conversation history and streaming text into the body
-    let body = content;
-    if (data?.streamingText) {
-      // Append streaming text section
-      if (!body.includes("## Streaming Output")) {
-        body += "\n\n## Streaming Output\n";
-      }
-      body = body.replace(
-        /## Streaming Output\n[\s\S]*$/,
-        `## Streaming Output\n${data.streamingText}`,
-      );
-    }
+    if (data?.result) job.result = data.result;
+    if (data?.stats) job.stats = data.stats;
+    if (data?.steeringMessage) job.steeringMessage = data.steeringMessage;
+    if (data?.streamingText) job.streamingText = data.streamingText;
     if (data?.conversationHistory && data.conversationHistory.length > 0) {
-      if (!body.includes("## Conversation History")) {
-        body += "\n\n## Conversation History\n";
-      }
-      const historyMd = data.conversationHistory
-        .map((m) => `### ${m.role} (${m.timestamp})\n${m.content}`)
-        .join("\n\n");
-      body = body.replace(
-        /## Conversation History\n[\s\S]*$/,
-        `## Conversation History\n${historyMd}`,
-      );
+      job.conversationHistory = data.conversationHistory;
     }
 
-    this.writeMdFile(currentPath, fm, body);
+    // Write updated metadata back to the processing file
+    this.writeRFC822(claimedPath, job, jobCodec);
 
-    // Move file if status directory changed
-    if (currentPath !== targetPath) {
-      try {
-        fs.renameSync(currentPath, targetPath);
-      } catch {
-        // Already moved or doesn't exist
-      }
+    // For all terminal states, ack the message (move to done/).
+    // fbmq nack = "retry" (return to pending), which is wrong for app-level failures.
+    // The application-level status (done/failed/cancelled) is in the file metadata.
+    if (status === "done" || status === "failed" || status === "cancelled") {
+      await this.jobQueue.complete(claimedPath);
+      this.claimedJobs.delete(jobId);
     }
   }
 
@@ -383,10 +342,7 @@ export class VaultClient {
     threadId?: string | null;
   }): Promise<string> {
     const jobId = `job-${this.generateId()}`;
-    const filename = `${jobId}.md`;
-    const filePath = this.resolve("_jobs/pending", filename);
-
-    const frontmatter: Record<string, any> = {
+    const job: Job = {
       jobId,
       type: options.type ?? "background",
       status: "pending",
@@ -397,9 +353,11 @@ export class VaultClient {
       workerId: null,
       threadId: options.threadId ?? null,
       createdAt: this.nowISO(),
+      instruction: options.instruction,
+      _filePath: "" // Not relevant until dequeued
     };
 
-    this.writeMdFile(filePath, frontmatter, `# Instruction\n\n${options.instruction}`);
+    await this.jobQueue.enqueue(job);
     return jobId;
   }
 
@@ -783,31 +741,26 @@ export class VaultClient {
       securityConstraints?: import("./types").DelegationSecurityConstraints;
     }>,
   ): Promise<void> {
-    for (const task of tasks) {
-      const filename = `task-${task.taskId}.md`;
-      const filePath = this.resolve("_delegation/pending", filename);
-
-      this.writeMdFile(
-        filePath,
-        {
-          taskId: task.taskId,
-          jobId,
-          targetHarnessType: task.targetHarnessType ?? "any",
-          status: "pending",
-          priority: task.priority ?? 50,
-          deadlineMs: task.deadlineMs ?? 600000,
-          dependsOn: task.dependsOn ?? [],
-          modelOverride: task.modelOverride ?? null,
-          claimedBy: null,
-          claimedAt: null,
-          traceId: task.traceId ?? null,
-          spanId: task.spanId ?? null,
-          parentSpanId: task.parentSpanId ?? null,
-          securityConstraints: task.securityConstraints ?? null,
-          createdAt: this.nowISO(),
-        },
-        `# Task Instruction\n\n${task.instruction}`,
-      );
+    for (const t of tasks) {
+      const task: DelegatedTask = {
+        taskId: t.taskId,
+        jobId,
+        targetHarnessType: t.targetHarnessType ?? "any",
+        status: "pending",
+        priority: t.priority ?? 50,
+        deadlineMs: t.deadlineMs ?? 600000,
+        dependsOn: t.dependsOn ?? [],
+        claimedBy: null,
+        claimedAt: null,
+        instruction: t.instruction,
+        createdAt: this.nowISO(),
+        traceId: t.traceId,
+        spanId: t.spanId,
+        parentSpanId: t.parentSpanId,
+        securityConstraints: t.securityConstraints,
+        _filePath: ""
+      };
+      await this.delegationQueue.enqueue(task);
     }
   }
 
@@ -826,72 +779,31 @@ export class VaultClient {
    * Respects task dependencies (only returns tasks whose dependsOn are all completed).
    */
   async getPendingTasks(harnessType: string): Promise<DelegatedTask[]> {
-    const pending = this.listMdFiles("_delegation/pending");
-    const completed = this.listMdFiles("_delegation/completed");
-
-    // Build set of completed task IDs
-    const completedIds = new Set<string>();
-    for (const f of completed) {
-      try {
-        const { data } = this.readMdFile(f);
-        if (data.taskId) completedIds.add(data.taskId);
-      } catch {
-        // Skip
-      }
-    }
-
-    const tasks: DelegatedTask[] = [];
-    for (const f of pending) {
-      try {
-        const { data, content } = this.readMdFile(f);
-        // Filter by harness type
-        if (
-          data.targetHarnessType !== "any" &&
-          data.targetHarnessType !== harnessType
-        ) {
-          continue;
-        }
-        // Check dependencies
-        const deps = (data.dependsOn as string[]) ?? [];
-        const allDepsCompleted = deps.every((d) => completedIds.has(d));
-        if (!allDepsCompleted) continue;
-
-        tasks.push(this.parseDelegatedTask(f, data, content));
-      } catch {
-        // Skip
-      }
-    }
-
-    tasks.sort((a, b) => (b.priority ?? 50) - (a.priority ?? 50));
-    return tasks;
+    const task = await this.delegationQueue.dequeue(harnessType as HarnessType);
+    if (!task) return [];
+    this.claimedTasks.set(task.taskId, task._filePath);
+    return [task];
   }
 
   /**
    * Claim a delegated task atomically.
    */
   async claimTask(taskId: string, relayId: string): Promise<boolean> {
-    const files = this.listMdFiles("_delegation/pending");
-    const target = files.find((f) => {
-      try {
-        const { data } = this.readMdFile(f);
-        return data.taskId === taskId;
-      } catch {
-        return false;
-      }
-    });
-
-    if (!target) return false;
-
-    const filename = path.basename(target);
-    const dest = this.resolve("_delegation/claimed", filename);
+    const claimedPath = this.claimedTasks.get(taskId);
+    if (!claimedPath) return false;
 
     try {
-      fs.renameSync(target, dest);
-      this.updateFrontmatter(dest, {
-        status: "claimed",
-        claimedBy: relayId,
-        claimedAt: this.nowISO(),
-      });
+      const headers = await this.delegationQueue["mainCli"].inspect(claimedPath);
+      const rawBody = await this.delegationQueue["mainCli"].cat(claimedPath);
+      const { custom: taskCustom, cleanBody: taskCleanBody } = FbmqCli.parseBodyCustom(rawBody);
+      headers.custom = { ...headers.custom, ...taskCustom };
+      const task = delegationCodec.deserialize(claimedPath, taskCleanBody, headers);
+
+      task.status = "claimed";
+      task.claimedBy = relayId;
+      task.claimedAt = this.nowISO();
+
+      this.writeRFC822(claimedPath, task, delegationCodec);
       return true;
     } catch {
       return false;
@@ -907,51 +819,27 @@ export class VaultClient {
     result?: string,
     error?: string,
   ): Promise<void> {
-    const dirs = ["pending", "claimed", "completed"];
-    let currentPath: string | null = null;
-
-    for (const dir of dirs) {
-      const files = this.listMdFiles(`_delegation/${dir}`);
-      const found = files.find((f) => {
-        try {
-          const { data } = this.readMdFile(f);
-          return data.taskId === taskId;
-        } catch {
-          return false;
-        }
-      });
-      if (found) {
-        currentPath = found;
-        break;
-      }
+    const claimedPath = this.claimedTasks.get(taskId);
+    if (!claimedPath) {
+      throw new Error(`Task not found or not claimed by this process: ${taskId}`);
     }
 
-    if (!currentPath) {
-      throw new Error(`Task not found: ${taskId}`);
-    }
+    const headers = await this.delegationQueue["mainCli"].inspect(claimedPath);
+    const rawBodyStr = await this.delegationQueue["mainCli"].cat(claimedPath);
+    const { custom: taskCustom2, cleanBody: taskCleanBody2 } = FbmqCli.parseBodyCustom(rawBodyStr);
+    headers.custom = { ...headers.custom, ...taskCustom2 };
+    const task = delegationCodec.deserialize(claimedPath, taskCleanBody2, headers);
 
-    const filename = path.basename(currentPath);
-    const targetDir =
-      status === "completed" || status === "failed"
-        ? "completed"
-        : status === "claimed" || status === "running"
-          ? "claimed"
-          : "pending";
-    const targetPath = this.resolve(`_delegation/${targetDir}`, filename);
+    task.status = status;
+    if (result) task.result = result;
+    if (error) task.error = error;
 
-    const updates: Record<string, any> = { status };
-    if (result) updates.result = result;
-    if (error) updates.error = error;
-    updates.completedAt = this.nowISO();
+    this.writeRFC822(claimedPath, task, delegationCodec);
 
-    this.updateFrontmatter(currentPath, updates);
-
-    if (currentPath !== targetPath) {
-      try {
-        fs.renameSync(currentPath, targetPath);
-      } catch {
-        // Already moved
-      }
+    // Ack for all terminal states — app-level status is in file metadata.
+    if (status === "completed" || status === "failed" || status === "cancelled" || status === "timeout") {
+      await this.delegationQueue.complete(claimedPath);
+      this.claimedTasks.delete(taskId);
     }
   }
 
@@ -1514,6 +1402,62 @@ export class VaultClient {
     });
 
     return `## Recent Conversation History (${entries.length} messages)\n\n` + lines.join("\n\n");
+  }
+
+  // ─── COO Inbox/Outbox ──────────────────────────────────────────────
+
+  /**
+   * Send an intent to the active COO by writing to _delegation/coo_inbox.
+   * Returns the intent ID.
+   */
+  async sendToCoo(intent: Omit<import("./types").MasterIntent, "intentId" | "status" | "createdAt">): Promise<string> {
+    const intentId = `intent-${this.generateId()}`;
+    const inboxPath = this.resolve("_delegation/coo_inbox", `${intentId}.json`);
+
+    const payload: import("./types").MasterIntent = {
+      ...intent,
+      intentId,
+      status: "pending",
+      createdAt: this.nowISO()
+    };
+
+    const dir = path.dirname(inboxPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    fs.writeFileSync(inboxPath, JSON.stringify(payload, null, 2), "utf-8");
+    return intentId;
+  }
+
+  /**
+   * Periodically called to check if COO has replied in _delegation/coo_outbox.
+   * Returns response string or null if not yet processed.
+   */
+  async getCooResponse(intentId: string): Promise<string | null> {
+    const outboxPath = this.resolve("_delegation/coo_outbox", `${intentId}.json`);
+    if (!fs.existsSync(outboxPath)) return null;
+
+    try {
+      const data = JSON.parse(fs.readFileSync(outboxPath, "utf-8"));
+      if (data.status === "completed" || data.response) {
+        fs.unlinkSync(outboxPath);
+        return data.response ?? "[Done]";
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  }
+
+  /**
+   * List all pending intent IDs in the coo_outbox.
+   */
+  async listCooResponses(): Promise<string[]> {
+    const outboxDir = this.resolve("_delegation/coo_outbox");
+    if (!fs.existsSync(outboxDir)) return [];
+
+    return fs.readdirSync(outboxDir)
+      .filter(f => f.endsWith(".json"))
+      .map(f => f.replace(".json", ""));
   }
 
   // ─── Parsers ───────────────────────────────────────────────────────

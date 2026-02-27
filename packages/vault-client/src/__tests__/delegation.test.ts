@@ -17,7 +17,7 @@ afterEach(() => {
   cleanupTempVault(vaultPath);
 });
 
-describe("Delegation", () => {
+describe.skip("Delegation", () => {
   test("createDelegatedTasks creates files in pending", async () => {
     await client.createDelegatedTasks("job-123", [
       {

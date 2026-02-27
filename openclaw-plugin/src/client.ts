@@ -178,6 +178,54 @@ export class AgentHQClient {
     return this.request<ContextResult>("GET", "/api/context");
   }
 
+  // ─── Orchestration (COO) ───────────────────────────────────
+
+  async listAgents(): Promise<{ agents: Array<{ id: string; name: string; description: string }> }> {
+    return this.request<{ agents: Array<{ id: string; name: string; description: string }> }>("GET", "/api/agents");
+  }
+
+  async listAvailableAgents(): Promise<{
+    agents: Array<{ id: string; name: string; description: string }>;
+  }> {
+    return this.request<{ agents: Array<{ id: string; name: string; description: string }> }>(
+      "GET",
+      "/api/agents",
+    );
+  }
+
+  async delegateTask(params: {
+    instruction: string;
+    targetAgentId: string;
+    priority?: number;
+    dependsOn?: string[];
+    metadata?: Record<string, any>;
+  }): Promise<{ status: string; taskId: string }> {
+    return this.request<{ status: string; taskId: string }>("POST", "/api/delegate", params);
+  }
+
+  async reviewCompletedTasks(limit = 20): Promise<{
+    tasks: Array<{
+      taskId: string;
+      status: string;
+      result?: string;
+      error?: string;
+      completedAt?: string;
+    }>;
+  }> {
+    return this.request<{
+      tasks: Array<{ taskId: string; status: string; result?: string; error?: string; completedAt?: string }>;
+    }>("GET", `/api/completed?limit=${limit}`);
+  }
+
+  async markCompleted(params: {
+    taskId: string;
+    result?: string;
+    error?: string;
+    status?: "completed" | "failed";
+  }): Promise<{ status: string }> {
+    return this.request<{ status: string }>("POST", "/api/completed", params);
+  }
+
   // ─── Health ─────────────────────────────────────────────────
 
   async checkHealth(): Promise<{

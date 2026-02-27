@@ -5,16 +5,18 @@
  * Listens on localhost:18790, serves the sandboxed OpenClaw API.
  */
 
-import { OpenClawAdapter } from "@repo/vault-client/openclaw-adapter";
-import { AuditLogger } from "./openclaw-bridge/audit";
-import { createRouter } from "./openclaw-bridge/routes";
+import { OrchestratorAdapter } from "@repo/vault-client/orchestrator-adapter";
+import { AuditLogger } from "./orchestrator-bridge/audit";
+import { createRouter } from "./orchestrator-bridge/routes";
 
 const DEFAULT_PORT = 18790;
 
 export interface BridgeContext {
-  adapter: OpenClawAdapter;
+  adapter: OrchestratorAdapter;
   audit: AuditLogger;
   server: ReturnType<typeof Bun.serve> | null;
+  port: number;
+  cooName: string;
 }
 
 /**
@@ -28,8 +30,11 @@ export interface BridgeContext {
 export function startBridge(
   vaultPath: string,
   port: number = DEFAULT_PORT,
+  cooName: string = "openclaw",
+  token?: string
 ): BridgeContext {
-  const adapter = new OpenClawAdapter(vaultPath);
+  const adapter = new OrchestratorAdapter(vaultPath, cooName);
+  if (token) adapter.setEphemeralToken(token);
   adapter.ensureDirectories();
 
   const audit = new AuditLogger(adapter.auditPath);
@@ -55,7 +60,7 @@ export function startBridge(
     `[openclaw-bridge] Listening on http://127.0.0.1:${server.port}`,
   );
 
-  return { adapter, audit, server };
+  return { adapter, audit, server, port, cooName };
 }
 
 /**

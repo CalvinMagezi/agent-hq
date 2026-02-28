@@ -67,7 +67,7 @@ Discord Relay ──► Claude Code  ┐
 
 ### Zero-install (bunx / npx)
 ```bash
-bunx agent-hq          # runs the hq CLI — installs the repo on first run
+bunx @calvin.magezi/agent-hq          # runs the hq CLI — installs the repo on first run
 ```
 
 ### Homebrew (macOS)
@@ -188,7 +188,7 @@ If you're an AI agent setting up Agent-HQ, use the non-interactive flow:
 
 ```bash
 # Prerequisites: bun ≥1.1.0, git
-bunx agent-hq init --non-interactive --vault ~/.agent-hq-vault
+bunx @calvin.magezi/agent-hq init --non-interactive --vault ~/.agent-hq-vault
 ```
 
 This single command:

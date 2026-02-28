@@ -1,5 +1,5 @@
 {
-  "name": "agent-hq",
+  "name": "@calvin.magezi/agent-hq",
   "version": "0.1.0",
   "description": "HQ CLI — local-first AI agent hub for Claude, Gemini & Discord",
   "homepage": "https://github.com/CalvinMagezi/agent-hq",

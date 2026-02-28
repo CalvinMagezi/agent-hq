@@ -6,9 +6,40 @@ const COO_POLL_INTERVAL_MS = 2_000;
 const COO_POLL_TIMEOUT_MS = 300_000; // 5 min
 
 /**
+ * Signals that a task genuinely needs multi-agent coordination:
+ * - Explicitly requests coordination/delegation/parallel work
+ * - Spans multiple repos, apps, or bots
+ * - Involves a breakdown into dependent subtasks
+ *
+ * Simple tasks (fix a bug, check a file, write a note) return false.
+ */
+function requiresCoordination(instruction: string): boolean {
+    const text = instruction.toLowerCase();
+
+    const coordinationSignals = [
+        /\bcoordinat/,
+        /\bdelegate\b/,
+        /\bin parallel\b/,
+        /\bparallel(ly)?\b/,
+        /\bmultiple (bots?|agents?|workers?|repos?|apps?|services?)\b/,
+        /\bacross (repos?|apps?|services?|platforms?|bots?)\b/,
+        /\bfull[- ]?stack\b/,
+        /\bend[- ]?to[- ]?end\b/,
+        /\bbreakdown\b/,
+        /\bsubtask/,
+        /\borchestr/,
+        /\bphase \d/,
+        /\bstep \d.*(then|after|next)/,
+        /\b(frontend|backend|database|infra).*(and|then).*(frontend|backend|database|infra)\b/,
+    ];
+
+    return coordinationSignals.some(re => re.test(text));
+}
+
+/**
  * Route a user message to either the internal job queue or the external COO.
- * External mode: writes intent to coo_inbox and returns immediately.
- * The daemon's coo-outbox task will dispatch the COO's response when it arrives.
+ * In "external" mode, only tasks that genuinely require multi-agent coordination
+ * are sent to the COO. Simple single-step tasks stay internal regardless of mode.
  */
 export async function routeUserMessage(
     vault: VaultClient,
@@ -20,7 +51,7 @@ export async function routeUserMessage(
         const context = await vault.getAgentContext();
         const mode = context.config["orchestration_mode"] || "internal";
 
-        if (mode === "external") {
+        if (mode === "external" && requiresCoordination(instruction)) {
             const intentId = await vault.sendToCoo({
                 jobId: "",
                 instruction,
@@ -30,18 +61,19 @@ export async function routeUserMessage(
                 intentId,
                 message: `Dispatched to COO (Intent ID: ${intentId}). The COO will plan and delegate the work — results will arrive when ready.`,
             };
-        } else {
-            const jobId = await vault.createJob({
-                instruction,
-                type: "background",
-                priority,
-                securityProfile: securityProfile as any,
-            });
-            return {
-                jobId,
-                message: `Job dispatched (ID: ${jobId}). The task is now running in the background.`,
-            };
         }
+
+        // All other tasks (including external mode without coordination signals) run internally
+        const jobId = await vault.createJob({
+            instruction,
+            type: "background",
+            priority,
+            securityProfile: securityProfile as any,
+        });
+        return {
+            jobId,
+            message: `Job dispatched (ID: ${jobId}). The task is now running in the background.`,
+        };
     } catch (error: any) {
         throw new Error(`Routing failed: ${error.message}`);
     }

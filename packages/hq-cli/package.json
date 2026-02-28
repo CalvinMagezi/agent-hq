@@ -11,10 +11,10 @@
   "license": "MIT",
   "keywords": ["ai", "agent", "claude", "gemini", "discord", "local-first", "obsidian"],
   "bin": {
-    "hq": "./bin/hq.ts"
+    "hq": "./bin/hq"
   },
   "files": [
-    "bin/hq.ts",
+    "bin/hq",
     "README.md"
   ],
   "engines": {

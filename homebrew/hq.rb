@@ -17,7 +17,7 @@ class Hq < Formula
   homepage "https://github.com/CalvinMagezi/agent-hq"
   url "https://github.com/CalvinMagezi/agent-hq/archive/refs/tags/v0.1.0.tar.gz"
   # Update sha256 after `brew fetch --build-from-source hq.rb` or via CI
-  sha256 "REPLACE_WITH_ACTUAL_SHA256"
+  sha256 "273fe942b135ced609a16a71983a2a8c334557fbb67786f853dad76f5160e281"
   license "MIT"
   version "0.1.0"
 

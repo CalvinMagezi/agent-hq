@@ -1,30 +1,32 @@
 import {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  ChannelType,
-  PresenceUpdateStatus,
-  ActivityType,
   MessageFlags,
   type Message,
+  type Interaction,
 } from "discord.js";
 import { writeFile, unlink, mkdir } from "fs/promises";
 import * as fs from "fs";
 import * as path from "path";
 import { join } from "path";
+import {
+  DiscordBotBase,
+  chunkMessage,
+  classifyIntent,
+  StreamingReply,
+  ThreadManager,
+  extractFileAttachments,
+  buildAttachments,
+  type IncomingMessage,
+} from "@repo/discord-core";
 import type { BaseHarness } from "./harnesses/base.js";
 import { ContextEnricher } from "./context.js";
 import { VaultAPI as ConvexAPI } from "./vaultApi.js";
 import { processMemoryIntents } from "./memory.js";
-import { chunkMessage } from "./chunker.js";
-import { classifyIntent } from "./intent.js";
 import { handleCommand } from "./commands.js";
 import { createTranscriber, type Transcriber } from "./transcribe.js";
+import { getSlashCommandDefs, handleSlashCommand, handleAutocomplete } from "./slashCommands.js";
 import type { RelayConfig } from "./types.js";
 
 const MAX_INLINE_RESULT = 8000;
-
-const MAX_DEDUP_SIZE = 200;
 
 export function buildConfig(): RelayConfig {
   return {
@@ -52,27 +54,38 @@ export function buildConfig(): RelayConfig {
 
 /**
  * A self-contained Discord bot instance wrapping a specific CLI harness.
- * Multiple BotInstances can run in the same process with different tokens and harnesses.
+ * Extends DiscordBotBase for shared client setup, dedup, auth, presence.
  */
-export class BotInstance {
-  private client: Client | null = null;
+export class BotInstance extends DiscordBotBase {
   private harness: BaseHarness;
   private enricher: ContextEnricher;
   private convex: ConvexAPI;
-  private config: RelayConfig;
+  private relayConfig: RelayConfig;
   private transcriber: Transcriber | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private delegationInterval: ReturnType<typeof setInterval> | null = null;
-  private isDelegating = false; // Prevent concurrent delegation processing
-  private processedMessages = new Set<string>();
+  private isDelegating = false;
   private agentId: string;
   private harnessType: string;
   private syncCleanup: (() => void) | null = null;
-  /** Shared VaultSync instance injected from index.ts — avoids multiple SQLite writers */
+  private threadManager = new ThreadManager();
   private sharedSync: any | null = null;
 
   constructor(config: RelayConfig, harness: BaseHarness, sharedSync?: any) {
-    this.config = config;
+    super({
+      config: {
+        botToken: config.discordBotToken,
+        userId: config.discordUserId,
+        botId: config.discordBotId,
+      },
+      label: harness.harnessName,
+      presence: {
+        onlineText: "Ready for messages",
+        busyText: "Processing message...",
+      },
+    });
+
+    this.relayConfig = config;
     this.harness = harness;
     this.agentId = `discord-relay-${harness.harnessName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
     this.harnessType = harness.harnessName.toLowerCase().replace(/\s+/g, "-");
@@ -84,36 +97,12 @@ export class BotInstance {
   async start(): Promise<void> {
     await this.harness.init();
     await this.enricher.loadProfile();
-    this.transcriber = createTranscriber(this.config);
+    this.transcriber = createTranscriber(this.relayConfig);
 
-    this.client = new Client({
-      intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.DirectMessages,
-        GatewayIntentBits.MessageContent,
-      ],
-      partials: [Partials.Channel, Partials.Message],
-    });
+    // Start the base class (client creation, login, event listeners)
+    await super.start();
 
-    this.client.once("ready", () => {
-      console.log(`[${this.harness.harnessName}] Discord bot connected as: ${this.client!.user?.tag}`);
-
-      if (!this.config.discordBotId && this.client!.user) {
-        this.config.discordBotId = this.client!.user.id;
-      }
-
-      this.client!.user?.setPresence({
-        status: PresenceUpdateStatus.Online,
-        activities: [{ name: "Ready for messages", type: ActivityType.Listening }],
-      });
-    });
-
-    this.client.on("messageCreate", (msg) => this.handleMessage(msg));
-    this.client.on("error", (err) => console.error(`[${this.harness.harnessName}] Discord error:`, err.message));
-
-    await this.client.login(this.config.discordBotToken);
-
+    // Heartbeat registration
     const capabilities = this.getCapabilities();
     const heartbeatMeta = {
       type: "discord-relay",
@@ -122,7 +111,6 @@ export class BotInstance {
       capabilities,
     };
     await this.convex.sendHeartbeat(this.agentId, "online", heartbeatMeta);
-    // Register relay health with capabilities
     await this.convex.updateRelayHealth(
       this.agentId,
       this.harnessType,
@@ -152,388 +140,53 @@ export class BotInstance {
       this.syncCleanup = null;
     }
     await this.convex.sendHeartbeat(this.agentId, "offline").catch(() => {});
-    if (this.client) {
-      await this.client.destroy();
-      this.client = null;
-      console.log(`[${this.harness.harnessName}] Discord bot stopped.`);
-    }
+    await super.stop();
   }
 
-  /** Initialize event-driven delegation monitoring with sync engine fallback to polling. */
-  private async initSyncDelegation(): Promise<void> {
-    // Use injected shared sync instance to avoid multiple VaultSync instances
-    // opening the same SQLite DB (causes SQLITE_BUSY and duplicate fs.watch watchers)
-    const sync = this.sharedSync;
-    if (sync?.on) {
-      try {
-        const unsub = sync.on("task:created", () => {
-          this.checkPendingDelegations();
-        });
-        // syncCleanup only unsubscribes the listener — does NOT stop the shared sync
-        this.syncCleanup = () => unsub();
-        this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 30_000);
-        console.log(`[${this.harness.harnessName}] Using shared sync engine — event-driven delegation with 30s fallback`);
-        return;
-      } catch (err) {
-        console.warn(`[${this.harness.harnessName}] Could not subscribe to shared sync:`, err);
-      }
-    }
+  // ── DiscordBotBase hooks ──────────────────────────────────────────
 
-    // No shared sync — create a dedicated one for this bot
+  async onReady(): Promise<void> {
+    // Register slash commands via the relay's existing module
     try {
-      const { VaultSync } = await import("@repo/vault-sync");
-      const vaultPath = this.config.vaultPath;
-      if (!vaultPath) throw new Error("No vault path configured");
-
-      const ownSync = new VaultSync({
-        vaultPath,
-        debounceMs: 200,
-        stabilityMs: 500,
-        fullScanIntervalMs: 3_600_000,
-      });
-      await ownSync.start();
-
-      const unsub = ownSync.on("task:created", () => {
-        this.checkPendingDelegations();
-      });
-
-      this.syncCleanup = () => {
-        unsub();
-        ownSync.stop();
-      };
-
-      this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 30_000);
-      console.log(`[${this.harness.harnessName}] Sync engine active — event-driven delegation with 30s fallback`);
-    } catch (err) {
-      // Fallback to legacy 5s polling if sync engine is unavailable
-      console.warn(`[${this.harness.harnessName}] Sync engine not available, using 5s polling:`, err);
-      this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 5000);
-    }
-  }
-
-  /** Return capabilities based on harness type */
-  private getCapabilities(): string[] {
-    switch (this.harnessType) {
-      case "claude-code":
-        return ["code", "git", "file-ops", "refactor", "debug", "test"];
-      case "opencode":
-        return ["code", "multi-model", "file-ops", "generation"];
-      case "gemini-cli":
-        return ["google-workspace", "google-docs", "google-sheets", "google-drive", "gmail", "google-calendar", "research", "analysis", "large-context", "summarization"];
-      default:
-        return ["general"];
-    }
-  }
-
-  /** Poll for delegated tasks from HQ and execute them */
-  private async checkPendingDelegations(): Promise<void> {
-    if (this.isDelegating) return; // Skip if already processing
-
-    try {
-      const tasks = await this.convex.getPendingDelegations(
-        this.agentId,
-        this.harnessType,
-      );
-
-      if (tasks.length === 0) return;
-
-      this.isDelegating = true;
-
-      for (const task of tasks) {
-        console.log(
-          `[${this.harness.harnessName}] Delegation: claiming task ${task.taskId} (${task.instruction.substring(0, 60)}...)`,
+      const defs = getSlashCommandDefs(this.harness.harnessName);
+      const client = this.getClient();
+      if (client?.application) {
+        await client.application.commands.set(
+          defs.map((d) => d.data.toJSON()),
         );
-
-        // Claim the task
-        const claimed = await this.convex.claimDelegation(
-          task._id,
-          this.agentId,
-        );
-        if (!claimed) {
-          console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} already claimed by another relay`);
-          continue;
-        }
-
-        // Mark as running
-        await this.convex.updateDelegation(task._id, "running");
-        this.setBotPresence("busy");
-
-        // ── Trace recording (best-effort) ───────────────────────────
-        let traceDb: any = null;
-        let relaySpanId: string | null = null;
-        if (task.traceId && this.config.vaultPath) {
-          try {
-            const { TraceDB } = await import("@repo/vault-client/trace");
-            traceDb = new TraceDB(this.config.vaultPath);
-            relaySpanId = traceDb.createSpan({
-              traceId: task.traceId,
-              parentSpanId: task.spanId,
-              taskId: task.taskId,
-              type: "relay_exec",
-              name: `${this.harnessType}:${task.taskId}`,
-            });
-            traceDb.addSpanEvent(relaySpanId, task.traceId, "claimed", `Claimed by ${this.agentId}`);
-          } catch {
-            // Non-fatal — tracing is best-effort
-            traceDb = null;
-            relaySpanId = null;
-          }
-        }
-
-        // ── Cancellation signal path ─────────────────────────────────
-        const signalsDir = this.config.vaultPath
-          ? path.join(this.config.vaultPath, "_delegation/signals")
-          : null;
-        const signalPath = signalsDir
-          ? path.join(signalsDir, `cancel-${task.taskId}.md`)
-          : null;
-
-        // Clean up any stale signal from a previous run
-        if (signalPath && fs.existsSync(signalPath)) {
-          try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
-        }
-
-        let cancelCheckInterval: ReturnType<typeof setInterval> | null = null;
-        let wasCancelled = false;
-
-        try {
-          // ── Build instruction with security constraints ───────────────
-          let instruction = task.instruction;
-          const sc = task.securityConstraints;
-          if (sc) {
-            const lines: string[] = [
-              "SECURITY CONSTRAINTS (enforced — violation will fail the task):",
-            ];
-            if (sc.noGit) lines.push("- Do NOT run any git commands");
-            if (sc.noNetwork) lines.push("- Do NOT make any network requests");
-            if (sc.filesystemAccess === "read-only") lines.push("- Read-only filesystem access — do NOT write or delete files");
-            if (sc.allowedDirectories?.length) lines.push(`- Only access these directories: ${sc.allowedDirectories.join(", ")}`);
-            if (sc.blockedCommands?.length) lines.push(`- Do NOT run commands matching: ${sc.blockedCommands.join(", ")}`);
-            if (lines.length > 1) {
-              instruction = `${lines.join("\n")}\n\n${instruction}`;
-            }
-          }
-
-          const channelId = task.discordChannelId || `delegation-${task.taskId}`;
-          const options: any = {};
-          if (task.modelOverride) {
-            options.channelSettings = { model: task.modelOverride };
-          }
-
-          // ── Start cancellation polling ────────────────────────────────
-          if (signalPath) {
-            cancelCheckInterval = setInterval(() => {
-              if (fs.existsSync(signalPath)) {
-                wasCancelled = true;
-                this.harness.kill?.(channelId);
-                if (cancelCheckInterval) {
-                  clearInterval(cancelCheckInterval);
-                  cancelCheckInterval = null;
-                }
-              }
-            }, 2000);
-          }
-
-          // ── Live output streaming callback ────────────────────────────
-          const liveChunkCallback = (chunk: string) => {
-            this.convex.writeLiveChunk(task.taskId, this.agentId, chunk);
-          };
-
-          // ── Execute via harness (with optional timeout) ───────────────
-          const maxMs = sc?.maxExecutionMs;
-          const executeHarness = () =>
-            this.harness.callWithChunks
-              ? this.harness.callWithChunks(instruction, channelId, options, liveChunkCallback)
-              : this.harness.call(instruction, channelId, options);
-
-          let result: string;
-          if (maxMs) {
-            const timeoutPromise = new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error(`Task timed out after ${maxMs}ms`)), maxMs),
-            );
-            result = await Promise.race([executeHarness(), timeoutPromise]);
-          } else {
-            result = await executeHarness();
-          }
-
-          // Stop cancellation polling
-          if (cancelCheckInterval) {
-            clearInterval(cancelCheckInterval);
-            cancelCheckInterval = null;
-          }
-
-          // Check if cancelled mid-execution
-          if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
-            wasCancelled = true;
-            const partial = result.substring(0, 500);
-            this.convex.deleteLiveOutput(task.taskId);
-            await this.convex.updateDelegation(task._id, "cancelled", partial, "Cancelled by HQ");
-            if (signalPath && fs.existsSync(signalPath)) {
-              try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
-            }
-            if (traceDb && relaySpanId && task.traceId) {
-              traceDb.addSpanEvent(relaySpanId, task.traceId, "cancelled", "Cancelled by HQ signal");
-              traceDb.completeSpan(relaySpanId, "cancelled");
-            }
-            console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled`);
-            continue;
-          }
-
-          // ── Result chunking — overflow large results ──────────────────
-          let inlineResult: string;
-          if (result.length > MAX_INLINE_RESULT && this.config.vaultPath) {
-            try {
-              const resultsDir = path.join(this.config.vaultPath, "_delegation/results");
-              fs.mkdirSync(resultsDir, { recursive: true });
-              const resultFile = path.join(resultsDir, `result-${task.taskId}.md`);
-              fs.writeFileSync(resultFile, result, "utf-8");
-              const summary = result.substring(0, 500);
-              inlineResult = `${summary}\n\n[Full result: _delegation/results/result-${task.taskId}.md (${result.length} chars)]`;
-            } catch {
-              inlineResult = result.substring(0, MAX_INLINE_RESULT);
-            }
-          } else {
-            inlineResult = result;
-          }
-
-          // Report success
-          this.convex.deleteLiveOutput(task.taskId);
-          await this.convex.updateDelegation(task._id, "completed", inlineResult);
-
-          if (traceDb && relaySpanId && task.traceId) {
-            traceDb.addSpanEvent(relaySpanId, task.traceId, "completed", `Result: ${result.length} chars`);
-            traceDb.completeSpan(relaySpanId, "completed");
-          }
-
-          console.log(
-            `[${this.harness.harnessName}] Delegation: task ${task.taskId} completed (${result.length} chars)`,
-          );
-
-          // Post result to Discord channel if specified
-          if (task.discordChannelId && this.client) {
-            try {
-              const channel = await this.client.channels.fetch(task.discordChannelId);
-              if (channel && "send" in channel) {
-                const header = `**[HQ Delegation Result]** Task: \`${task.taskId}\`\n`;
-                const chunks = chunkMessage(header + result);
-                for (const chunk of chunks) {
-                  await (channel as any).send(chunk);
-                }
-              }
-            } catch (discordErr: any) {
-              console.warn(
-                `[${this.harness.harnessName}] Delegation: failed to post result to Discord:`,
-                discordErr.message,
-              );
-            }
-          }
-        } catch (execErr: any) {
-          // Stop cancellation polling
-          if (cancelCheckInterval) {
-            clearInterval(cancelCheckInterval);
-            cancelCheckInterval = null;
-          }
-
-          if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
-            // Harness threw because it was killed by cancellation
-            this.convex.deleteLiveOutput(task.taskId);
-            await this.convex.updateDelegation(task._id, "cancelled", undefined, "Cancelled by HQ");
-            if (signalPath && fs.existsSync(signalPath)) {
-              try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
-            }
-            if (traceDb && relaySpanId && task.traceId) {
-              traceDb.addSpanEvent(relaySpanId, task.traceId, "cancelled", "Cancelled by HQ signal");
-              traceDb.completeSpan(relaySpanId, "cancelled");
-            }
-            console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled (harness killed)`);
-          } else {
-            this.convex.deleteLiveOutput(task.taskId);
-            await this.convex.updateDelegation(
-              task._id,
-              "failed",
-              undefined,
-              execErr.message || String(execErr),
-            );
-            if (traceDb && relaySpanId && task.traceId) {
-              traceDb.addSpanEvent(relaySpanId, task.traceId, "failed", execErr.message || String(execErr));
-              traceDb.completeSpan(relaySpanId, "failed");
-            }
-            console.error(
-              `[${this.harness.harnessName}] Delegation: task ${task.taskId} failed:`,
-              execErr.message,
-            );
-          }
-        } finally {
-          this.setBotPresence("online");
-          if (traceDb) {
-            try { traceDb.close(); } catch { /* ignore */ }
-          }
-        }
+        console.log(`[${this.harness.harnessName}] Registered ${defs.length} slash commands`);
       }
     } catch (err: any) {
-      // Silently ignore polling errors — will retry on next interval
-    } finally {
-      this.isDelegating = false;
+      console.error(`[${this.harness.harnessName}] Failed to register slash commands:`, err.message);
     }
   }
 
-  private setBotPresence(status: "online" | "busy" | "offline"): void {
-    if (!this.client?.user) return;
-
-    const presenceMap = {
-      online: {
-        status: PresenceUpdateStatus.Online,
-        activity: { name: "Ready for messages", type: ActivityType.Listening },
-      },
-      busy: {
-        status: PresenceUpdateStatus.DoNotDisturb,
-        activity: { name: "Processing message...", type: ActivityType.Playing },
-      },
-      offline: {
-        status: PresenceUpdateStatus.Invisible,
-        activity: { name: "Offline", type: ActivityType.Playing },
-      },
-    } as const;
-
-    const p = presenceMap[status];
-    this.client.user.setPresence({
-      status: p.status,
-      activities: [{ name: p.activity.name, type: p.activity.type }],
-    });
-
-    const heartbeatMeta = {
-      type: "discord-relay",
-      name: `Discord Relay (${this.harness.harnessName})`,
-      harnessType: this.harnessType,
-      capabilities: this.getCapabilities(),
-    };
-    this.convex.sendHeartbeat(this.agentId, status, heartbeatMeta).catch(() => {});
+  /** Handle slash commands and autocomplete via relay's existing system. */
+  protected async onInteraction(interaction: Interaction): Promise<boolean> {
+    if (interaction.isChatInputCommand()) {
+      if (!this.isInteractionAuthorized(interaction.user.id)) {
+        await interaction.reply({ content: "Unauthorized.", ephemeral: true });
+        return true;
+      }
+      await handleSlashCommand(interaction, {
+        harness: this.harness,
+        config: this.relayConfig,
+        convex: this.convex,
+        enricher: this.enricher,
+        threadManager: this.threadManager,
+      });
+      return true;
+    } else if (interaction.isAutocomplete()) {
+      await handleAutocomplete(interaction, this.harness);
+      return true;
+    }
+    return false;
   }
 
-  private async handleMessage(message: Message): Promise<void> {
-    if (message.author.bot) return;
-    if (message.author.id !== this.config.discordUserId) return;
-
-    if (this.processedMessages.has(message.id)) return;
-    this.processedMessages.add(message.id);
-    if (this.processedMessages.size > MAX_DEDUP_SIZE) {
-      const first = this.processedMessages.values().next().value!;
-      this.processedMessages.delete(first);
-    }
-
-    const isDM = message.channel.type === ChannelType.DM;
-    const isBotMentioned = this.config.discordBotId
-      ? message.content.includes(`<@${this.config.discordBotId}>`)
-      : false;
-
-    if (!isDM && !isBotMentioned) return;
-
-    let content = message.content.trim();
-    if (this.config.discordBotId) {
-      content = content
-        .replace(new RegExp(`<@!?${this.config.discordBotId}>`, "g"), "")
-        .trim();
-    }
+  /** Handle incoming authorized, deduplicated, mention-stripped messages. */
+  async onMessage(msg: IncomingMessage): Promise<void> {
+    const message = msg.message;
+    let content = msg.content;
 
     // Voice message transcription
     const isVoiceMessage = message.flags.has(MessageFlags.IsVoiceMessage);
@@ -554,8 +207,8 @@ export class BotInstance {
       }
 
       try {
-        await mkdir(this.config.uploadsDir, { recursive: true });
-        const audioPath = join(this.config.uploadsDir, `${Date.now()}_voice.ogg`);
+        await mkdir(this.relayConfig.uploadsDir, { recursive: true });
+        const audioPath = join(this.relayConfig.uploadsDir, `${Date.now()}_voice.ogg`);
         const audioResponse = await fetch(audioAttachment.url);
         const buffer = Buffer.from(await audioResponse.arrayBuffer());
         await writeFile(audioPath, buffer);
@@ -589,15 +242,19 @@ export class BotInstance {
 
     // Handle commands
     try {
-      const cmdResult = await handleCommand(content, message.channelId, this.harness, this.config, this.convex);
+      const cmdResult = await handleCommand(content, message.channelId, this.harness, this.relayConfig, this.convex);
       if (cmdResult.handled) {
-        if (cmdResult.file) {
-          await message.reply({
-            content: cmdResult.response,
-            files: [{ attachment: cmdResult.file.buffer, name: cmdResult.file.name }],
-          });
-        } else if (cmdResult.response) {
-          await message.reply(cmdResult.response);
+        const trimmedCmd = content.trim().toLowerCase();
+        if (trimmedCmd === "!reset" || trimmedCmd === "!new" || trimmedCmd === "!clear" || trimmedCmd === "!defaults") {
+          this.threadManager.clearThread(message.channelId);
+        }
+
+        const replyOpts: Record<string, unknown> = {};
+        if (cmdResult.embed) replyOpts.embeds = [cmdResult.embed];
+        if (cmdResult.response) replyOpts.content = cmdResult.response;
+        if (cmdResult.file) replyOpts.files = [{ attachment: cmdResult.file.buffer, name: cmdResult.file.name }];
+        if (replyOpts.embeds || replyOpts.content || replyOpts.files) {
+          await message.reply(replyOpts);
         }
         return;
       }
@@ -620,15 +277,16 @@ export class BotInstance {
       content = content.replace(/^!(continue|c)\s+/, "").trim();
     }
 
-    this.setBotPresence("busy");
+    this.updatePresenceAndHeartbeat("busy");
 
-    const sendTyping = () => {
-      if (message.channel && "sendTyping" in message.channel) {
-        (message.channel as any).sendTyping().catch(() => {});
-      }
-    };
-    sendTyping();
-    const typingInterval = setInterval(sendTyping, 8000);
+    // Show Discord typing indicator (the "... is typing" animation)
+    this.startTyping("harness", message.channelId);
+
+    // Track message for auto-threading
+    this.threadManager.trackMessage(message.channelId);
+
+    const streaming = new StreamingReply(message);
+    let streamingStarted = false;
 
     try {
       const filePaths = await this.downloadAttachments(message, { skipVoiceAudio: isVoiceMessage });
@@ -641,47 +299,66 @@ export class BotInstance {
           content;
       }
 
-      // Resolve reply-to context: if the user replied to a specific prior message,
-      // fetch that message's content so the agent knows exactly what they're responding to.
+      // Resolve reply-to context
       let replyToContent: string | undefined;
       if (message.reference?.messageId) {
         try {
           const refMsg = await message.channel.messages.fetch(message.reference.messageId);
-          if (refMsg && refMsg.content) {
-            replyToContent = refMsg.content.length > 1200
-              ? refMsg.content.substring(0, 1200) + "..."
-              : refMsg.content;
+          if (refMsg) {
+            // Bot streaming replies may have empty .content but text in embeds or description
+            const text = refMsg.content ||
+              refMsg.embeds?.[0]?.description ||
+              refMsg.embeds?.[0]?.fields?.map(f => `${f.name}: ${f.value}`).join("\n") ||
+              "";
+            if (text) {
+              const authorLabel = refMsg.author?.bot ? "Bot" : (refMsg.author?.username ?? "User");
+              const snippet = text.length > 1200 ? text.substring(0, 1200) + "..." : text;
+              replyToContent = `[${authorLabel}]: ${snippet}`;
+            }
           }
         } catch {
-          // Non-fatal — reference may have been deleted or unavailable
+          // Non-fatal
         }
       }
 
-      // Build enriched prompt BEFORE saving user message to avoid duplication:
-      // getRecentMessages() reads from disk, so saving first would include
-      // the current message in both the conversation history AND as the prompt.
       const enrichedPrompt = await this.enricher.buildPrompt(promptText, message.channelId, replyToContent);
-
       await this.convex.saveMessage("user", content, message.channelId);
 
-      // Split: stable system instruction goes through --append-system-prompt,
-      // dynamic context stays in the user prompt (-p)
+      await streaming.start();
+      streamingStarted = true;
+
       const systemInstruction = this.enricher.buildSystemInstruction();
-      const rawResponse = await this.harness.call(enrichedPrompt, message.channelId, {
+      const callOptions = {
         filePaths,
         continueSession: isContinue,
         channelSettings: {
           systemPrompt: systemInstruction,
         },
-      });
+      };
+
+      let rawResponse: string;
+      if (this.harness.callWithChunks) {
+        rawResponse = await this.harness.callWithChunks(
+          enrichedPrompt,
+          message.channelId,
+          callOptions,
+          (chunk) => streaming.append(chunk),
+        );
+      } else {
+        rawResponse = await this.harness.call(enrichedPrompt, message.channelId, callOptions);
+      }
 
       const response = await processMemoryIntents(this.convex, rawResponse);
+      const { cleanText, files } = extractFileAttachments(response);
+      await this.convex.saveMessage("assistant", cleanText, message.channelId);
+      await streaming.finish(cleanText);
 
-      await this.convex.saveMessage("assistant", response, message.channelId);
-
-      const chunks = chunkMessage(response, 2000);
-      for (const chunk of chunks) {
-        await message.reply(chunk);
+      // Send any file attachments the AI included via [FILE: /path] markers
+      if (files.length > 0) {
+        const attachments = buildAttachments(files);
+        if (attachments.length > 0) {
+          await this.sendFile(message.channelId, attachments);
+        }
       }
 
       for (const fp of filePaths) {
@@ -689,12 +366,301 @@ export class BotInstance {
       }
     } catch (error: any) {
       console.error("Message handling error:", error);
-      await message.reply(
-        "An error occurred while processing your message. Check relay logs.",
-      );
+      if (streamingStarted) {
+        await streaming.error("An error occurred while processing your message. Check relay logs.");
+      } else {
+        await message.reply("An error occurred while processing your message. Check relay logs.");
+      }
     } finally {
-      clearInterval(typingInterval);
-      this.setBotPresence("online");
+      this.stopTyping("harness");
+      if (!streamingStarted) streaming.dispose();
+      this.updatePresenceAndHeartbeat("online");
+    }
+  }
+
+  // ── Private helpers ───────────────────────────────────────────────
+
+  /** Update both Discord presence (via base) and vault heartbeat. */
+  private updatePresenceAndHeartbeat(status: "online" | "busy" | "offline"): void {
+    this.setPresence(status);
+    const heartbeatMeta = {
+      type: "discord-relay",
+      name: `Discord Relay (${this.harness.harnessName})`,
+      harnessType: this.harnessType,
+      capabilities: this.getCapabilities(),
+    };
+    this.convex.sendHeartbeat(this.agentId, status, heartbeatMeta).catch(() => {});
+  }
+
+  private getCapabilities(): string[] {
+    switch (this.harnessType) {
+      case "claude-code":
+        return ["code", "git", "file-ops", "refactor", "debug", "test"];
+      case "opencode":
+        return ["code", "multi-model", "file-ops", "generation"];
+      case "gemini-cli":
+        return ["google-workspace", "google-docs", "google-sheets", "google-drive", "gmail", "google-calendar", "research", "analysis", "large-context", "summarization"];
+      default:
+        return ["general"];
+    }
+  }
+
+  private async initSyncDelegation(): Promise<void> {
+    const sync = this.sharedSync;
+    if (sync?.on) {
+      try {
+        const unsub = sync.on("task:created", () => {
+          this.checkPendingDelegations();
+        });
+        this.syncCleanup = () => unsub();
+        this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 30_000);
+        console.log(`[${this.harness.harnessName}] Using shared sync engine — event-driven delegation with 30s fallback`);
+        return;
+      } catch (err) {
+        console.warn(`[${this.harness.harnessName}] Could not subscribe to shared sync:`, err);
+      }
+    }
+
+    try {
+      const { VaultSync } = await import("@repo/vault-sync");
+      const vaultPath = this.relayConfig.vaultPath;
+      if (!vaultPath) throw new Error("No vault path configured");
+
+      const ownSync = new VaultSync({
+        vaultPath,
+        debounceMs: 200,
+        stabilityMs: 500,
+        fullScanIntervalMs: 3_600_000,
+      });
+      await ownSync.start();
+
+      const unsub = ownSync.on("task:created", () => {
+        this.checkPendingDelegations();
+      });
+
+      this.syncCleanup = () => {
+        unsub();
+        ownSync.stop();
+      };
+
+      this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 30_000);
+      console.log(`[${this.harness.harnessName}] Sync engine active — event-driven delegation with 30s fallback`);
+    } catch (err) {
+      console.warn(`[${this.harness.harnessName}] Sync engine not available, using 5s polling:`, err);
+      this.delegationInterval = setInterval(() => this.checkPendingDelegations(), 5000);
+    }
+  }
+
+  private async checkPendingDelegations(): Promise<void> {
+    if (this.isDelegating) return;
+
+    try {
+      const tasks = await this.convex.getPendingDelegations(this.agentId, this.harnessType);
+      if (tasks.length === 0) return;
+
+      this.isDelegating = true;
+
+      for (const task of tasks) {
+        console.log(
+          `[${this.harness.harnessName}] Delegation: claiming task ${task.taskId} (${task.instruction.substring(0, 60)}...)`,
+        );
+
+        const claimed = await this.convex.claimDelegation(task._id, this.agentId);
+        if (!claimed) {
+          console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} already claimed by another relay`);
+          continue;
+        }
+
+        await this.convex.updateDelegation(task._id, "running");
+        this.updatePresenceAndHeartbeat("busy");
+
+        let traceDb: any = null;
+        let relaySpanId: string | null = null;
+        if (task.traceId && this.relayConfig.vaultPath) {
+          try {
+            const { TraceDB } = await import("@repo/vault-client/trace");
+            traceDb = new TraceDB(this.relayConfig.vaultPath);
+            relaySpanId = traceDb.createSpan({
+              traceId: task.traceId,
+              parentSpanId: task.spanId,
+              taskId: task.taskId,
+              type: "relay_exec",
+              name: `${this.harnessType}:${task.taskId}`,
+            });
+            traceDb.addSpanEvent(relaySpanId, task.traceId, "claimed", `Claimed by ${this.agentId}`);
+          } catch {
+            traceDb = null;
+            relaySpanId = null;
+          }
+        }
+
+        const signalsDir = this.relayConfig.vaultPath
+          ? path.join(this.relayConfig.vaultPath, "_delegation/signals")
+          : null;
+        const signalPath = signalsDir
+          ? path.join(signalsDir, `cancel-${task.taskId}.md`)
+          : null;
+
+        if (signalPath && fs.existsSync(signalPath)) {
+          try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
+        }
+
+        let cancelCheckInterval: ReturnType<typeof setInterval> | null = null;
+        let wasCancelled = false;
+
+        try {
+          let instruction = task.instruction;
+          const sc = task.securityConstraints;
+          if (sc) {
+            const lines: string[] = ["SECURITY CONSTRAINTS (enforced — violation will fail the task):"];
+            if (sc.noGit) lines.push("- Do NOT run any git commands");
+            if (sc.noNetwork) lines.push("- Do NOT make any network requests");
+            if (sc.filesystemAccess === "read-only") lines.push("- Read-only filesystem access — do NOT write or delete files");
+            if (sc.allowedDirectories?.length) lines.push(`- Only access these directories: ${sc.allowedDirectories.join(", ")}`);
+            if (sc.blockedCommands?.length) lines.push(`- Do NOT run commands matching: ${sc.blockedCommands.join(", ")}`);
+            if (lines.length > 1) {
+              instruction = `${lines.join("\n")}\n\n${instruction}`;
+            }
+          }
+
+          const channelId = task.discordChannelId || `delegation-${task.taskId}`;
+          const options: any = {};
+          if (task.modelOverride) {
+            options.channelSettings = { model: task.modelOverride };
+          }
+
+          if (signalPath) {
+            cancelCheckInterval = setInterval(() => {
+              if (fs.existsSync(signalPath)) {
+                wasCancelled = true;
+                this.harness.kill?.(channelId);
+                if (cancelCheckInterval) {
+                  clearInterval(cancelCheckInterval);
+                  cancelCheckInterval = null;
+                }
+              }
+            }, 2000);
+          }
+
+          const liveChunkCallback = (chunk: string) => {
+            this.convex.writeLiveChunk(task.taskId, this.agentId, chunk);
+          };
+
+          const maxMs = sc?.maxExecutionMs;
+          const executeHarness = () =>
+            this.harness.callWithChunks
+              ? this.harness.callWithChunks(instruction, channelId, options, liveChunkCallback)
+              : this.harness.call(instruction, channelId, options);
+
+          let result: string;
+          if (maxMs) {
+            const timeoutPromise = new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error(`Task timed out after ${maxMs}ms`)), maxMs),
+            );
+            result = await Promise.race([executeHarness(), timeoutPromise]);
+          } else {
+            result = await executeHarness();
+          }
+
+          if (cancelCheckInterval) {
+            clearInterval(cancelCheckInterval);
+            cancelCheckInterval = null;
+          }
+
+          if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
+            wasCancelled = true;
+            const partial = result.substring(0, 500);
+            this.convex.deleteLiveOutput(task.taskId);
+            await this.convex.updateDelegation(task._id, "cancelled", partial, "Cancelled by HQ");
+            if (signalPath && fs.existsSync(signalPath)) {
+              try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
+            }
+            if (traceDb && relaySpanId && task.traceId) {
+              traceDb.addSpanEvent(relaySpanId, task.traceId, "cancelled", "Cancelled by HQ signal");
+              traceDb.completeSpan(relaySpanId, "cancelled");
+            }
+            console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled`);
+            continue;
+          }
+
+          let inlineResult: string;
+          if (result.length > MAX_INLINE_RESULT && this.relayConfig.vaultPath) {
+            try {
+              const resultsDir = path.join(this.relayConfig.vaultPath, "_delegation/results");
+              fs.mkdirSync(resultsDir, { recursive: true });
+              const resultFile = path.join(resultsDir, `result-${task.taskId}.md`);
+              fs.writeFileSync(resultFile, result, "utf-8");
+              const summary = result.substring(0, 500);
+              inlineResult = `${summary}\n\n[Full result: _delegation/results/result-${task.taskId}.md (${result.length} chars)]`;
+            } catch {
+              inlineResult = result.substring(0, MAX_INLINE_RESULT);
+            }
+          } else {
+            inlineResult = result;
+          }
+
+          this.convex.deleteLiveOutput(task.taskId);
+          await this.convex.updateDelegation(task._id, "completed", inlineResult);
+
+          if (traceDb && relaySpanId && task.traceId) {
+            traceDb.addSpanEvent(relaySpanId, task.traceId, "completed", `Result: ${result.length} chars`);
+            traceDb.completeSpan(relaySpanId, "completed");
+          }
+
+          console.log(
+            `[${this.harness.harnessName}] Delegation: task ${task.taskId} completed (${result.length} chars)`,
+          );
+
+          // Post result to Discord channel if specified
+          if (task.discordChannelId) {
+            const header = `**[HQ Delegation Result]** Task: \`${task.taskId}\`\n`;
+            await this.sendMessage(task.discordChannelId, header + result);
+          }
+        } catch (execErr: any) {
+          if (cancelCheckInterval) {
+            clearInterval(cancelCheckInterval);
+            cancelCheckInterval = null;
+          }
+
+          if (wasCancelled || (signalPath && fs.existsSync(signalPath))) {
+            this.convex.deleteLiveOutput(task.taskId);
+            await this.convex.updateDelegation(task._id, "cancelled", undefined, "Cancelled by HQ");
+            if (signalPath && fs.existsSync(signalPath)) {
+              try { fs.unlinkSync(signalPath); } catch { /* ignore */ }
+            }
+            if (traceDb && relaySpanId && task.traceId) {
+              traceDb.addSpanEvent(relaySpanId, task.traceId, "cancelled", "Cancelled by HQ signal");
+              traceDb.completeSpan(relaySpanId, "cancelled");
+            }
+            console.log(`[${this.harness.harnessName}] Delegation: task ${task.taskId} cancelled (harness killed)`);
+          } else {
+            this.convex.deleteLiveOutput(task.taskId);
+            await this.convex.updateDelegation(
+              task._id,
+              "failed",
+              undefined,
+              execErr.message || String(execErr),
+            );
+            if (traceDb && relaySpanId && task.traceId) {
+              traceDb.addSpanEvent(relaySpanId, task.traceId, "failed", execErr.message || String(execErr));
+              traceDb.completeSpan(relaySpanId, "failed");
+            }
+            console.error(
+              `[${this.harness.harnessName}] Delegation: task ${task.taskId} failed:`,
+              execErr.message,
+            );
+          }
+        } finally {
+          this.updatePresenceAndHeartbeat("online");
+          if (traceDb) {
+            try { traceDb.close(); } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch (err: any) {
+      // Silently ignore polling errors — will retry on next interval
+    } finally {
+      this.isDelegating = false;
     }
   }
 
@@ -705,7 +671,7 @@ export class BotInstance {
     const paths: string[] = [];
     if (message.attachments.size === 0) return paths;
 
-    await mkdir(this.config.uploadsDir, { recursive: true });
+    await mkdir(this.relayConfig.uploadsDir, { recursive: true });
 
     for (const [, attachment] of message.attachments) {
       if (opts?.skipVoiceAudio && attachment.contentType?.startsWith("audio/")) {
@@ -716,7 +682,7 @@ export class BotInstance {
         const response = await fetch(attachment.url);
         const buffer = Buffer.from(await response.arrayBuffer());
         const filePath = join(
-          this.config.uploadsDir,
+          this.relayConfig.uploadsDir,
           `${Date.now()}_${attachment.name || "file"}`,
         );
         await writeFile(filePath, buffer);

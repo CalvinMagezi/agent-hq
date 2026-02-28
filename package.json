@@ -4,7 +4,8 @@
   "workspaces": [
     "apps/*",
     "packages/*",
-    "plugins/*"
+    "plugins/*",
+    "packages/hq-cli"
   ],
   "scripts": {
     "dev": "turbo dev",
@@ -20,12 +21,14 @@
     "chat": "bun run scripts/agent-hq-chat.ts",
     "daemon": "bun run scripts/agent-hq-daemon.ts",
     "daemon:install": "bash scripts/install-launchd.sh",
-    "status": "bun run scripts/agent-hq-status.ts",
-    "setup": "bun run scripts/setup.ts",
+    "status": "bun run scripts/hq.ts status",
+    "tools": "bun run scripts/hq.ts tools",
+    "setup": "bun run scripts/hq.ts setup",
     "sync-server": "bun run packages/vault-sync-server/src/index.ts",
     "relay-server": "bun run packages/agent-relay-server/src/index.ts",
     "plugin:build": "cd plugins/obsidian-vault-sync && bun run build",
-    "plugin:install": "bash scripts/install-obsidian-plugin.sh"
+    "plugin:install": "bash scripts/install-obsidian-plugin.sh",
+    "hq": "bun run scripts/hq.ts"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

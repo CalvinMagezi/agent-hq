@@ -1,0 +1,26 @@
+{
+  "name": "agent-hq",
+  "version": "0.1.0",
+  "description": "HQ CLI — local-first AI agent hub for Claude, Gemini & Discord",
+  "homepage": "https://github.com/CalvinMagezi/agent-hq",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CalvinMagezi/agent-hq.git",
+    "directory": "packages/hq-cli"
+  },
+  "license": "MIT",
+  "keywords": ["ai", "agent", "claude", "gemini", "discord", "local-first", "obsidian"],
+  "bin": {
+    "hq": "./bin/hq.ts"
+  },
+  "files": [
+    "bin/hq.ts",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "prepublishOnly": "echo 'Publishing hq CLI...'"
+  }
+}

@@ -1,8 +1,16 @@
 import type { BaseHarness } from "./harnesses/base.js";
 import type { GeminiHarness } from "./harnesses/gemini.js";
 import type { ConvexAPI } from "./vaultApi.js";
-import type { ChannelSettings, RelayConfig } from "./types.js";
+import type { ChannelSettings, CommandResult, RelayConfig } from "./types.js";
 import { handleCustomCommand, getCustomCommands } from "./customCommandLoader.js";
+import {
+  buildSessionEmbed,
+  buildUsageEmbed,
+  buildMemoryEmbed,
+  buildStatusEmbed,
+  buildHelpEmbed,
+  buildErrorEmbed,
+} from "./embedBuilder.js";
 
 function formatTimeAgo(isoString: string | null): string {
   if (!isoString) return "never";
@@ -49,17 +57,14 @@ const GEMINI_MODEL_ALIASES: Record<string, string> = {
   "flash-lite": "gemini-2.5-flash-lite-preview-06-17",
 };
 
-function getModelAliases(harnessName: string): Record<string, string> {
+export function getModelAliases(harnessName: string): Record<string, string> {
   if (harnessName === "OpenCode") return OPENCODE_MODEL_ALIASES;
   if (harnessName === "Gemini CLI") return GEMINI_MODEL_ALIASES;
   return CLAUDE_MODEL_ALIASES;
 }
 
-export interface CommandResult {
-  handled: boolean;
-  response?: string;
-  file?: { name: string; buffer: Buffer };
-}
+// CommandResult is imported from ./types.js
+export type { CommandResult } from "./types.js";
 
 /**
  * Parse and handle commands from Discord messages.
@@ -119,33 +124,16 @@ export async function handleCommand(
     case "!session": {
       const session = harness.getSession(channelId);
       const settings = harness.getChannelSettings(channelId);
-      const lines = [`**Session Info** (${harness.harnessName})`];
-      if (isGemini) {
-        lines.push("Session: _stateless (no session persistence)_");
-      } else {
-        lines.push(
-          session.sessionId
-            ? `Session: \`${session.sessionId}\``
-            : "Session: none",
-        );
-      }
-      if (settings.model) lines.push(`Model: \`${settings.model}\``);
-      if (settings.effort) lines.push(`Effort: \`${settings.effort}\``);
-      if (settings.agent) lines.push(`Agent: \`${settings.agent}\``);
-      if (settings.systemPrompt)
-        lines.push(
-          `System prompt: \`${settings.systemPrompt.substring(0, 80)}...\``,
-        );
-      if (settings.maxBudget) lines.push(`Budget: $${settings.maxBudget}`);
-      if (settings.addDirs?.length)
-        lines.push(
-          isOpenCode
-            ? `Working dir: ${settings.addDirs[0]}`
-            : isGemini
-              ? `Include dirs: ${settings.addDirs.join(", ")}`
-              : `Extra dirs: ${settings.addDirs.join(", ")}`,
-        );
-      return { handled: true, response: lines.join("\n") };
+      return {
+        handled: true,
+        embed: buildSessionEmbed(
+          harness.harnessName,
+          session.sessionId,
+          settings,
+          isGemini,
+          isOpenCode,
+        ),
+      };
     }
 
     case "!continue":
@@ -577,51 +565,9 @@ export async function handleCommand(
         }
         try {
           const status = await convex.getSystemStatus();
-          const lines: string[] = ["**System Status**", ""];
-
-          // Daemon
-          if (status.daemon) {
-            const uptime = status.daemon.startedAt
-              ? formatTimeAgo(status.daemon.startedAt).replace(" ago", "")
-              : "unknown";
-            lines.push(`**Daemon:** Running (PID ${status.daemon.pid}, uptime ${uptime})`);
-            const keys = status.daemon.apiKeys;
-            lines.push(`**API Keys:** OpenRouter=${keys.openrouter ? "set" : "MISSING"}, Brave=${keys.brave ? "set" : "no"}, Gemini=${keys.gemini ? "set" : "no"}`);
-          } else {
-            lines.push("**Daemon:** Not running (no status file)");
-          }
-
-          // Heartbeat
-          lines.push(`**Heartbeat:** Last processed ${formatTimeAgo(status.heartbeat.lastProcessed)}`);
-
-          // Workers
-          if (status.workers.length > 0) {
-            lines.push("", "**Workers:**");
-            for (const w of status.workers) {
-              lines.push(`- \`${w.workerId}\`: ${w.status} (${formatTimeAgo(w.lastHeartbeat)})`);
-            }
-          }
-
-          // Relays
-          if (status.relays.length > 0) {
-            lines.push("", "**Relay Bots:**");
-            for (const r of status.relays) {
-              lines.push(`- ${r.displayName}: ${r.status} (${formatTimeAgo(r.lastHeartbeat)}) — ${r.tasksCompleted} completed, ${r.tasksFailed} failed`);
-            }
-          }
-
-          // Workflows
-          if (status.workflows) {
-            lines.push("", "**Scheduled Workflows:**");
-            for (const [name, wf] of Object.entries(status.workflows)) {
-              const icon = wf.success ? "OK" : "FAILED";
-              lines.push(`- ${name}: ${icon} (${formatTimeAgo(wf.lastRun)})`);
-            }
-          }
-
-          return { handled: true, response: lines.join("\n") };
+          return { handled: true, embed: buildStatusEmbed(status) };
         } catch (err) {
-          return { handled: true, response: `Error reading status: ${err}` };
+          return { handled: true, embed: buildErrorEmbed("Status Error", `${err}`) };
         }
       }
 
@@ -642,37 +588,15 @@ export async function handleCommand(
 
     case "!usage":
     case "!cost": {
-      const usage = harness.getUsage();
-      if (usage.totalCalls === 0) {
-        return {
-          handled: true,
-          response: "No usage recorded yet this session.",
-        };
-      }
-
-      const lines = [
-        `**Session Usage** (${harness.harnessName})`,
-        `Total cost: **$${usage.totalCostUsd.toFixed(4)}**`,
-        `Total calls: **${usage.totalCalls}** (${usage.totalTurns} turns)`,
-        `Last call: $${usage.lastCallCostUsd.toFixed(4)}`,
-      ];
-
-      const models = Object.entries(usage.byModel);
-      if (models.length > 0) {
-        lines.push("\n**By Model:**");
-        for (const [model, info] of models) {
-          lines.push(
-            `- \`${model}\`: ${info.calls} calls, $${info.costUsd.toFixed(4)}`,
-          );
-        }
-      }
-
       if (arg === "reset") {
         await harness.resetUsage();
-        lines.push("\n_Usage counters reset._");
+        return { handled: true, response: "Usage counters reset." };
       }
-
-      return { handled: true, response: lines.join("\n") };
+      const usage = harness.getUsage();
+      return {
+        handled: true,
+        embed: buildUsageEmbed(usage, harness.harnessName),
+      };
     }
 
     // ── Memory ──────────────────────────────────────────────────────
@@ -683,7 +607,6 @@ export async function handleCommand(
       }
 
       if (arg === "clear") {
-        // Not implemented at HTTP level yet — inform user
         return {
           handled: true,
           response:
@@ -691,35 +614,8 @@ export async function handleCommand(
         };
       }
 
-      // Show current memory
       const facts = await convex.getMemoryFacts();
-      if (facts.length === 0) {
-        return {
-          handled: true,
-          response: "No memories stored yet. I'll remember things as we chat.",
-        };
-      }
-
-      const memFacts = facts.filter((f) => f.type === "fact");
-      const memGoals = facts.filter((f) => f.type === "goal");
-      const lines: string[] = ["**Stored Memories**"];
-
-      if (memFacts.length > 0) {
-        lines.push("\n**Facts:**");
-        memFacts.forEach((f) => lines.push(`- ${f.content}`));
-      }
-      if (memGoals.length > 0) {
-        lines.push("\n**Goals:**");
-        memGoals.forEach((g) => {
-          const dl = g.deadline ? ` (by ${g.deadline})` : "";
-          lines.push(`- ${g.content}${dl}`);
-        });
-      }
-
-      lines.push(
-        `\n_${facts.length} total items. Edit \`_system/MEMORY.md\` in Obsidian to manage._`,
-      );
-      return { handled: true, response: lines.join("\n") };
+      return { handled: true, embed: buildMemoryEmbed(facts) };
     }
 
     // ── Settings ──────────────────────────────────────────────────
@@ -737,140 +633,9 @@ export async function handleCommand(
 
     case "!help":
     case "!commands": {
-      if (isOpenCode) {
-        return {
-          handled: true,
-          response: [
-            "**Discord Relay Commands** (OpenCode)",
-            "",
-            "**Session**",
-            "`!reset` — New session + clear settings (kills running process)",
-            "`!kill` — Force-stop the running process",
-            "`!session` — Show current session & settings",
-            "`!continue <msg>` — Continue most recent session",
-            "",
-            "**Models**",
-            "`!model <name>` — Set model (opus, sonnet, haiku, gemini, or provider/model ID)",
-            "`!opus` `!sonnet` `!haiku` — Quick model switch",
-            "",
-            "**Tuning**",
-            "`!effort low|medium|high` — Set reasoning variant",
-            "`!agent <name>` — Select an OpenCode agent",
-            "`!dir <path>` — Set working directory",
-            "`!rmdir <path|#|all>` — Remove a directory by path, number, or all",
-            "`!clear` — Reset all settings to defaults",
-            "",
-            "**HQ**",
-            "`!hq` — Show HQ commands (local vault mode)",
-            "`!hq status` — Check HQ status",
-            "",
-            "**Memory & Usage**",
-            "`!memory` — View stored facts and goals",
-            "`!usage` — View session cost and turn usage",
-            "`!usage reset` — Reset usage counters",
-            "",
-            "**Limits**",
-            "5 min timeout per call. No budget/system prompt controls (use `!agent` instead).",
-            "",
-            "**Tips**",
-            "Any non-command message is sent to OpenCode.",
-            "Settings persist per channel until you `!reset` or `!clear`.",
-          ].join("\n"),
-        };
-      }
-
-      if (isGemini) {
-        return {
-          handled: true,
-          response: [
-            "**Discord Relay Commands** (Gemini CLI — Google Workspace Specialist)",
-            "",
-            "**Google Workspace**",
-            "`!workspace` / `!ws` — Show Workspace integration info and setup",
-            "",
-            "**Session**",
-            "`!reset` — Clear settings (kills running process)",
-            "`!kill` — Force-stop the running process",
-            "`!session` — Show current settings",
-            "",
-            "**Models**",
-            "`!model <name>` — Set model (pro, flash, 2.5-pro, 2.5-flash, or full ID)",
-            "`!pro` `!flash` — Quick model switch",
-            "",
-            "**Context**",
-            "`!adddir <path>` — Include additional directories (--include-directories)",
-            "`!rmdir <path|#|all>` — Remove a directory by path, number, or all",
-            "`!clear` — Reset all settings to defaults",
-            "",
-            "**Plugins (MCP Servers)**",
-            "`!plugins` — List configured MCP server plugins",
-            "`!plugin add <name> <command> [args...]` — Add stdio MCP server",
-            "`!plugin add <name> --http <url>` — Add HTTP MCP server",
-            "`!plugin remove <name>` — Remove a plugin",
-            "`!plugin clear` — Remove all plugins",
-            "",
-            "**HQ**",
-            "`!hq` — Show HQ commands (local vault mode)",
-            "`!hq status` — Check HQ status",
-            "",
-            "**Memory & Usage**",
-            "`!memory` — View stored facts and goals",
-            "`!usage` — View session cost and turn usage",
-            "`!usage reset` — Reset usage counters",
-            "",
-            "**Limits**",
-            "2 min timeout per call. Runs with `--yolo` (auto-approve tool actions).",
-            "",
-            "**Note**",
-            "Gemini CLI is a **Google Workspace specialist** — it manages Docs, Sheets, Drive, Gmail, Calendar, and Keep.",
-            "For coding tasks, use Claude Code or OpenCode instead.",
-            "Gemini CLI is stateless — each message is independent. No `!continue`, `!budget`, `!effort`, or `!sp`.",
-            "Settings persist per channel until you `!reset` or `!clear`.",
-          ].join("\n"),
-        };
-      }
-
       return {
         handled: true,
-        response: [
-          "**Discord Relay Commands** (Claude Code)",
-          "",
-          "**Session**",
-          "`!reset` — New session + clear settings (kills running process)",
-          "`!kill` — Force-stop the running process",
-          "`!session` — Show current session & settings",
-          "`!continue <msg>` — Continue most recent session",
-          "",
-          "**Models**",
-          "`!model <name>` — Set model (opus, sonnet, haiku, or full ID)",
-          "`!opus` `!sonnet` `!haiku` — Quick model switch",
-          "",
-          "**Tuning**",
-          "`!effort low|medium|high` — Set reasoning effort",
-          "`!budget <$>` — Set max spend per call",
-          "`!sp <prompt>` — Append custom system prompt",
-          "`!adddir <path>` — Give Claude access to extra dirs",
-          "`!rmdir <path|#|all>` — Remove a directory by path, number, or all",
-          "`!clear` — Reset all settings to defaults",
-          "",
-          "**HQ**",
-          "`!hq` — Start web UI + Convex backend (clears port 3000)",
-          "`!hq status` — Check if HQ is running",
-          "`!hq stop` — Stop the web UI",
-          "",
-          "**Memory & Usage**",
-          "`!memory` — View stored facts and goals",
-          "`!usage` — View session cost and turn usage",
-          "`!usage reset` — Reset usage counters",
-          "",
-          "**Safety**",
-          "Default limits: 15 turns, $2.00 budget, 5 min timeout per call.",
-          "Override budget with `!budget <$>`.",
-          "",
-          "**Tips**",
-          "Any non-command message is sent to Claude Code.",
-          "Settings persist per channel until you `!reset` or `!clear`.",
-        ].join("\n"),
+        embed: buildHelpEmbed(harness.harnessName),
       };
     }
 

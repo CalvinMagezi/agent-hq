@@ -35,12 +35,41 @@ Package manager: **Bun** (v1.1.0+)
 │   ├── vault-client/      # Shared vault data access layer (@repo/vault-client)
 │   ├── vault-sync/        # File sync engine with event-driven change detection (@repo/vault-sync)
 │   └── convex/            # Legacy Convex backend (archived, not used)
+├── packages/
+│   └── hq-cli/            # NPM package "agent-hq" (bunx agent-hq)
 ├── scripts/
-│   ├── agent-hq-chat.ts   # Terminal chat CLI
-│   ├── agent-hq-daemon.ts # Background workflow daemon
-│   ├── install-launchd.sh  # macOS scheduler setup
+│   ├── hq.ts              # Unified CLI — the ONLY CLI entry point
+│   ├── agent-hq-chat.ts   # Terminal chat REPL (spawned by hq chat)
+│   ├── agent-hq-daemon.ts # Background workflow daemon (spawned by hq daemon start)
+│   ├── install-launchd.sh  # macOS scheduler setup (called by hq install)
 │   └── workflows/         # Ported daily/weekly workflow scripts
 └── turbo.json             # Turborepo pipeline config
+```
+
+## CLI — `hq`
+
+**`scripts/hq.ts` is the single CLI entry point.** All management goes through it.
+
+```bash
+# First-time setup
+hq init                       # Full interactive setup
+hq init --non-interactive     # Unattended (agent-safe)
+hq tools                      # Install/auth Claude CLI, Gemini CLI, OpenCode
+hq setup                      # Scaffold vault only
+
+# Services
+hq start [agent|relay|all]    # Start via launchd
+hq stop  [agent|relay|all]    # Stop
+hq restart                    # Restart everything
+hq fg [agent|relay]           # Run in foreground
+hq daemon start|stop|logs     # Background daemon
+
+# Monitoring
+hq status                     # Quick status
+hq health                     # Full health check
+hq logs [target] [N]          # View logs
+hq follow                     # Live-tail logs
+hq ps                         # All processes
 ```
 
 ## Development Commands
@@ -48,11 +77,11 @@ Package manager: **Bun** (v1.1.0+)
 **All commands run from the monorepo root unless specified otherwise.**
 
 ```bash
-# Core services
-bun run agent        # Start HQ agent (job processing)
-bun run relay        # Start Discord relay bots
+# Core services (via hq or bun run)
+hq start             # Start agent + relay (launchd)
+bun run relay        # Start Discord relay directly
+bun run agent        # Start HQ agent directly
 bun run chat         # Terminal chat interface
-bun run daemon       # Background workflow daemon
 
 # Building & linting
 bun run build        # Workspace-wide production build

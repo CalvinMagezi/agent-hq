@@ -348,16 +348,32 @@ export class BotInstance extends DiscordBotBase {
         rawResponse = await this.harness.call(enrichedPrompt, message.channelId, callOptions);
       }
 
+      console.log(`[${this.harness.harnessName}] Claude responded (${rawResponse.length} chars), processing...`);
       const response = await processMemoryIntents(this.convex, rawResponse);
       const { cleanText, files } = extractFileAttachments(response);
       await this.convex.saveMessage("assistant", cleanText, message.channelId);
+
+      if (files.length > 0) {
+        console.log(`[${this.harness.harnessName}] Found ${files.length} file marker(s):`, files.map(f => f.path));
+      }
+
       await streaming.finish(cleanText);
+      console.log(`[${this.harness.harnessName}] Text response delivered to Discord`);
 
       // Send any file attachments the AI included via [FILE: /path] markers
+      // Non-blocking: don't let file send failures prevent the text response
       if (files.length > 0) {
-        const attachments = buildAttachments(files);
-        if (attachments.length > 0) {
-          await this.sendFile(message.channelId, attachments);
+        try {
+          const attachments = buildAttachments(files);
+          if (attachments.length > 0) {
+            console.log(`[${this.harness.harnessName}] Uploading ${attachments.length} file(s) to Discord...`);
+            await this.sendFile(message.channelId, attachments);
+            console.log(`[${this.harness.harnessName}] File upload complete`);
+          } else {
+            console.log(`[${this.harness.harnessName}] No valid files to upload (all skipped)`);
+          }
+        } catch (fileErr: any) {
+          console.error(`[${this.harness.harnessName}] File upload failed (text was delivered):`, fileErr.message);
         }
       }
 

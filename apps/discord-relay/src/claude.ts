@@ -7,15 +7,17 @@ import type {
   ChannelSettings,
   ClaudeCallOptions,
 } from "./types.js";
-import type { BaseHarness, HarnessCallOptions, HarnessUsageStats } from "./harnesses/base.js";
+import type { BaseHarness, ChunkCallback, HarnessCallOptions, HarnessUsageStats } from "./harnesses/base.js";
 
 const SESSION_FILE = "sessions.json";
 const SETTINGS_FILE = "channel-settings.json";
 const USAGE_FILE = "usage.json";
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_MAX_TURNS = 15;
-/** Sessions older than this are not resumed — prevents silent fresh starts with stale IDs */
-const SESSION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+/** Sessions older than this are not resumed — prevents silent fresh starts with stale IDs.
+ * Kept short (4h) because long-running sessions with complex tool state often cause
+ * Claude to hang when resumed (silent timeout). */
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const DEFAULT_MAX_BUDGET_USD = 2.0;
 const DEFAULT_MODEL = "sonnet";
 const MAX_CONCURRENT_CALLS = 3;
@@ -99,6 +101,30 @@ export class ClaudeHarness implements BaseHarness {
   ): Promise<string> {
     return this.callClaude(prompt, channelId, options as ClaudeCallOptions);
   }
+
+  /**
+   * Streaming variant — fires onChunk for each stdout chunk during execution.
+   * Note: Claude CLI uses --output-format json, so raw chunks are JSON fragments
+   * (not human-readable). We still fire them so the StreamingReply can show
+   * a "processing" indicator. The final parsed text is returned as the result.
+   */
+  async callWithChunks(
+    prompt: string,
+    channelId: string,
+    options?: HarnessCallOptions,
+    onChunk?: ChunkCallback,
+  ): Promise<string> {
+    // Store the callback in instance scope so spawnOnce can use it
+    this._onChunk = onChunk ?? null;
+    try {
+      return await this.callClaude(prompt, channelId, options as ClaudeCallOptions);
+    } finally {
+      this._onChunk = null;
+    }
+  }
+
+  /** Temporary chunk callback storage for callWithChunks */
+  private _onChunk: ChunkCallback | null = null;
 
   /** Force-kill the running CLI process for a channel. */
   kill(channelId: string): boolean {
@@ -304,10 +330,37 @@ export class ClaudeHarness implements BaseHarness {
       });
       this.activeProcs.set(channelId, proc);
 
+      // Collect stderr incrementally so we can log it on timeout
+      const stderrChunks: string[] = [];
+      (async () => {
+        try {
+          for await (const chunk of proc.stderr) {
+            stderrChunks.push(Buffer.from(chunk).toString("utf-8"));
+          }
+        } catch {
+          // Ignore stderr read errors (process killed, etc.)
+        }
+      })();
+
+      const onChunk = this._onChunk;
+
       const outputPromise = (async () => {
-        const output = await new Response(proc.stdout).text();
-        const stderr = await new Response(proc.stderr).text();
+        // Stream stdout with optional chunk callback
+        let output = "";
+        const reader = proc.stdout!.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          output += chunk;
+          onChunk?.(chunk);
+        }
+        const tail = decoder.decode();
+        if (tail) { output += tail; onChunk?.(tail); }
+
         const exitCode = await proc.exited;
+        const stderr = stderrChunks.join("");
 
         if (exitCode !== 0) {
           console.error("[Claude] stderr:", stderr.substring(0, 500));
@@ -321,14 +374,23 @@ export class ClaudeHarness implements BaseHarness {
         return this.parseJsonOutput(output);
       })();
 
+      // Use a clearable timer — prevents unhandled rejection when outputPromise wins the race
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        timeoutTimer = setTimeout(() => {
+          const stderr = stderrChunks.join("");
+          if (stderr) console.error("[Claude] stderr at timeout:", stderr.substring(0, 500));
           proc.kill();
           reject(new Error("Claude CLI timed out"));
         }, DEFAULT_TIMEOUT_MS);
       });
 
-      const result = await Promise.race([outputPromise, timeoutPromise]);
+      let result: { text: string; sessionId: string | null; subtype: string | null };
+      try {
+        result = await Promise.race([outputPromise, timeoutPromise]);
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+      }
       this.activeProcs.delete(channelId);
       if (this.killedChannels.delete(channelId)) {
         return { text: "Request cancelled by user.", sessionId: null, subtype: null };
@@ -342,7 +404,7 @@ export class ClaudeHarness implements BaseHarness {
       console.error("[Claude] Error:", error.message);
       if (error.message.includes("timed out")) {
         return {
-          text: "Claude took too long to respond (5 min timeout). Try a shorter or simpler request.",
+          text: "Claude took too long to respond (15 min timeout). Try a shorter or simpler request.",
           sessionId: null,
           subtype: null,
         };

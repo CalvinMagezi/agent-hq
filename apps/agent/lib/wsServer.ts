@@ -8,7 +8,7 @@
 
 import { WebSocketServer, WebSocket } from "ws";
 import { ChatSessionManager, type StreamCallbacks } from "./chatSession.js";
-import { classifyIntent, type ClassifierContext } from "./intentClassifier.js";
+import { classifyIntent, type IntentRule } from "@repo/discord-core";
 import { logger } from "./logger.js";
 import { PtyManager, type PtySessionConfig } from "./ptyManager.js";
 import { SecurityProfile } from "../governance.js";
@@ -41,7 +41,8 @@ interface WsEvent {
 export interface AgentWsServerConfig {
     port: number;
     chatSession: ChatSessionManager;
-    agentContext: () => ClassifierContext;
+    agentContext: () => Record<string, unknown>;
+    intentRules?: IntentRule[];
     ptyManager: PtyManager;
     convexMutate: (name: string, args: Record<string, unknown>) => Promise<any>;
     convexQuery: (name: string, args: Record<string, unknown>) => Promise<any>;
@@ -197,7 +198,7 @@ export class AgentWsServer {
         try {
             // 1. Try instant classification first (regex-based, no LLM)
             const ctx = this.config.agentContext();
-            const classification = classifyIntent(text, ctx);
+            const classification = classifyIntent(text, this.config.intentRules, ctx);
 
             if (classification.tier === "instant" && classification.instantResponse) {
                 logger.info("WS instant reply", { reason: classification.reason });
@@ -360,7 +361,7 @@ export class AgentWsServer {
             const config: PtySessionConfig = {
                 jobId,
                 userId: "local-user",
-                cwd: cwd || ctx.targetDir || process.cwd(),
+                cwd: cwd || (ctx.targetDir as string) || process.cwd(),
                 securityProfile: securityProfile || SecurityProfile.STANDARD,
                 shellType,
                 rows,

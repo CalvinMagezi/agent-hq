@@ -7,6 +7,14 @@ import { GeminiHarness } from "./src/harnesses/gemini.js";
 
 dotenv.config({ path: ".env.local" });
 
+// Prevent unhandled errors from crashing the relay process
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[Relay] Unhandled rejection (process kept alive):", reason?.message || reason);
+});
+process.on("uncaughtException", (err: Error) => {
+  console.error("[Relay] Uncaught exception (process kept alive):", err.message);
+});
+
 // Validate: user ID is always required
 if (!process.env.DISCORD_USER_ID) {
   console.error("Missing required env var: DISCORD_USER_ID");

@@ -63,48 +63,63 @@ Discord Relay ──► Claude Code  ┐
 - **Local Daemon** — Background cron workflows (health checks, embeddings, note linking)
 - **VaultClient** — Shared package for filesystem-based data access
 
+## Install
+
+### Zero-install (bunx / npx)
+```bash
+bunx agent-hq          # runs the hq CLI — installs the repo on first run
+```
+
+### Homebrew (macOS)
+```bash
+brew tap calvinmagezi/agent-hq
+brew install hq
+```
+
+### Inside the repo
+```bash
+hq install-cli         # symlinks scripts/hq.ts → ~/.local/bin/hq
+```
+
 ## Prerequisites
 
-- **[Bun](https://bun.sh)** v1.1.0+
-- **At least one CLI harness** (pick the one(s) you use):
-  - **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Free with Google account
-  - **[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)** — Requires Anthropic subscription
-  - **[OpenCode](https://github.com/opencode-ai/opencode)** — Multi-model CLI
+- **[Bun](https://bun.sh)** v1.1.0+ — `curl -fsSL https://bun.sh/install | bash`
+- **[Git](https://git-scm.com)** — for cloning
 - **A Discord bot token** — [Create one here](https://discord.com/developers/applications)
-- **macOS** for launchd auto-start (optional)
+- **At least one AI CLI** — `hq tools` installs and authenticates these for you:
+  - **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Free with Google account
+  - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Requires Anthropic subscription
+  - **[OpenCode](https://github.com/opencode-ai/opencode)** — Multi-model CLI
 
-## Quick Start (Gemini-Only)
+## Quick Start
 
-The simplest way to get started — only requires Gemini CLI and a Discord bot.
+The fastest path — interactive setup handles everything:
 
 ```bash
-# 1. Clone and install
 git clone https://github.com/CalvinMagezi/agent-hq.git
 cd agent-hq
 bun install
-
-# 2. Initialize the vault
-bun run setup
-
-# 3. Configure the Discord relay
-cp apps/discord-relay/.env.local.example apps/discord-relay/.env.local
+hq init
 ```
 
-Edit `apps/discord-relay/.env.local` — you only need two values:
+`hq init` will:
+1. Install Claude CLI, Gemini CLI, and OpenCode (with your confirmation)
+2. Authenticate each tool
+3. Install the Google Workspace extension for Gemini + configure the Obsidian MCP
+4. Scaffold the `.vault/` directory
+5. Create `.env.local` templates
+6. Install macOS launchd daemons (auto-start on login)
+7. Run a full health check
+
+Then fill in your Discord bot token in `apps/discord-relay/.env.local` and run:
 
 ```bash
-DISCORD_USER_ID=your_discord_user_id
-DISCORD_BOT_TOKEN_GEMINI=your_gemini_bot_token
+hq start relay
 ```
 
-```bash
-# 4. Start the relay
-bun run relay
-```
+DM your bot on Discord — if it responds, you're done.
 
-DM your Gemini bot on Discord and start chatting. That's it.
-
-## Full Setup
+## Full Setup (Manual)
 
 ### 1. Clone and install
 
@@ -114,15 +129,28 @@ cd agent-hq
 bun install
 ```
 
-### 2. Initialize the vault
+### 2. Install CLI tools
 
 ```bash
-bun run setup
+hq tools          # interactive: installs + authenticates Claude/Gemini/OpenCode
 ```
 
-Creates the `.vault/` directory with all required subdirectories and default system files. Safe to re-run — existing files are never overwritten.
+Or install each manually:
+```bash
+npm install -g @anthropic-ai/claude-code   # Claude Code
+npm install -g @google/gemini-cli          # Gemini CLI
+npm install -g opencode                    # OpenCode
+```
 
-### 3. Configure environment
+### 3. Initialize the vault
+
+```bash
+hq setup
+```
+
+Creates the `.vault/` directory with all required subdirectories and system files. Safe to re-run.
+
+### 4. Configure environment
 
 #### Discord Relay (`apps/discord-relay/.env.local`)
 
@@ -135,40 +163,82 @@ DISCORD_BOT_TOKEN_OPENCODE=your_opencode_token    # OpenCode
 DISCORD_BOT_TOKEN_GEMINI=your_gemini_bot_token    # Gemini CLI
 ```
 
-See `apps/discord-relay/.env.local.example` for all available options.
-
 #### HQ Agent (`apps/agent/.env.local`) — optional
 
-Only needed if you want background job processing.
+Only needed for background job processing:
 
 ```bash
-OPENROUTER_API_KEY=your_key
+OPENROUTER_API_KEY=your_key    # or GEMINI_API_KEY for Gemini models
 DEFAULT_MODEL=gemini-2.5-flash
 ```
 
-### 4. Start services
+### 5. Start services
 
 ```bash
-bun run relay        # Start Discord relay bots
-bun run agent        # Start HQ agent (optional, for job processing)
-bun run chat         # Terminal chat interface (optional)
-bun run daemon       # Background workflow daemon (optional)
+hq start           # start agent + relay via launchd (after hq install)
+# — or —
+hq fg relay        # run relay in foreground (no launchd needed)
+hq fg agent        # run agent in foreground
+hq daemon start    # start background workflow daemon
 ```
 
 ## Setup for AI Agents
 
-If you're an AI agent setting up Agent-HQ on behalf of a user, follow these steps:
+If you're an AI agent setting up Agent-HQ, use the non-interactive flow:
 
-1. **Check prerequisites**: Verify `bun --version` ≥ 1.1.0 and at least one CLI harness is installed
-2. **Clone and install**: `git clone ... && bun install`
-3. **Run setup**: `bun run setup` — creates `.vault/` with all required structure
-4. **Check vault health**: `bun run status` — validates system files and directory layout
-5. **Configure env files**: Copy `.env.example` templates, fill in tokens from the user
-6. **Security note**: Never commit `.env.local` files. All credentials go in gitignored env files only.
-7. **Start services**: `bun run relay` is the minimum — add `agent` and `daemon` for full capability
-8. **Verify**: DM the Discord bot — if it responds, setup is complete
+```bash
+# Prerequisites: bun ≥1.1.0, git
+bunx agent-hq init --non-interactive --vault ~/.agent-hq-vault
+```
 
-The vault schema, job types, delegation flow, and all system files are documented in the [NotebookLM workspace](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f). For a full codebase deep dive, see the [DeepWiki](https://deepwiki.com/CalvinMagezi/agent-hq).
+This single command:
+1. Checks `bun` and `git` are present (exits with clear error if not)
+2. Clones the repo if not already in one
+3. Runs `bun install`
+4. Auto-installs Claude CLI, Gemini CLI, OpenCode via npm
+5. Scaffolds the vault at `~/.agent-hq-vault`
+6. Creates `.env.local` templates (fill in API keys + Discord token after)
+7. Installs launchd daemons on macOS
+8. Adds `hq` to `~/.local/bin`
+
+**After init**, fill in these values and start:
+```bash
+# apps/discord-relay/.env.local
+DISCORD_BOT_TOKEN=...
+DISCORD_USER_ID=...
+
+# apps/agent/.env.local
+GEMINI_API_KEY=...   # or OPENROUTER_API_KEY
+
+hq start
+```
+
+**Security**: Never commit `.env.local` files. All secrets go in gitignored env files only.
+
+The vault schema, job types, and delegation flow are documented in the [NotebookLM workspace](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f). For a full architecture deep-dive, see the [DeepWiki](https://deepwiki.com/CalvinMagezi/agent-hq).
+
+## The `hq` CLI
+
+All management goes through the `hq` command:
+
+```
+hq                        Interactive chat (default)
+hq init                   First-time setup
+hq tools                  Install/re-auth CLI tools
+hq setup                  Scaffold vault only
+hq status                 Service status
+hq start [agent|relay]    Start services
+hq stop  [agent|relay]    Stop services
+hq restart                Restart everything
+hq daemon start|stop|logs Background daemon
+hq logs [target] [N]      View logs
+hq follow                 Live-tail logs
+hq health                 Full health check
+hq ps                     All managed processes
+hq install                Install launchd daemons
+hq install-cli            Add hq to PATH
+hq coo status             COO orchestrator status
+```
 
 ## Development Commands
 
@@ -176,8 +246,8 @@ The vault schema, job types, delegation flow, and all system files are documente
 bun run build        # Workspace-wide production build
 bun run lint         # Lint all packages
 bun run check        # Lint + build all packages
-bun run setup        # Initialize/repair vault directory structure
-bun run status       # Check system health
+hq setup             # Initialize/repair vault directory structure
+hq health            # Check system health
 ```
 
 ## Discord Relay Commands

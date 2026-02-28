@@ -8,6 +8,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`hq init` command** (`scripts/hq.ts`): Full first-time setup in one command — checks prerequisites, installs dependencies, scaffolds vault, creates `.env.local` templates, installs macOS launchd daemons, and adds `hq` to PATH. Supports `--non-interactive` flag for agent-driven installs.
+- **`hq tools` command** (`scripts/hq.ts`): Installs and authenticates Claude CLI, Gemini CLI, and OpenCode. Automatically installs the Google Workspace extension for Gemini and writes the Obsidian MCP server config to `~/.gemini/settings.json`.
+- **`hq setup` command** (`scripts/hq.ts`): Inline vault scaffolding (previously only `scripts/setup.ts`). Creates all `.vault/` directories and seeds system files.
+- **`hq daemon` command** (`scripts/hq.ts`): Manage the background workflow daemon — `start`, `stop`, `status`, `logs [N]` subcommands with PID file tracking.
+- **`packages/hq-cli/`**: New NPM package `agent-hq` — `bunx agent-hq` delegates to `scripts/hq.ts` inside the repo or bootstraps a fresh install when run globally.
+- **`homebrew/hq.rb`**: Homebrew formula ready to publish as `brew install calvinmagezi/agent-hq/hq`.
+
+### Changed
+- **`scripts/hq.ts`** help text: Fixed spacing/alignment bugs; restructured into logical sections with new FIRST-TIME SETUP and BACKGROUND DAEMON groups.
+- **`package.json`** (root): `status` and `setup` scripts now delegate to `hq.ts`; added `tools` and `hq` script aliases.
+- **`README.md`**: Rewrote install, Quick Start, Full Setup, and "Setup for AI Agents" sections to use the `hq` CLI. Added `bunx agent-hq` / Homebrew install instructions and full `hq` CLI reference table.
+- **`CLAUDE.md`**: Updated monorepo structure and Development Commands to reflect `hq` as the single CLI entry point and `packages/hq-cli/` as the NPM package.
+
+### Removed
+- **`scripts/agent-hq-status.ts`**: Superseded by `hq status` / `hq health`.
+- **`scripts/migrate-queues.ts`**: One-time migration utility no longer needed.
+- **`scripts/setup-gemini-plugins.sh`**: Superseded by `hq tools`.
+
+### Security
+- **`scripts/hq.ts` — `isAlive()`**: Added numeric PID validation before shell interpolation, preventing injection via tampered lock/PID files.
+- **`scripts/hq.ts` — `cmdCoo install`**: Replaced `execSync(\`git clone ${arg}...\`)` with `spawnSync("git", ["clone", arg, targetDir])` to eliminate command injection via user-controlled URL.
+- **`scripts/hq.ts` — `cmdInit`**: Replaced `sh(\`git clone ${repoUrl}...\`)` with `spawnSync` for the same reason.
+- **`scripts/hq.ts` — `confirmInstall()`**: Prompt passed as `$1` positional argument to `bash -c` instead of string interpolation, eliminating bash injection via prompt text.
+- **`packages/discord-core/src/fileAttachments.ts`**: Added `isPathAllowed()` path confinement before reading any AI-referenced file. Permitted roots: `VAULT_PATH` and `tmpdir()`. Dotfiles rejected unconditionally, blocking prompt-injection exfiltration of `~/.ssh`, `~/.aws`, etc.
+
+### Added (prior entries)
+- **`hq` CLI — unified entry point** (`scripts/hq.ts`): All management now flows through the single `hq` command. New commands: `hq init` (full first-time setup), `hq tools` (install + authenticate Claude CLI / Gemini CLI / OpenCode), `hq setup` (vault scaffold), `hq daemon start|stop|status|logs` (background daemon management).
+- **`hq init --non-interactive`**: Fully scriptable, agent-runnable install — checks prerequisites, clones repo, installs deps, sets up CLI tools, scaffolds vault, creates `.env.local` templates, installs launchd daemons, and adds `hq` to PATH. No prompts required.
+- **`hq tools`**: Interactive and non-interactive CLI tool installer. Checks for and installs Claude Code CLI, Gemini CLI, and OpenCode via npm; verifies authentication; installs Google Workspace extension for Gemini; writes Obsidian MCP server config to `~/.gemini/settings.json`.
+- **`packages/hq-cli/`** — NPM package `agent-hq` (`bunx agent-hq`): Thin wrapper that delegates to `scripts/hq.ts` when inside the monorepo, or bootstraps a fresh install via `hq init` when run globally.
+- **Homebrew formula** (`homebrew/hq.rb`): Ready-to-publish formula for `brew tap calvinmagezi/agent-hq && brew install hq`.
+- **Discord file attachments** (`packages/discord-core/src/fileAttachments.ts`): All bots can now send files. AI responses include `[FILE: /path]` markers; the bot strips them and uploads as Discord attachments.
+- **`@repo/discord-core` package** (`packages/discord-core/`): Shared Discord implementation (DiscordBotBase, chunking, streaming, thread management, presence, typing, intent classification, command registry) used by both the relay and the HQ agent bot.
+
+### Changed
+- **`hq` CLI help text** reformatted with correct spacing, aligned columns, and grouped sections.
+- **Root `package.json`**: `status`, `setup`, `tools` scripts now delegate to `hq.ts`; `"hq"` shortcut added.
+- **README.md**: Rewrote Install, Quick Start, Full Setup, and Setup for AI Agents sections around the new `hq` CLI. Added `hq` command reference table.
+- **CLAUDE.md**: Updated monorepo structure, CLI section, and dev commands to reflect the consolidated CLI.
+
+### Removed
+- **`scripts/agent-hq-status.ts`**: Superseded by `hq status` and `hq health`.
+- **`scripts/migrate-queues.ts`**: One-time migration utility, no longer needed.
+- **`scripts/setup-gemini-plugins.sh`**: Superseded by `hq tools`.
+- **`apps/discord-relay/src/chunker.ts`**, **`apps/discord-relay/src/intent.ts`**: Moved to `@repo/discord-core`.
+- **`apps/agent/lib/discordPresence.ts`**, **`apps/agent/lib/intentClassifier.ts`**: Moved to `@repo/discord-core`.
+
+### Security
+- **`isAlive()`**: Validates PID is numeric before shell interpolation, preventing injection from tampered lock files.
+- **`cmdCoo install`**: Replaced `execSync(\`git clone ${arg}\`)` with `spawnSync("git", ["clone", arg, ...])` to eliminate shell injection.
+- **`cmdInit` clone**: Replaced `sh(\`git clone ${repoUrl}\`)` with `spawnSync` for the same reason.
+- **`confirmInstall()`**: Prompt string now passed as a positional bash argument (`$1`) instead of being interpolated into `-c "..."`, preventing prompt injection.
+- **`fileAttachments.ts`**: Added `isPathAllowed()` path confinement — `[FILE:]` markers are only honoured for paths inside `VAULT_PATH` and the OS temp directory, blocking prompt-injection-driven exfiltration of credentials or system files.
+
+### Added
 - **Pluggable COO Architecture** (`apps/agent/lib/cooRouter.ts`, `packages/vault-client/src/orchestratorAdapter.ts`): Implementation of the Chief Operating Officer (COO) routing pattern. Allows delegating intent planning to external orchestrators while maintaining a secure sandboxed bridge.
 - **`fbmq` Queue Integration** (`packages/vault-sync/src/eventBus.ts`, `scripts/setup.ts`): Transitioned delegation and job queues to `fbmq` for improved reliability and performance. Added `_fbmq/` directory monitoring to `EventBus`.
 - **COO Watchdog & Bridge** (`scripts/agent-hq-daemon.ts`, `scripts/orchestrator-bridge/`): New daemon task for monitoring external orchestrators with heartbeat tracking, dead man's switch (auto-revert to internal mode), and circuit breakers for rate/error anomalies.

@@ -56,6 +56,14 @@ export interface ChannelSettings {
   agent?: string;
 }
 
+/** Result from a command handler (prefix ! or slash /) */
+export interface CommandResult {
+  handled: boolean;
+  response?: string;
+  embed?: import("discord.js").EmbedBuilder;
+  file?: { name: string; buffer: Buffer };
+}
+
 /** Claude CLI options passed alongside the prompt */
 export interface ClaudeCallOptions {
   filePaths?: string[];

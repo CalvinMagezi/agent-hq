@@ -1294,6 +1294,78 @@ async function cooWatchdog(): Promise<void> {
   }
 }
 
+// ─── CFO Subprocess ──────────────────────────────────────────────────────────
+
+let activeCfoProcess: ChildProcess | null = null;
+let cfoMissedHeartbeats = 0;
+
+function initCfoProcess(): void {
+  const cfoDir = path.join(VAULT_PATH, "_system/orchestrators/cfo-agent");
+  const indexPath = path.join(cfoDir, "index.ts");
+
+  if (!fs.existsSync(indexPath)) {
+    console.error("[cfo] Cannot start cfo-agent, index.ts not found");
+    return;
+  }
+
+  console.log("[cfo] Starting CFO agent...");
+  activeCfoProcess = spawn(process.execPath, ["run", "index.ts"], {
+    cwd: cfoDir,
+    env: {
+      ...process.env,
+      AGENT_HQ_VAULT_PATH: VAULT_PATH,
+      VAULT_PATH,
+      // Share same model + API keys as the main agent so CFO usage is consistent
+      DEFAULT_MODEL: process.env.DEFAULT_MODEL ?? "gemini-2.5-flash",
+      OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? "",
+      GEMINI_API_KEY: process.env.GEMINI_API_KEY ?? "",
+    },
+    stdio: "inherit",
+    detached: true,
+  });
+
+  activeCfoProcess.on("exit", (code) => {
+    console.log(`[cfo] CFO agent exited with code ${code}`);
+    activeCfoProcess = null;
+  });
+}
+
+async function cfoWatchdog(): Promise<void> {
+  if (!activeCfoProcess) {
+    initCfoProcess();
+    return;
+  }
+
+  const heartbeatFile = path.join(VAULT_PATH, "_external/cfo-agent/_health/heartbeat.json");
+  if (!fs.existsSync(heartbeatFile)) {
+    cfoMissedHeartbeats++;
+    if (cfoMissedHeartbeats >= 3) {
+      console.warn("[cfo-watchdog] CFO missed 3 heartbeats — restarting");
+      activeCfoProcess.kill();
+      activeCfoProcess = null;
+      cfoMissedHeartbeats = 0;
+    }
+    return;
+  }
+
+  try {
+    const hb = JSON.parse(fs.readFileSync(heartbeatFile, "utf-8"));
+    const elapsed = Date.now() - new Date(hb.lastHeartbeat ?? 0).getTime();
+    if (elapsed > 3 * 60_000) {
+      cfoMissedHeartbeats++;
+      console.warn(`[cfo-watchdog] CFO heartbeat stale (${Math.round(elapsed / 1000)}s). Miss ${cfoMissedHeartbeats}/3`);
+      if (cfoMissedHeartbeats >= 3) {
+        console.warn("[cfo-watchdog] Restarting stale CFO agent");
+        activeCfoProcess.kill();
+        activeCfoProcess = null;
+        cfoMissedHeartbeats = 0;
+      }
+    } else {
+      cfoMissedHeartbeats = 0;
+    }
+  } catch { /* ignore read errors */ }
+}
+
 /**
  * Process COO responses from _delegation/coo_outbox/.
  * When an external COO writes a response JSON to coo_outbox/, this function reads it,
@@ -1462,6 +1534,12 @@ const tasks: {
       fn: processCooPlanResponses,
       lastRun: 0,
     },
+    {
+      name: "cfo-watchdog",
+      intervalMs: 2 * 60 * 1000,
+      fn: cfoWatchdog,
+      lastRun: 0,
+    },
   ];
 
 async function runScheduler(): Promise<void> {
@@ -1567,6 +1645,7 @@ process.on("SIGINT", async () => {
   console.log("\n[daemon] Shutting down...");
   if (bridgeCtx) stopBridge(bridgeCtx);
   if (activeCooProcess) activeCooProcess.kill();
+  if (activeCfoProcess) activeCfoProcess.kill();
   await vault.stopSync().catch(() => { });
   search.close();
   process.exit(0);
@@ -1576,6 +1655,7 @@ process.on("SIGTERM", async () => {
   console.log("[daemon] Received SIGTERM, shutting down...");
   if (bridgeCtx) stopBridge(bridgeCtx);
   if (activeCooProcess) activeCooProcess.kill();
+  if (activeCfoProcess) activeCfoProcess.kill();
   await vault.stopSync().catch(() => { });
   search.close();
   process.exit(0);

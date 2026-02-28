@@ -185,6 +185,57 @@ export interface UsageEntry {
   cost: number;
 }
 
+// ─── CFO Agent Types ──────────────────────────────────────────────────────
+
+export type CFOIntentType = "estimate" | "report" | "price-check";
+
+export interface CFOIntent extends MasterIntent {
+  intentType: CFOIntentType;
+  metadata?: {
+    taskDescription?: string;
+    /** Model IDs expected to be used */
+    models?: string[];
+    /** Estimated number of LLM turns */
+    estimatedTurns?: number;
+    /** Reporting period */
+    period?: "today" | "week" | "month";
+  };
+}
+
+export interface UsageRecord {
+  taskId: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  /** Estimated cost in USD */
+  estimatedCostUsd: number;
+  timestamp: string;
+}
+
+export interface CfoEstimateBreakdown {
+  model: string;
+  tokens: number;
+  costUsd: number;
+}
+
+export interface CfoEstimate {
+  estimatedCostUsd: number;
+  breakdown: CfoEstimateBreakdown[];
+  /** Non-null if cost exceeds configured threshold */
+  warning?: string;
+}
+
+/** Model pricing from OpenRouter or hardcoded fallback */
+export interface ModelPricing {
+  modelId: string;
+  /** Cost per 1K input tokens in USD */
+  inputPer1k: number;
+  /** Cost per 1K output tokens in USD */
+  outputPer1k: number;
+  /** ISO timestamp of last price refresh */
+  updatedAt: string;
+}
+
 export interface WorkerSession {
   workerId: string;
   status: "online" | "offline" | "busy";

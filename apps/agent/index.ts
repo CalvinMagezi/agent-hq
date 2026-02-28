@@ -18,6 +18,7 @@ import { shouldFlushMemory, executeMemoryFlush, createFlushState, DEFAULT_FLUSH_
 import { logger } from "./lib/logger.js";
 import { ChatSessionManager } from "./lib/chatSession.js";
 import { buildModelConfig } from "./lib/modelConfig.js";
+import { recordTaskUsage } from "./lib/cfoRouter.js";
 import { AgentWsServer } from "./lib/wsServer.js";
 import { PtyManager } from "./lib/ptyManager.js";
 import { Orchestrator } from "./lib/orchestrator.js";
@@ -1359,6 +1360,17 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
 
         if (job.type !== "interactive") console.log("\n✓ Task completed");
         logger.info("Job completed", { jobId: job._id, type: job.type, stats: jobStats });
+
+        // Report actual token usage to CFO for tracking
+        if (jobStats?.tokens) {
+            void recordTaskUsage(
+                adapter.client,
+                job._id,
+                MODEL_ID,
+                jobStats.tokens.input ?? 0,
+                jobStats.tokens.output ?? 0,
+            );
+        }
 
         // Notify Discord of job completion
         if (discordBot) {

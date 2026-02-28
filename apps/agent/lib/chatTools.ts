@@ -8,6 +8,7 @@ import { Type } from "@sinclair/typebox";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { logger } from "./logger.js";
 import { routeUserMessage } from "./cooRouter.js";
+import { consultCfo, shouldWarnUser, formatEstimate } from "./cfoRouter.js";
 
 /** Callback fired when a job is dispatched, so the Discord bot can track it */
 export type OnJobDispatched = (jobId: string) => void;
@@ -38,6 +39,15 @@ export function createDispatchJobTool(config: {
             try {
                 // Vault mode: use cooRouter
                 if (config.vaultClient) {
+                    // Non-blocking CFO cost estimate (3s timeout)
+                    let costPrefix = "";
+                    try {
+                        const estimate = await consultCfo(config.vaultClient, args.instruction);
+                        if (estimate && shouldWarnUser(estimate)) {
+                            costPrefix = formatEstimate(estimate);
+                        }
+                    } catch { /* CFO unavailable — proceed without estimate */ }
+
                     const { jobId, intentId, message } = await routeUserMessage(
                         config.vaultClient,
                         args.instruction,
@@ -48,7 +58,7 @@ export function createDispatchJobTool(config: {
                     if (jobId) config.onJobDispatched?.(jobId);
 
                     return {
-                        content: [{ type: "text", text: message }],
+                        content: [{ type: "text", text: costPrefix + message }],
                         details: { jobId, intentId },
                     };
                 }

@@ -5,6 +5,8 @@
  * before reaching the handler. Audit logging happens on every request.
  */
 
+import fs from "fs";
+import path from "path";
 import {
   OpenClawAdapter,
   SecurityError,
@@ -325,6 +327,86 @@ export function createRouter(adapter: OpenClawAdapter, audit: AuditLogger) {
         });
 
         return Response.json({ status: "ok" });
+      });
+    }
+
+    // ─── CFO: Usage ───────────────────────────────────────────
+    if (method === "GET" && pathname === "/api/cfo/usage") {
+      return withAuth(req, "cfo_usage", async () => {
+        const period = url.searchParams.get("period") ?? "today";
+        const vaultPath = adapter.vaultPath;
+        const usageDir = path.join(vaultPath, "_usage/daily");
+        const prefix = period === "today"
+          ? new Date().toISOString().slice(0, 10)
+          : new Date().toISOString().slice(0, 7);
+
+        let totalUsd = 0;
+        let inputTokens = 0;
+        let outputTokens = 0;
+
+        if (fs.existsSync(usageDir)) {
+          for (const file of fs.readdirSync(usageDir).filter(f => f.startsWith(prefix) && f.endsWith(".md"))) {
+            const raw = fs.readFileSync(path.join(usageDir, file), "utf-8");
+            for (const line of raw.split("\n")) {
+              const m = line.match(/\| in:(\d+) out:(\d+) \| \$([\d.]+) \|/);
+              if (m) {
+                inputTokens += parseInt(m[1]);
+                outputTokens += parseInt(m[2]);
+                totalUsd += parseFloat(m[3]);
+              }
+            }
+          }
+        }
+
+        return Response.json({ period, totalUsd, inputTokens, outputTokens });
+      });
+    }
+
+    // ─── CFO: Pricing ─────────────────────────────────────────
+    if (method === "GET" && pathname === "/api/cfo/pricing") {
+      return withAuth(req, "cfo_pricing", async () => {
+        const cachePath = path.join(adapter.vaultPath, "_usage/pricing-cache.md");
+        if (!fs.existsSync(cachePath)) {
+          return Response.json({ pricing: {}, note: "Pricing cache not yet populated by CFO agent" });
+        }
+        const raw = fs.readFileSync(cachePath, "utf-8");
+        const match = raw.match(/^---\n([\s\S]*?)\n---/);
+        const models: Record<string, { inputPer1k: number; outputPer1k: number }> = {};
+        if (match) {
+          const blocks = (match[1].match(/- modelId: .+\n\s+inputPer1k: [\d.]+\n\s+outputPer1k: [\d.]+/g) ?? []);
+          for (const block of blocks) {
+            const m = block.match(/modelId: (.+)\n\s+inputPer1k: ([\d.]+)\n\s+outputPer1k: ([\d.]+)/);
+            if (m) models[m[1].trim()] = { inputPer1k: parseFloat(m[2]), outputPer1k: parseFloat(m[3]) };
+          }
+        }
+        return Response.json({ pricing: models });
+      });
+    }
+
+    // ─── CFO: Subscriptions ───────────────────────────────────
+    if (method === "GET" && pathname === "/api/cfo/subscriptions") {
+      return withAuth(req, "cfo_subscriptions", async () => {
+        const subsPath = path.join(adapter.vaultPath, "_usage/subscriptions.md");
+        if (!fs.existsSync(subsPath)) {
+          return Response.json({ subscriptions: [], note: "subscriptions.md not found" });
+        }
+        const raw = fs.readFileSync(subsPath, "utf-8");
+        const match = raw.match(/^---\n([\s\S]*?)\n---/);
+        const budgetPath = path.join(adapter.vaultPath, "_usage/budget.md");
+        let currentMonthUsd = 0;
+        let todayUsd = 0;
+        if (fs.existsSync(budgetPath)) {
+          const b = fs.readFileSync(budgetPath, "utf-8");
+          const cm = b.match(/currentMonthUsd:\s*([\d.]+)/);
+          const td = b.match(/todayUsd:\s*([\d.]+)/);
+          if (cm) currentMonthUsd = parseFloat(cm[1]);
+          if (td) todayUsd = parseFloat(td[1]);
+        }
+        return Response.json({
+          raw: match?.[1] ?? "",
+          currentMonthUsd,
+          todayUsd,
+        });
       });
     }
 

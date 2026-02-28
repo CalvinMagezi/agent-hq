@@ -1460,6 +1460,91 @@ export class VaultClient {
       .map(f => f.replace(".json", ""));
   }
 
+  // ─── CFO Inbox/Outbox ──────────────────────────────────────────────
+
+  /**
+   * Send an intent to the CFO subprocess by writing to _delegation/cfo_inbox.
+   * Returns the intent ID.
+   */
+  async sendToCfo(intent: Omit<import("./types").CFOIntent, "intentId" | "status" | "createdAt">): Promise<string> {
+    const intentId = `cfo-${this.generateId()}`;
+    const inboxPath = this.resolve("_delegation/cfo_inbox", `${intentId}.json`);
+
+    const payload: import("./types").CFOIntent = {
+      ...intent,
+      intentId,
+      status: "pending",
+      createdAt: this.nowISO(),
+    };
+
+    const dir = path.dirname(inboxPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    fs.writeFileSync(inboxPath, JSON.stringify(payload, null, 2), "utf-8");
+    return intentId;
+  }
+
+  /**
+   * Check if CFO has replied in _delegation/cfo_outbox.
+   * Returns parsed CfoEstimate or null if not yet processed.
+   * Auto-deletes the response file after reading.
+   */
+  async getCfoResponse(intentId: string): Promise<import("./types").CfoEstimate | string | null> {
+    const outboxPath = this.resolve("_delegation/cfo_outbox", `${intentId}.json`);
+    if (!fs.existsSync(outboxPath)) return null;
+
+    try {
+      const data = JSON.parse(fs.readFileSync(outboxPath, "utf-8"));
+      if (data.status === "completed" || data.estimate || data.response) {
+        fs.unlinkSync(outboxPath);
+        return data.estimate ?? data.response ?? "[Done]";
+      }
+    } catch {
+      // Ignore
+    }
+    return null;
+  }
+
+  /**
+   * Append a usage record to today's daily usage log in _usage/daily/YYYY-MM-DD.md.
+   */
+  async recordUsage(record: import("./types").UsageRecord): Promise<void> {
+    const today = new Date().toISOString().slice(0, 10);
+    const dailyDir = this.resolve("_usage/daily");
+    if (!fs.existsSync(dailyDir)) fs.mkdirSync(dailyDir, { recursive: true });
+
+    const filePath = path.join(dailyDir, `${today}.md`);
+    const line = `- ${record.timestamp} | ${record.model} | in:${record.inputTokens} out:${record.outputTokens} | $${record.estimatedCostUsd.toFixed(6)} | task:${record.taskId}\n`;
+
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, `# Usage Log — ${today}\n\n`, "utf-8");
+    }
+    fs.appendFileSync(filePath, line, "utf-8");
+  }
+
+  /**
+   * Read the pricing cache from _usage/pricing-cache.md.
+   * Returns a map of modelId → { inputPer1k, outputPer1k }.
+   */
+  getPricingCache(): Record<string, { inputPer1k: number; outputPer1k: number }> {
+    const cachePath = this.resolve("_usage/pricing-cache.md");
+    if (!fs.existsSync(cachePath)) return {};
+
+    try {
+      const matter = require("gray-matter");
+      const { data } = matter(fs.readFileSync(cachePath, "utf-8"));
+      return (data.models as import("./types").ModelPricing[] | undefined ?? []).reduce(
+        (acc, m) => {
+          acc[m.modelId] = { inputPer1k: m.inputPer1k, outputPer1k: m.outputPer1k };
+          return acc;
+        },
+        {} as Record<string, { inputPer1k: number; outputPer1k: number }>,
+      );
+    } catch {
+      return {};
+    }
+  }
+
   // ─── Parsers ───────────────────────────────────────────────────────
 
   private parseJob(

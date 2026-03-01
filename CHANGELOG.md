@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **WhatsApp full media capabilities** (`apps/relay-adapter-whatsapp/`): All Baileys-supported message types — image/video/document/sticker send+receive, AI vision for received images (OpenRouter), polls, locations, contacts (vCard), reactions (auto 👁️/✅), message editing/deletion/forwarding, reply quoting, WhatsApp-native markdown formatting. 9 new commands: `!react`, `!poll`, `!location`, `!sticker`, `!forward`, `!delete`, `!edit`, `!media`, `!format`. New files: `formatter.ts` (markdown→WhatsApp), `media.ts` (MediaHandler with vision, sticker conversion via sharp, temp file management).
+- **WhatsApp agentic orchestration** (`apps/relay-adapter-whatsapp/src/bot.ts`): Messages auto-route through the HQ agent → Discord harness delegation pipeline with live status updates via vault event subscriptions (`task:claimed`, `task:completed`, `job:completed`). 10-minute failsafe timeout with fallback to direct OpenRouter chat.
+- **WhatsApp native orchestration** (`apps/relay-adapter-whatsapp/src/orchestrator.ts`): Intent classification auto-delegates workspace tasks (calendar, Gmail, Drive) to Gemini CLI and coding tasks (git, debug, refactor) to Claude Code, with general chat going direct.
+- **WhatsApp model identity** (`apps/relay-adapter-whatsapp/src/bot.ts`): `!model` shows actual active model name; `!gemini` shortcut for Gemini 2.5 Flash via OpenRouter; system prompt includes model capabilities and routing guidance.
+- **CFO agent** (`apps/cfo/`): Financial intelligence agent for Agent-HQ with budget tracking and cost analysis.
 - **WhatsApp Relay Adapter** (`apps/relay-adapter-whatsapp/`): Native WhatsApp self-chat relay using Baileys. This enables routing messages via the relay server and is securely locked to the owner's self-chat via `WHATSAPP_OWNER_JID`.
 - **`hq wa` commands** (`scripts/hq.ts`): New commands for managing the WhatsApp adapter including `hq wa` (foreground), `hq wa reset` (clear thread), `hq wa reauth` (clear credentials), and service management like `hq start whatsapp`.
 - **Relay Server fallback** (`packages/agent-relay-server/src/handlers/chat.ts`): Added OpenRouter fallback logic if the agent bridge is disabled (`AGENT_WS_PORT=0`), enabling direct OpenRouter routing.
@@ -19,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`homebrew/hq.rb`**: Homebrew formula ready to publish as `brew install calvinmagezi/agent-hq/hq`.
 
 ### Changed
+- **`hq-cli` renamed** to `@calvin.magezi/agent-hq` (npm squatting conflict with existing `agent-hq` package).
 - **`hq` CLI targets**: Updated `start`, `stop`, `restart`, `logs`, `errors`, `fg`, `status`, and `health` commands to natively support `whatsapp` and `relay-server`.
 - **`install-launchd.sh`**: Added `com.agent-hq.relay-server` and `com.agent-hq.whatsapp` to macOS launchd services installation.
 - **`scripts/hq.ts`** help text: Fixed spacing/alignment bugs; restructured into logical sections with new FIRST-TIME SETUP and BACKGROUND DAEMON groups.
@@ -26,12 +32,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`README.md`**: Rewrote install, Quick Start, Full Setup, and "Setup for AI Agents" sections to use the `hq` CLI. Added `bunx agent-hq` / Homebrew install instructions and full `hq` CLI reference table.
 - **`CLAUDE.md`**: Updated monorepo structure and Development Commands to reflect `hq` as the single CLI entry point and `packages/hq-cli/` as the NPM package.
 
+### Fixed
+- **`vault-client` getPendingTasks** (`packages/vault-client/`): Now scans `_delegation/pending/` directory for legacy markdown task files, fixing delegation routing for bots that use file-based task detection.
+- **`hq-cli` npm bin name**: Fixed binary name in package.json and updated Homebrew formula sha256.
+- **WhatsApp chat timeout**: Bumped from 2min to 10min to accommodate longer LLM responses; added `GROQ_API_KEY` to launchd plist for voice transcription.
+
 ### Removed
 - **`scripts/agent-hq-status.ts`**: Superseded by `hq status` / `hq health`.
 - **`scripts/migrate-queues.ts`**: One-time migration utility no longer needed.
 - **`scripts/setup-gemini-plugins.sh`**: Superseded by `hq tools`.
 
 ### Security
+- **WhatsApp media handler**: Path traversal sanitization on document filenames (strip directory components via `path.basename()` + character whitelist). WebP magic byte detection fixed to check RIFF subtype bytes 8-11 (prevents WAV/WebP confusion). Prompt injection delimiting with `<user_message>` tags in delegation instructions. Task-to-job ID tracking prevents wrong-job race condition from clearing `processing` flag prematurely. TTS availability check (`canSynthesize`) before enabling `!voice on`.
 - **`scripts/hq.ts` — `isAlive()`**: Added numeric PID validation before shell interpolation, preventing injection via tampered lock/PID files.
 - **`scripts/hq.ts` — `cmdCoo install`**: Replaced `execSync(\`git clone ${arg}...\`)` with `spawnSync("git", ["clone", arg, targetDir])` to eliminate command injection via user-controlled URL.
 - **`scripts/hq.ts` — `cmdInit`**: Replaced `sh(\`git clone ${repoUrl}...\`)` with `spawnSync` for the same reason.

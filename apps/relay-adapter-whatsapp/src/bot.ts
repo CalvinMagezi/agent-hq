@@ -20,6 +20,14 @@ import { detectIntent } from "./orchestrator.js";
 /** Max chars per WhatsApp message for readability. */
 const MAX_CHUNK_SIZE = 4000;
 
+/** Extract a human-readable harness label from a delegation task file path. */
+function harness_from_path(filePath: string): string | null {
+  if (filePath.includes("gemini")) return "Gemini";
+  if (filePath.includes("claude")) return "Claude Code";
+  if (filePath.includes("opencode")) return "OpenCode";
+  return null;
+}
+
 /** Typing indicator keepalive interval (Baileys composing expires ~25s). */
 const TYPING_KEEPALIVE_MS = 20_000;
 
@@ -45,8 +53,10 @@ export class RelayWhatsAppBot {
   private modelOverride: string | undefined;
   private processing = false;
   private messageQueue: WhatsAppMessage[] = [];
-  /** Pending delegations: taskId → { resolve, reject } */
-  private pendingDelegations = new Map<string, { resolve: (result: string) => void; reject: (err: Error) => void }>();
+  /** Active orchestration job tracking */
+  private activeJobId: string | null = null;
+  private activeJobLabel: string | null = null;
+  private activeJobResultDelivered = false;
 
   constructor(config: RelayWhatsAppBotConfig) {
     this.guard = config.guard;
@@ -72,23 +82,10 @@ export class RelayWhatsAppBot {
     await this.relay.connect();
     console.log("[relay-whatsapp] Connected to relay server");
 
-    // Subscribe to vault events for delegation results
-    this.relay.send({ type: "system:subscribe", events: ["task:completed", "task:cancelled"] });
+    // Subscribe to vault events for live orchestration status
+    this.relay.send({ type: "system:subscribe", events: ["job:*", "task:*"] });
     this.relay.on("system:event", (eventMsg: any) => {
-      const { event, data } = eventMsg;
-      if (event === "task:completed" && data?.taskId) {
-        const pending = this.pendingDelegations.get(data.taskId);
-        if (pending) {
-          this.pendingDelegations.delete(data.taskId);
-          pending.resolve(data.result ?? data.output ?? "Task completed.");
-        }
-      } else if (event === "task:cancelled" && data?.taskId) {
-        const pending = this.pendingDelegations.get(data.taskId);
-        if (pending) {
-          this.pendingDelegations.delete(data.taskId);
-          pending.reject(new Error("Task was cancelled."));
-        }
-      }
+      this.handleVaultEvent(eventMsg.event, eventMsg.data).catch(console.error);
     });
 
     // Register message handler on the WhatsApp bridge
@@ -278,7 +275,16 @@ export class RelayWhatsAppBot {
         return;
       case "status":
       case "hq":
-        command = "status";
+        if (this.activeJobId) {
+          const label = this.activeJobLabel ?? "task";
+          await this.bridge.sendMessage(
+            `*Active task:* ${label}\n` +
+            `Job ID: \`${this.activeJobId}\`\n` +
+            `Status: running — waiting for result`,
+          );
+        } else {
+          command = "status";
+        }
         break;
       case "memory":
         command = "memory";
@@ -322,12 +328,13 @@ export class RelayWhatsAppBot {
             "!model <name> — Set model by ID\n" +
             "!opus / !sonnet / !haiku — Quick Claude model switch\n" +
             "!gemini — Switch to Gemini 2.5 Flash\n" +
-            "!status — Agent status\n" +
+            "!status — HQ agent status / active task status\n" +
             "!memory — Show memory\n" +
             "!search <query> — Search vault\n" +
             "!voice [on|off] — Toggle voice note replies\n" +
             "!help — This message\n\n" +
-            "_For Google Workspace (Docs, Drive, Gmail): use the Gemini bot on Discord_",
+            "_Workspace tasks (calendar, gmail, drive) auto-route to Gemini bot_\n" +
+            "_Coding tasks (git, debug, refactor) auto-route to Claude Code bot_",
         );
         return;
       default:
@@ -379,81 +386,185 @@ export class RelayWhatsAppBot {
     }
   }
 
-  /** Delegate a task to a Discord harness bot and return its result. */
+  /**
+   * Route a task through the HQ agent → Discord harness delegation pipeline.
+   * Submits a job to the HQ agent and tracks result via vault events.
+   * Falls back to direct OpenRouter chat if agent is unavailable.
+   */
   private async handleDelegation(
     content: string,
     harness: "gemini-cli" | "claude-code" | "any",
   ): Promise<void> {
     this.processing = true;
-    const harnessLabel = harness === "gemini-cli" ? "Gemini (Google Workspace)" : harness === "claude-code" ? "Claude Code" : "best available bot";
+    const harnessLabel =
+      harness === "gemini-cli" ? "Gemini (Google Workspace)" :
+      harness === "claude-code" ? "Claude Code" : "HQ";
 
     try {
-      await this.bridge.sendTyping();
       await this.bridge.sendMessage(`_Routing to ${harnessLabel}..._`);
 
-      // Create delegation task via relay command
-      const taskId = await new Promise<string>((resolve, reject) => {
-        const requestId = `wa-delegate-${Date.now()}`;
-        const unsub = this.relay.on<CmdResultMessage>("cmd:result", (msg) => {
+      // Submit job to HQ agent with explicit delegation instruction
+      const instruction =
+        `[WHATSAPP_ORCHESTRATION targetHarness=${harness}]\n\n` +
+        `${content}\n\n` +
+        `Use the delegate_to_relay tool to handle this task via ${harness}. ` +
+        `Return the complete response to the user.`;
+
+      const jobId = await new Promise<string>((resolve, reject) => {
+        const requestId = `wa-job-${Date.now()}`;
+        const unsub = this.relay.on("job:submitted", (msg: any) => {
           if (msg.requestId === requestId) {
             unsub();
-            if (msg.success && msg.output && msg.output !== "__pending__") {
-              resolve(msg.output.trim());
-            } else {
-              reject(new Error(msg.error ?? "Failed to create delegation task"));
-            }
+            resolve(msg.jobId);
+          }
+        });
+        const unsubErr = this.relay.on("error", (msg: any) => {
+          if (msg.requestId === requestId) {
+            unsubErr();
+            reject(new Error(msg.message ?? "Job submit failed"));
           }
         });
         this.relay.send({
-          type: "cmd:execute",
-          command: "delegate",
-          args: { task: content, targetHarness: harness },
+          type: "job:submit",
+          instruction,
+          jobType: "background",
           requestId,
-        });
-        setTimeout(() => { unsub(); reject(new Error("Delegation setup timeout")); }, 10_000);
-      });
-
-      console.log(`[relay-whatsapp] Delegation task created: ${taskId}`);
-
-      // Wait for task:completed event (with polling fallback every 10s)
-      const result = await new Promise<string>((resolve, reject) => {
-        this.pendingDelegations.set(taskId, { resolve, reject });
-
-        // Polling fallback — check every 10s in case event was missed
-        const pollInterval = setInterval(async () => {
-          const requestId = `wa-poll-${Date.now()}`;
-          const unsub = this.relay.on<CmdResultMessage>("cmd:result", (msg) => {
-            if (msg.requestId === requestId) {
-              unsub();
-              if (msg.success && msg.output && msg.output !== "__pending__") {
-                clearInterval(pollInterval);
-                this.pendingDelegations.delete(taskId);
-                resolve(msg.output);
-              }
-            }
-          });
-          this.relay.send({ type: "cmd:execute", command: "task-result", args: { taskId }, requestId });
-        }, 10_000);
-
-        // 5-minute overall timeout
+        } as any);
         setTimeout(() => {
-          clearInterval(pollInterval);
-          this.pendingDelegations.delete(taskId);
-          reject(new Error(`No response from ${harnessLabel} within 5 minutes`));
-        }, 5 * 60 * 1000);
+          unsub();
+          unsubErr();
+          reject(new Error("Job submit timeout — agent may be offline"));
+        }, 15_000);
       });
 
-      await this.bridge.stopTyping();
-      await this.sendChunked(result);
+      console.log(`[relay-whatsapp] Job submitted: ${jobId} → ${harness}`);
+      this.activeJobId = jobId;
+      this.activeJobLabel = harnessLabel;
+      this.activeJobResultDelivered = false;
+
+      await this.bridge.sendMessage(
+        `_Task queued (job: \`${jobId.slice(-8)}\`). ${harnessLabel} will respond shortly. Type !status for updates._`,
+      );
+
+      // Result is delivered via handleVaultEvent when job:completed fires.
+      // Set a 10-min failsafe — fall back to direct chat if nothing arrives.
+      setTimeout(async () => {
+        if (this.activeJobId === jobId && !this.activeJobResultDelivered) {
+          console.warn(`[relay-whatsapp] Job ${jobId} timed out — falling back to direct chat`);
+          this.activeJobId = null;
+          this.activeJobLabel = null;
+          this.processing = false;
+          await this.bridge.sendMessage(`_${harnessLabel} didn't respond in time. Answering directly..._`);
+          await this.handleChat(content);
+        }
+      }, 10 * 60 * 1000);
+
     } catch (err) {
-      console.error("[relay-whatsapp] Delegation error:", err);
-      await this.bridge.stopTyping();
-      // Fall back to standard chat
-      console.log("[relay-whatsapp] Falling back to standard chat after delegation failure");
-      await this.handleChat(content);
-    } finally {
+      console.error("[relay-whatsapp] Delegation setup error:", err);
+      this.activeJobId = null;
+      this.activeJobLabel = null;
       this.processing = false;
+      await this.bridge.sendMessage(`_${harnessLabel} unavailable — answering directly..._`);
+      await this.handleChat(content);
     }
+    // Note: processing stays true until handleVaultEvent delivers the result or timeout fires.
+  }
+
+  /** Handle vault file-system events forwarded by the relay server. */
+  private async handleVaultEvent(event: string, data?: any): Promise<void> {
+    // Extract identifiers from file path (e.g. "_delegation/claimed/task-wa-123.md")
+    const filePath: string = data?.path ?? data?.filePath ?? "";
+    const taskIdMatch = filePath.match(/task-([^/]+?)\.md$/);
+    const taskId = taskIdMatch?.[1] ?? null;
+
+    // Extract jobId from path (e.g. "_jobs/done/job-1234-abc.md")
+    const jobIdMatch = filePath.match(/job-([^/]+?)\.md$/);
+    const fileJobId = jobIdMatch ? `job-${jobIdMatch[1]}` : null;
+
+    switch (event) {
+      case "task:created":
+        if (this.activeJobId) {
+          console.log(`[relay-whatsapp] Task created: ${taskId} for job ${this.activeJobId}`);
+        }
+        break;
+
+      case "task:claimed":
+        if (this.activeJobId) {
+          const claimedBy = data?.claimedBy ?? (harness_from_path(filePath) ?? "a bot");
+          await this.bridge.sendMessage(`_${claimedBy} is now working on your request..._`);
+        }
+        break;
+
+      case "task:completed":
+        if (this.activeJobId && taskId && !this.activeJobResultDelivered) {
+          console.log(`[relay-whatsapp] Task completed: ${taskId} — fetching result`);
+          const result = await this.fetchTaskResult(taskId);
+          if (result) {
+            this.activeJobResultDelivered = true;
+            this.activeJobId = null;
+            this.activeJobLabel = null;
+            this.processing = false;
+            await this.sendChunked(result);
+          }
+        }
+        break;
+
+      case "job:completed":
+        if (this.activeJobId && (fileJobId === this.activeJobId) && !this.activeJobResultDelivered) {
+          console.log(`[relay-whatsapp] Job completed: ${fileJobId} — fetching result`);
+          const result = await this.fetchJobResult(fileJobId);
+          if (result) {
+            this.activeJobResultDelivered = true;
+            this.activeJobId = null;
+            this.activeJobLabel = null;
+            this.processing = false;
+            await this.sendChunked(result);
+          }
+        }
+        break;
+
+      case "job:failed":
+        if (this.activeJobId && fileJobId === this.activeJobId && !this.activeJobResultDelivered) {
+          this.activeJobResultDelivered = true;
+          this.activeJobId = null;
+          this.activeJobLabel = null;
+          this.processing = false;
+          await this.bridge.sendMessage("_The delegated task failed. Try again or rephrase._");
+        }
+        break;
+    }
+  }
+
+  /** Extract harness label from a delegation task file path. */
+  private fetchTaskResult(taskId: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const requestId = `wa-tres-${Date.now()}`;
+      const unsub = this.relay.on<CmdResultMessage>("cmd:result", (msg) => {
+        if (msg.requestId === requestId) {
+          unsub();
+          const out = msg.output ?? null;
+          resolve(out && out !== "__pending__" ? out : null);
+        }
+      });
+      this.relay.send({ type: "cmd:execute", command: "task-result", args: { taskId }, requestId });
+      setTimeout(() => { unsub(); resolve(null); }, 8_000);
+    });
+  }
+
+  /** Fetch a completed job's result from the vault. */
+  private fetchJobResult(jobId: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      const requestId = `wa-jres-${Date.now()}`;
+      const unsub = this.relay.on<CmdResultMessage>("cmd:result", (msg) => {
+        if (msg.requestId === requestId) {
+          unsub();
+          const out = msg.output ?? null;
+          resolve(out && out !== "__pending__" ? out : null);
+        }
+      });
+      this.relay.send({ type: "cmd:execute", command: "job-result", args: { jobId }, requestId });
+      setTimeout(() => { unsub(); resolve(null); }, 8_000);
+    });
   }
 
   private async handleChat(content: string): Promise<void> {

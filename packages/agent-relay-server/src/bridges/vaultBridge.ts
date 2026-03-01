@@ -152,6 +152,30 @@ export class VaultBridge {
     ]);
   }
 
+  getJobResult(jobId: string): string | null {
+    const fs = require("fs") as typeof import("fs");
+    const path = require("path") as typeof import("path");
+
+    // Check _jobs/done/
+    const doneDir = path.join(this.vaultPath, "_jobs/done");
+    try {
+      const files = fs.readdirSync(doneDir);
+      const match = files.find(
+        (f: string) => f.includes(jobId) || f.startsWith(jobId)
+      );
+      if (match) {
+        const content = fs.readFileSync(path.join(doneDir, match), "utf-8");
+        const lines = content.split("\n");
+        const fmEnd = lines.findIndex((l: string, i: number) => i > 0 && l.trim() === "---");
+        return fmEnd > 0 ? lines.slice(fmEnd + 1).join("\n").trim() : content.trim();
+      }
+    } catch {
+      // Dir may not exist yet
+    }
+
+    return null;
+  }
+
   getDelegationResult(taskId: string): string | null {
     const fs = require("fs") as typeof import("fs");
     const path = require("path") as typeof import("path");

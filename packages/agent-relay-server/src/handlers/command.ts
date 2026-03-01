@@ -203,6 +203,13 @@ export class CommandHandler {
         return result ?? "__pending__";
       }
 
+      case "job-result": {
+        const jobId = args.jobId as string | undefined;
+        if (!jobId) return "Usage: job-result <jobId>";
+        const result = this.bridge.getJobResult(jobId);
+        return result ?? "__pending__";
+      }
+
       // ─── Settings ───────────────────────────────────────────────
       case "clear":
       case "defaults": {

@@ -16,12 +16,16 @@
  *   RELAY_PORT            Relay server port (default: 18900)
  *   AGENTHQ_API_KEY       API key for relay server authentication
  *   DEBUG                 Enable debug logging (true/1)
+ *   GROQ_API_KEY          Enables voice note transcription (Groq whisper-large-v3-turbo)
+ *   OPENAI_API_KEY        Enables TTS voice replies (optional, requires GROQ_API_KEY too)
+ *   VOICE_TTS_VOICE       TTS voice preset (default: alloy). Options: alloy, echo, fable, onyx, nova, shimmer
  */
 
 import { config as loadEnv } from "dotenv";
 import { WhatsAppGuard } from "./guard.js";
 import { WhatsAppBridge } from "./whatsapp.js";
 import { RelayWhatsAppBot } from "./bot.js";
+import { VoiceHandler } from "./voice.js";
 
 // Load .env.local first, then .env
 loadEnv({ path: ".env.local" });
@@ -57,6 +61,28 @@ console.log(`║  Owner JID: ${guard.ownerJid.padEnd(43)}║`);
 console.log(`║  All other conversations are INVISIBLE to the agent    ║`);
 console.log("╚══════════════════════════════════════════════════════════╝");
 
+// ── Voice note support (optional) ────────────────────────────────
+// Transcription: Groq whisper-large-v3-turbo (same as Discord relay)
+// TTS / voice replies: OpenAI (optional — text replies work without it)
+const groqApiKey = process.env.GROQ_API_KEY;
+const openaiApiKey = process.env.OPENAI_API_KEY;
+
+const voiceHandler = groqApiKey
+  ? new VoiceHandler({
+      transcriptionApiKey: groqApiKey,
+      ttsApiKey: openaiApiKey,
+      ttsVoice: process.env.VOICE_TTS_VOICE ?? "alloy",
+    })
+  : undefined;
+
+if (voiceHandler) {
+  const ttsStatus = openaiApiKey ? "enabled" : "disabled (set OPENAI_API_KEY to enable !voice on)";
+  console.log(`[whatsapp] Voice transcription enabled (Groq whisper-large-v3-turbo)`);
+  console.log(`[whatsapp] Voice replies: ${ttsStatus}`);
+} else {
+  console.log("[whatsapp] Voice support disabled — set GROQ_API_KEY to enable transcription");
+}
+
 // ── Create bridge and bot ────────────────────────────────────────
 const bridge = new WhatsAppBridge({
   guard,
@@ -70,6 +96,7 @@ const bot = new RelayWhatsAppBot({
   relayPort: process.env.RELAY_PORT ? parseInt(process.env.RELAY_PORT, 10) : undefined,
   apiKey: process.env.AGENTHQ_API_KEY,
   debug: process.env.DEBUG === "true" || process.env.DEBUG === "1",
+  voiceHandler,
 });
 
 bot.start().catch((err) => {

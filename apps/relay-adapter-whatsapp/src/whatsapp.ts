@@ -10,6 +10,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  downloadMediaMessage,
   proto,
   type WASocket,
   type BaileysEventMap,
@@ -26,9 +27,16 @@ export interface WhatsAppMessage {
   id: string;
   chatJid: string;
   sender: string;
+  /** Text content. Empty string for voice notes (use audioBuffer for transcription). */
   content: string;
   timestamp: number;
   fromMe: boolean;
+  /** True if this message is a WhatsApp voice note (PTT audio). */
+  isVoiceNote?: boolean;
+  /** Raw audio buffer — present for voice notes when download succeeds. */
+  audioBuffer?: Buffer;
+  /** MIME type of the audio, e.g. "audio/ogg; codecs=opus". */
+  audioMimeType?: string;
 }
 
 export type MessageCallback = (msg: WhatsAppMessage) => void;
@@ -102,6 +110,38 @@ export class WhatsAppBridge {
         this.handleMessagesUpsert(upsert);
       },
     );
+  }
+
+  /** Send a voice note (PTT audio) to the owner's self-chat. */
+  async sendVoiceNote(buffer: Buffer): Promise<string | null> {
+    if (!this.sock) {
+      console.error("[whatsapp] Cannot send voice note: socket not connected");
+      return null;
+    }
+
+    this.guard.assertAllowed(this.guard.ownerJid);
+
+    try {
+      const result = await this.sock.sendMessage(this.guard.ownerJid, {
+        audio: buffer,
+        mimetype: "audio/ogg; codecs=opus",
+        ptt: true,
+      });
+
+      const msgId = result?.key?.id;
+      if (msgId) {
+        this.sentMessageIds.add(msgId);
+        if (this.sentMessageIds.size > 500) {
+          const first = this.sentMessageIds.values().next().value;
+          if (first) this.sentMessageIds.delete(first);
+        }
+      }
+
+      return msgId ?? null;
+    } catch (err) {
+      console.error("[whatsapp] Failed to send voice note:", err);
+      return null;
+    }
   }
 
   /** Send a text message to the owner's self-chat. */
@@ -224,9 +264,9 @@ export class WhatsAppBridge {
     }
   }
 
-  private handleMessagesUpsert(
+  private async handleMessagesUpsert(
     upsert: BaileysEventMap["messages.upsert"],
-  ): void {
+  ): Promise<void> {
     if (!this.messageCallback) return;
 
     // Accept both "notify" (real-time) and "append" (sync) message types
@@ -249,16 +289,51 @@ export class WhatsAppBridge {
         continue;
       }
 
-      // Extract text content
-      const content = this.extractTextContent(msg.message);
-      if (!content) continue;
-
       const msgTimestamp =
         typeof msg.messageTimestamp === "number"
           ? msg.messageTimestamp * 1000
           : Date.now();
 
       const sender = msg.key.participant ?? chatJid.split("@")[0];
+
+      // ── Voice note / audio message ─────────────────────────────
+      const audioMsg = msg.message?.audioMessage;
+      if (audioMsg) {
+        const isPtt = audioMsg.ptt ?? false;
+        const mimeType = audioMsg.mimetype ?? "audio/ogg; codecs=opus";
+
+        console.log(
+          `[whatsapp] Audio message received (ptt=${isPtt}, mime=${mimeType}, id=${msgId})`,
+        );
+
+        let audioBuffer: Buffer | undefined;
+        try {
+          const downloaded = await downloadMediaMessage(msg, "buffer", {});
+          audioBuffer = downloaded as Buffer;
+          console.log(
+            `[whatsapp] Voice note downloaded: ${audioBuffer.length} bytes`,
+          );
+        } catch (err) {
+          console.error("[whatsapp] Failed to download audio message:", err);
+        }
+
+        this.messageCallback({
+          id: msgId ?? `unknown-${Date.now()}`,
+          chatJid,
+          sender,
+          content: "",
+          timestamp: msgTimestamp,
+          fromMe: msg.key.fromMe ?? false,
+          isVoiceNote: isPtt,
+          audioBuffer,
+          audioMimeType: mimeType,
+        });
+        continue;
+      }
+
+      // ── Text / caption message ──────────────────────────────────
+      const content = this.extractTextContent(msg.message);
+      if (!content) continue;
 
       console.log(
         `[whatsapp] Message received: "${content.substring(0, 80)}${content.length > 80 ? "..." : ""}" (id: ${msgId}, type: ${upsert.type})`,

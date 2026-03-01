@@ -132,4 +132,47 @@ export class VaultBridge {
   async getAgentContext() {
     return this.vault.getAgentContext();
   }
+
+  // ─── Delegation Operations ───────────────────────────────────
+
+  async createDelegationTask(opts: {
+    taskId: string;
+    jobId: string;
+    instruction: string;
+    targetHarnessType: "gemini-cli" | "claude-code" | "any";
+  }): Promise<void> {
+    await this.vault.createDelegatedTasks(opts.jobId, [
+      {
+        taskId: opts.taskId,
+        instruction: opts.instruction,
+        targetHarnessType: opts.targetHarnessType,
+        priority: 60,
+        deadlineMs: 5 * 60 * 1000, // 5 min
+      },
+    ]);
+  }
+
+  getDelegationResult(taskId: string): string | null {
+    const fs = require("fs") as typeof import("fs");
+    const path = require("path") as typeof import("path");
+
+    // Check _delegation/completed/
+    const completedDir = path.join(this.vaultPath, "_delegation/completed");
+    try {
+      const files = fs.readdirSync(completedDir);
+      const match = files.find((f: string) => f.includes(taskId));
+      if (match) {
+        const content = fs.readFileSync(path.join(completedDir, match), "utf-8");
+        // Strip YAML frontmatter and return body
+        const lines = content.split("\n");
+        const fmEnd = lines.findIndex((l: string, i: number) => i > 0 && l.trim() === "---");
+        return fmEnd > 0 ? lines.slice(fmEnd + 1).join("\n").trim() : content.trim();
+      }
+    } catch {
+      // Dir may not exist yet
+    }
+
+    // Also check _delegation/results/ for overflow results
+    return this.vault.readFullResult(taskId);
+  }
 }

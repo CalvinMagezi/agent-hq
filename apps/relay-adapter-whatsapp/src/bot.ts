@@ -15,6 +15,7 @@ import type {
 import type { WhatsAppBridge, WhatsAppMessage } from "./whatsapp.js";
 import type { WhatsAppGuard } from "./guard.js";
 import type { VoiceHandler } from "./voice.js";
+import { detectIntent } from "./orchestrator.js";
 
 /** Max chars per WhatsApp message for readability. */
 const MAX_CHUNK_SIZE = 4000;
@@ -44,6 +45,8 @@ export class RelayWhatsAppBot {
   private modelOverride: string | undefined;
   private processing = false;
   private messageQueue: WhatsAppMessage[] = [];
+  /** Pending delegations: taskId → { resolve, reject } */
+  private pendingDelegations = new Map<string, { resolve: (result: string) => void; reject: (err: Error) => void }>();
 
   constructor(config: RelayWhatsAppBotConfig) {
     this.guard = config.guard;
@@ -68,6 +71,25 @@ export class RelayWhatsAppBot {
     console.log("[relay-whatsapp] Connecting to relay server...");
     await this.relay.connect();
     console.log("[relay-whatsapp] Connected to relay server");
+
+    // Subscribe to vault events for delegation results
+    this.relay.send({ type: "system:subscribe", events: ["task:completed", "task:cancelled"] });
+    this.relay.on("system:event", (eventMsg: any) => {
+      const { event, data } = eventMsg;
+      if (event === "task:completed" && data?.taskId) {
+        const pending = this.pendingDelegations.get(data.taskId);
+        if (pending) {
+          this.pendingDelegations.delete(data.taskId);
+          pending.resolve(data.result ?? data.output ?? "Task completed.");
+        }
+      } else if (event === "task:cancelled" && data?.taskId) {
+        const pending = this.pendingDelegations.get(data.taskId);
+        if (pending) {
+          this.pendingDelegations.delete(data.taskId);
+          pending.reject(new Error("Task was cancelled."));
+        }
+      }
+    });
 
     // Register message handler on the WhatsApp bridge
     this.bridge.onMessage((msg) => this.handleMessage(msg));
@@ -169,11 +191,21 @@ export class RelayWhatsAppBot {
       return;
     }
 
-    // ── Regular chat message ────────────────────────────────────────
-    console.log(
-      `[relay-whatsapp] Processing chat message: "${content.substring(0, 60)}"`,
-    );
-    await this.handleChat(content);
+    // ── Intent-based routing ────────────────────────────────────────
+    const { intent, harness } = detectIntent(content);
+    console.log(`[relay-whatsapp] Intent: ${intent}, harness: ${harness}`);
+
+    if (intent !== "general" && !this.modelOverride) {
+      // Delegate to the appropriate Discord bot via vault delegation
+      console.log(`[relay-whatsapp] Delegating to ${harness}: "${content.substring(0, 60)}"`);
+      await this.handleDelegation(content, harness);
+    } else {
+      // General chat or user has explicitly set a model override
+      console.log(
+        `[relay-whatsapp] Processing chat message: "${content.substring(0, 60)}"`,
+      );
+      await this.handleChat(content);
+    }
 
     // Process any queued messages
     await this.processQueue();
@@ -344,6 +376,83 @@ export class RelayWhatsAppBot {
       await this.bridge.sendMessage(
         `Error: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /** Delegate a task to a Discord harness bot and return its result. */
+  private async handleDelegation(
+    content: string,
+    harness: "gemini-cli" | "claude-code" | "any",
+  ): Promise<void> {
+    this.processing = true;
+    const harnessLabel = harness === "gemini-cli" ? "Gemini (Google Workspace)" : harness === "claude-code" ? "Claude Code" : "best available bot";
+
+    try {
+      await this.bridge.sendTyping();
+      await this.bridge.sendMessage(`_Routing to ${harnessLabel}..._`);
+
+      // Create delegation task via relay command
+      const taskId = await new Promise<string>((resolve, reject) => {
+        const requestId = `wa-delegate-${Date.now()}`;
+        const unsub = this.relay.on<CmdResultMessage>("cmd:result", (msg) => {
+          if (msg.requestId === requestId) {
+            unsub();
+            if (msg.success && msg.output && msg.output !== "__pending__") {
+              resolve(msg.output.trim());
+            } else {
+              reject(new Error(msg.error ?? "Failed to create delegation task"));
+            }
+          }
+        });
+        this.relay.send({
+          type: "cmd:execute",
+          command: "delegate",
+          args: { task: content, targetHarness: harness },
+          requestId,
+        });
+        setTimeout(() => { unsub(); reject(new Error("Delegation setup timeout")); }, 10_000);
+      });
+
+      console.log(`[relay-whatsapp] Delegation task created: ${taskId}`);
+
+      // Wait for task:completed event (with polling fallback every 10s)
+      const result = await new Promise<string>((resolve, reject) => {
+        this.pendingDelegations.set(taskId, { resolve, reject });
+
+        // Polling fallback — check every 10s in case event was missed
+        const pollInterval = setInterval(async () => {
+          const requestId = `wa-poll-${Date.now()}`;
+          const unsub = this.relay.on<CmdResultMessage>("cmd:result", (msg) => {
+            if (msg.requestId === requestId) {
+              unsub();
+              if (msg.success && msg.output && msg.output !== "__pending__") {
+                clearInterval(pollInterval);
+                this.pendingDelegations.delete(taskId);
+                resolve(msg.output);
+              }
+            }
+          });
+          this.relay.send({ type: "cmd:execute", command: "task-result", args: { taskId }, requestId });
+        }, 10_000);
+
+        // 5-minute overall timeout
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          this.pendingDelegations.delete(taskId);
+          reject(new Error(`No response from ${harnessLabel} within 5 minutes`));
+        }, 5 * 60 * 1000);
+      });
+
+      await this.bridge.stopTyping();
+      await this.sendChunked(result);
+    } catch (err) {
+      console.error("[relay-whatsapp] Delegation error:", err);
+      await this.bridge.stopTyping();
+      // Fall back to standard chat
+      console.log("[relay-whatsapp] Falling back to standard chat after delegation failure");
+      await this.handleChat(content);
+    } finally {
+      this.processing = false;
     }
   }
 

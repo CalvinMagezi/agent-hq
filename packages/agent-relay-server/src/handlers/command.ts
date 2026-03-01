@@ -178,6 +178,31 @@ export class CommandHandler {
         return lines.join("\n");
       }
 
+      // ─── Delegation ─────────────────────────────────────────────
+      case "delegate": {
+        const task = args.task as string | undefined;
+        const targetHarness = (args.targetHarness ?? "any") as "gemini-cli" | "claude-code" | "any";
+        if (!task) return "Usage: delegate <task> [targetHarness]";
+
+        const taskId = `wa-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        const jobId = `wa-job-${Date.now()}`;
+        await this.bridge.createDelegationTask({
+          taskId,
+          jobId,
+          instruction: task,
+          targetHarnessType: targetHarness,
+        });
+
+        return taskId;
+      }
+
+      case "task-result": {
+        const taskId = args.taskId as string | undefined;
+        if (!taskId) return "Usage: task-result <taskId>";
+        const result = this.bridge.getDelegationResult(taskId);
+        return result ?? "__pending__";
+      }
+
       // ─── Settings ───────────────────────────────────────────────
       case "clear":
       case "defaults": {

@@ -46,6 +46,8 @@ export class VaultClient {
   // Track claimed paths for ack/nack
   private claimedJobs = new Map<string, string>();
   private claimedTasks = new Map<string, string>();
+  /** Legacy markdown tasks claimed from _delegation/pending/ via rename */
+  private legacyClaimedTasks = new Map<string, string>();
 
   constructor(vaultPath: string) {
     this.vaultPath = path.resolve(vaultPath);
@@ -776,19 +778,61 @@ export class VaultClient {
 
   /**
    * Get pending tasks for a specific harness type.
-   * Respects task dependencies (only returns tasks whose dependsOn are all completed).
+   * Checks FBMQ queue first, then falls back to legacy _delegation/pending/ markdown files.
    */
   async getPendingTasks(harnessType: string): Promise<DelegatedTask[]> {
+    // 1. Try FBMQ queue
     const task = await this.delegationQueue.dequeue(harnessType as HarnessType);
-    if (!task) return [];
-    this.claimedTasks.set(task.taskId, task._filePath);
-    return [task];
+    if (task) {
+      this.claimedTasks.set(task.taskId, task._filePath);
+      return [task];
+    }
+
+    // 2. Fallback: scan _delegation/pending/ for legacy markdown tasks
+    const pendingDir = this.resolve("_delegation/pending");
+    const claimedDir = this.resolve("_delegation/claimed");
+    if (!fs.existsSync(pendingDir)) return [];
+
+    const files = fs.readdirSync(pendingDir).filter((f: string) => f.endsWith(".md"));
+    for (const file of files) {
+      const filePath = path.join(pendingDir, file);
+      try {
+        const { data, content } = this.readMdFile(filePath);
+        const taskHarness = (data.targetHarnessType as string) ?? "any";
+        if (taskHarness !== harnessType && taskHarness !== "any") continue;
+        // Atomically claim by renaming to claimed dir
+        if (!fs.existsSync(claimedDir)) fs.mkdirSync(claimedDir, { recursive: true });
+        const claimedPath = path.join(claimedDir, file);
+        try {
+          fs.renameSync(filePath, claimedPath);
+        } catch {
+          continue; // Another process claimed it first
+        }
+        const legacyTask = this.parseDelegatedTask(claimedPath, data, content);
+        this.legacyClaimedTasks.set(legacyTask.taskId, claimedPath);
+        return [legacyTask];
+      } catch {
+        continue;
+      }
+    }
+
+    return [];
   }
 
   /**
    * Claim a delegated task atomically.
    */
   async claimTask(taskId: string, relayId: string): Promise<boolean> {
+    // Legacy markdown tasks are already "claimed" by rename in getPendingTasks
+    if (this.legacyClaimedTasks.has(taskId)) {
+      const claimedPath = this.legacyClaimedTasks.get(taskId)!;
+      try {
+        const { data, content } = this.readMdFile(claimedPath);
+        const updated = { ...data, status: "claimed", claimedBy: relayId, claimedAt: this.nowISO() };
+        fs.writeFileSync(claimedPath, matter.stringify("\n" + content + "\n", updated), "utf-8");
+        return true;
+      } catch { return false; }
+    }
     const claimedPath = this.claimedTasks.get(taskId);
     if (!claimedPath) return false;
 
@@ -819,6 +863,25 @@ export class VaultClient {
     result?: string,
     error?: string,
   ): Promise<void> {
+    // Handle legacy markdown tasks
+    if (this.legacyClaimedTasks.has(taskId)) {
+      const claimedPath = this.legacyClaimedTasks.get(taskId)!;
+      const { data, content } = this.readMdFile(claimedPath);
+      const updated = { ...data, status, ...(result ? { result } : {}), ...(error ? { error } : {}) };
+      const terminal = ["completed", "failed", "cancelled", "timeout"].includes(status);
+      if (terminal) {
+        const destDir = this.resolve(`_delegation/${status === "completed" ? "completed" : "failed"}`);
+        if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+        const destPath = path.join(destDir, path.basename(claimedPath));
+        fs.writeFileSync(claimedPath, matter.stringify("\n" + content + "\n", updated), "utf-8");
+        fs.renameSync(claimedPath, destPath);
+        this.legacyClaimedTasks.delete(taskId);
+      } else {
+        fs.writeFileSync(claimedPath, matter.stringify("\n" + content + "\n", updated), "utf-8");
+      }
+      return;
+    }
+
     const claimedPath = this.claimedTasks.get(taskId);
     if (!claimedPath) {
       throw new Error(`Task not found or not claimed by this process: ${taskId}`);

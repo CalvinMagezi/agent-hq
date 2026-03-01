@@ -7,61 +7,92 @@
 
 ---
 
-**Your personal AI assistant that lives on your machine.** Agent-HQ connects your favourite AI tools (Claude Code, Gemini CLI, OpenCode) to Discord, giving you a powerful AI assistant accessible from anywhere — while keeping all your data 100% local in an [Obsidian](https://obsidian.md) vault.
+**Your personal AI assistant that lives on your machine.** Agent-HQ connects your favourite AI tools (Claude Code, Gemini CLI, OpenCode) to Discord and WhatsApp, giving you a powerful AI assistant accessible from anywhere — while keeping all your data 100% local in an [Obsidian](https://obsidian.md) vault.
 
 No cloud backend. No vendor lock-in. Your machine, your data, your agents.
 
 ```
-You (Discord DM)
+You (Discord / WhatsApp / Terminal)
      │
-     ▼
-Discord Relay ──► Claude Code  ┐
-                 Gemini CLI    ├──► .vault/ (local Obsidian vault)
-                 OpenCode      ┘         │
-                                         ├── Job Queue      (atomic markdown files)
-                                         ├── Memory         (SOUL, MEMORY, PREFERENCES)
-                                         ├── Notes + Search (SQLite FTS5 + embeddings)
-                                         └── Delegation     ──► HQ Agent ──► Shell/Filesystem
+     ├── Discord Relay ──► Claude Code / Gemini CLI / OpenCode
+     ├── WhatsApp Relay ──► Voice, Images, Docs, Polls, Stickers
+     └── Terminal Chat ──► Streaming REPL
+              │
+              ▼
+       Relay Server (WS + REST, port 18900)
+              │
+              ▼
+       .vault/ (local Obsidian vault)
+              │
+              ├── Job Queue      (atomic markdown files)
+              ├── Memory         (SOUL, MEMORY, PREFERENCES)
+              ├── Notes + Search (SQLite FTS5 + embeddings)
+              ├── VaultSync      (event-driven change detection)
+              └── Delegation     ──► HQ Agent ──► Shell/Filesystem
 ```
 
 ## What You Get
 
-- **Discord as your AI interface** — DM any of your bots, get responses from Claude, Gemini, or OpenCode
+- **Discord + WhatsApp as your AI interface** — DM your bots on Discord or chat via WhatsApp self-chat
+- **Full media support** — Send images (AI vision describes them), documents, voice notes, stickers, locations, polls
 - **Persistent memory** — The agent remembers facts, goals, and context across sessions
-- **Local job queue** — Queue background tasks, get results back in Discord
-- **Multi-agent orchestration** — HQ delegates tasks to the right specialist bot
+- **Local job queue** — Queue background tasks, get results back in Discord or WhatsApp
+- **Multi-agent orchestration** — HQ delegates tasks to the right specialist bot with tracing
 - **Scheduled workflows** — Daily web digests, memory consolidation, project tracking
-- **Voice messages** — Send voice notes, get transcribed and processed responses
+- **Voice messages** — Send voice notes, get transcribed responses (+ TTS replies on WhatsApp)
+- **Cross-device vault sync** — E2E encrypted sync between machines via Obsidian plugin
+- **Event-driven architecture** — VaultSync engine with real-time file change detection
 - **Full machine access** — Agent can run code, edit files, push git commits, search your vault
 
 ## Architecture
 
 ```text
 .
-├── .vault/                # Obsidian vault (local data store)
-│   ├── _system/           # Agent system files (SOUL.md, MEMORY.md, etc.)
-│   ├── _jobs/             # Job queue (pending/, running/, done/, failed/)
-│   ├── _delegation/       # Relay task queue (pending/, claimed/, completed/)
-│   ├── _threads/          # Chat conversation history
-│   ├── _logs/             # Date-partitioned job logs
-│   └── Notebooks/         # User content (Memories, Projects, Daily Digest)
+├── .vault/                    # Obsidian vault (local data store)
+│   ├── _system/               # Agent system files (SOUL.md, MEMORY.md, etc.)
+│   ├── _jobs/                 # Job queue (pending/, running/, done/, failed/)
+│   ├── _delegation/           # Relay task queue (pending/, claimed/, completed/)
+│   ├── _threads/              # Chat conversation history
+│   ├── _logs/                 # Date-partitioned job logs
+│   └── Notebooks/             # User content (Memories, Projects, Daily Digest)
 ├── apps/
-│   ├── agent/             # Local worker agent (Pi SDK, job execution)
-│   └── discord-relay/     # Multi-bot Discord relay (Claude Code, OpenCode, Gemini CLI)
+│   ├── agent/                 # Local worker agent (Pi SDK, job execution)
+│   ├── discord-relay/         # Multi-bot Discord relay (Claude Code, OpenCode, Gemini CLI)
+│   ├── relay-adapter-whatsapp/# WhatsApp relay (Baileys, voice, media, AI vision)
+│   ├── relay-adapter-discord/ # Discord adapter for the relay server
+│   └── hq-control-center/    # Electron desktop dashboard (React, force-graph, xterm)
 ├── packages/
-│   └── vault-client/      # Shared vault data access layer (@repo/vault-client)
+│   ├── vault-client/          # Shared vault data access layer (@repo/vault-client)
+│   ├── vault-sync/            # Event-driven file change detection engine
+│   ├── vault-sync-protocol/   # E2E encryption protocol for cross-device sync
+│   ├── vault-sync-server/     # WebSocket relay for multi-device vault sync
+│   ├── agent-relay-protocol/  # Types + RelayClient SDK for adapter ↔ server comms
+│   ├── agent-relay-server/    # Bun WS+REST gateway (port 18900)
+│   ├── discord-core/          # Shared Discord.js base class + utilities
+│   ├── vault-gateway/         # HTTP gateway for vault access
+│   ├── vault-mcp/             # MCP server for vault queries
+│   ├── queue-transport/       # Queue abstraction for vault-based messaging
+│   └── hq-cli/                # NPM package (@calvin.magezi/agent-hq)
+├── plugins/
+│   └── obsidian-vault-sync/   # Obsidian plugin for cross-device sync
 ├── scripts/
-│   ├── agent-hq-chat.ts   # Terminal chat CLI
-│   ├── agent-hq-daemon.ts # Background workflow daemon
-│   └── workflows/         # Scheduled daily/weekly workflows
-└── turbo.json             # Turborepo pipeline config
+│   ├── hq.ts                  # Unified CLI entry point
+│   ├── agent-hq-chat.ts       # Terminal chat CLI
+│   ├── agent-hq-daemon.ts     # Background workflow daemon
+│   └── workflows/             # Scheduled daily/weekly workflows
+└── turbo.json                 # Turborepo pipeline config
 ```
 
-- **HQ Agent** — Polls vault for jobs, executes with Pi SDK (bash, files, web search), writes logs
+- **HQ Agent** — Picks up vault jobs via event-driven detection (with polling fallback), executes with Pi SDK
 - **Discord Relay** — Multi-bot system bridging Discord to CLI harnesses with session persistence
+- **WhatsApp Relay** — Native WhatsApp adapter via Baileys with voice notes, AI vision, media, polls, stickers, and orchestration
+- **Relay Server** — WebSocket + REST gateway routing messages between adapters, agent, and vault
+- **VaultSync** — Event-driven file watcher with append-only changelog, advisory locks, and typed pub/sub
+- **Cross-Device Sync** — E2E encrypted (AES-256-GCM) relay server + Obsidian plugin for multi-machine sync
+- **Discord Core** — Shared `DiscordBotBase` class, command routing, streaming replies, presence management
 - **Terminal Chat** — Readline REPL with streaming responses and vault context injection
 - **Local Daemon** — Background cron workflows (health checks, embeddings, note linking)
-- **VaultClient** — Shared package for filesystem-based data access
+- **VaultClient** — Shared package for filesystem-based data access with frontmatter parsing
 
 ## Install
 
@@ -85,7 +116,8 @@ hq install-cli         # symlinks scripts/hq.ts → ~/.local/bin/hq
 
 - **[Bun](https://bun.sh)** v1.1.0+ — `curl -fsSL https://bun.sh/install | bash`
 - **[Git](https://git-scm.com)** — for cloning
-- **A Discord bot token** — [Create one here](https://discord.com/developers/applications)
+- **A Discord bot token** — [Create one here](https://discord.com/developers/applications) (for Discord relay)
+- **A WhatsApp account** — For WhatsApp relay (optional, scans QR code on first run)
 - **At least one AI CLI** — `hq tools` installs and authenticates these for you:
   - **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** — Free with Google account
   - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — Requires Anthropic subscription
@@ -172,6 +204,17 @@ OPENROUTER_API_KEY=your_key    # or GEMINI_API_KEY for Gemini models
 DEFAULT_MODEL=gemini-2.5-flash
 ```
 
+#### WhatsApp Relay (`apps/relay-adapter-whatsapp/.env.local`) — optional
+
+```bash
+WHATSAPP_OWNER_JID=your_number@s.whatsapp.net   # your WhatsApp JID
+OPENROUTER_API_KEY=your_key                       # for AI chat + image vision
+GROQ_API_KEY=your_key                             # voice transcription (Whisper)
+OPENAI_API_KEY=your_key                           # TTS voice replies (optional)
+VISION_MODEL=google/gemini-2.5-flash-preview-05-20  # AI vision model (optional)
+MEDIA_AUTO_PROCESS=true                           # auto-process received media (optional)
+```
+
 ### 5. Start services
 
 ```bash
@@ -179,6 +222,7 @@ hq start           # start agent + relay via launchd (after hq install)
 # — or —
 hq fg relay        # run relay in foreground (no launchd needed)
 hq fg agent        # run agent in foreground
+hq wa              # run WhatsApp in foreground (scan QR on first run)
 hq daemon start    # start background workflow daemon
 ```
 
@@ -222,22 +266,38 @@ The vault schema, job types, and delegation flow are documented in the [Notebook
 All management goes through the `hq` command:
 
 ```
-hq                        Interactive chat (default)
-hq init                   First-time setup
-hq tools                  Install/re-auth CLI tools
-hq setup                  Scaffold vault only
-hq status                 Service status
-hq start [agent|relay]    Start services
-hq stop  [agent|relay]    Stop services
-hq restart                Restart everything
-hq daemon start|stop|logs Background daemon
-hq logs [target] [N]      View logs
-hq follow                 Live-tail logs
-hq health                 Full health check
-hq ps                     All managed processes
-hq install                Install launchd daemons
-hq install-cli            Add hq to PATH
-hq coo status             COO orchestrator status
+GENERAL
+  hq                              Interactive chat (default)
+  hq init                         First-time setup
+  hq tools                        Install/re-auth CLI tools
+  hq setup                        Scaffold vault only
+
+SERVICES                          targets: agent, relay, whatsapp, relay-server, all
+  hq start  [target]              Start services
+  hq stop   [target]              Stop services
+  hq restart [target]             Restart services
+  hq fg [agent|relay|whatsapp]    Run in foreground
+
+WHATSAPP
+  hq wa                           Start WhatsApp in foreground (QR scan / debug)
+  hq wa reset                     Clear conversation thread
+  hq wa reauth                    Clear credentials & re-scan QR
+  hq wa status                    WhatsApp service status
+  hq wa logs [N]                  WhatsApp adapter logs
+  hq wa errors [N]                WhatsApp adapter error logs
+
+MONITORING
+  hq status                       Service status
+  hq health                       Full health check
+  hq logs [target] [N]            View logs
+  hq follow [target]              Live-tail logs
+  hq ps                           All managed processes
+  hq daemon start|stop|logs       Background daemon
+
+SETUP
+  hq install                      Install launchd daemons
+  hq install-cli                  Add hq to PATH
+  hq coo status                   COO orchestrator status
 ```
 
 ## Development Commands
@@ -266,6 +326,33 @@ DM your bot or @mention it in a server. Any non-command message is sent to the C
 
 **Claude-specific**: `!opus`, `!sonnet`, `!haiku`, `!effort low|medium|high`.
 
+## WhatsApp Relay
+
+The WhatsApp adapter (`apps/relay-adapter-whatsapp/`) connects via Baileys (WhatsApp Web multidevice protocol). Run `hq wa` to scan the QR code on first setup, then use `hq start whatsapp` for background operation.
+
+**Capabilities**: text chat, voice notes (transcription + TTS), image AI vision, document processing, stickers, polls, locations, contacts, reactions, message editing/deletion, forwarding, auto-formatting.
+
+### WhatsApp Commands
+
+Send these in your WhatsApp self-chat:
+
+| Command | Description |
+|---------|-------------|
+| `!reset` | New conversation session |
+| `!voice on\|off` | Toggle voice note replies (TTS) |
+| `!model <name>` | Switch AI model |
+| `!react <emoji>` | React to the last received message |
+| `!poll <question> \| <opt1> \| <opt2>` | Create a poll |
+| `!location <lat> <lng> [name]` | Send a location pin |
+| `!sticker` | Convert the last received image to a sticker |
+| `!forward` | Forward the last received message |
+| `!edit <new text>` | Edit the last bot message |
+| `!delete` | Delete the last bot message |
+| `!media on\|off` | Toggle auto media processing |
+| `!format on\|off` | Toggle WhatsApp markdown formatting |
+| `!status` | Show bot status and capabilities |
+| `!help` | Show all available commands |
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -273,9 +360,14 @@ DM your bot or @mention it in a server. Any non-command message is sent to the C
 | Runtime | Bun |
 | Data | Obsidian vault (markdown + YAML frontmatter) |
 | Search | SQLite FTS5 + embedding vectors |
-| LLM | OpenRouter (configurable model) |
+| LLM | OpenRouter, Gemini API, Groq (configurable) |
 | Agent | Pi SDK |
 | Discord | discord.js v14 |
+| WhatsApp | Baileys (WhatsApp Web multidevice) |
+| Voice | Groq Whisper (STT), OpenAI TTS |
+| Vision | OpenRouter + Gemini Flash (image description) |
+| Media | sharp (image/sticker processing) |
+| Sync | Custom E2E encrypted WebSocket protocol |
 | Build | Turborepo, Bun workspaces |
 
 ## Acknowledgements

@@ -445,16 +445,16 @@ export class RelayWhatsAppBot {
             return;
           }
 
-          // Timeout after 5 minutes
+          // Timeout after 10 minutes
           setTimeout(() => {
             console.error(
-              `[relay-whatsapp] Request timed out after 5 minutes (received ${deltaCount} deltas, ${buffer.length} chars)`,
+              `[relay-whatsapp] Request timed out after 10 minutes (received ${deltaCount} deltas, ${buffer.length} chars)`,
             );
             unsub1();
             unsub2();
             unsub3();
-            reject(new Error("Request timed out (5 min)"));
-          }, 5 * 60 * 1000);
+            reject(new Error("Request timed out (10 min)"));
+          }, 10 * 60 * 1000);
         },
       );
 

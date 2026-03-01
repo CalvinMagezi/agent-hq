@@ -67,4 +67,7 @@ yarn-error.log*
 # WhatsApp Baileys auth session (machine-specific credentials)
 **/auth_info/
 
+# WhatsApp media temp files
+**/.media-temp/
+
 logs

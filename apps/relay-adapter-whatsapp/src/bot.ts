@@ -1,8 +1,9 @@
 /**
  * RelayWhatsAppBot — Routes WhatsApp self-chat messages through the relay server.
  *
- * Pattern mirrors RelayDiscordBot (apps/relay-adapter-discord/src/bot.ts).
- * Connects WhatsAppBridge events to the agent relay server via RelayClient.
+ * Supports all WhatsApp message types: text, media (images/video/docs/stickers),
+ * voice notes, locations, contacts, polls, reactions, forwarding, editing, deletion.
+ * AI vision for received images, WhatsApp-native formatting, auto-reactions.
  */
 
 import { RelayClient } from "@repo/agent-relay-protocol";
@@ -12,16 +13,19 @@ import type {
   ChatDeltaMessage,
   ChatFinalMessage,
 } from "@repo/agent-relay-protocol";
+import type { proto } from "@whiskeysockets/baileys";
 import type { WhatsAppBridge, WhatsAppMessage } from "./whatsapp.js";
 import type { WhatsAppGuard } from "./guard.js";
 import type { VoiceHandler } from "./voice.js";
+import type { MediaHandler } from "./media.js";
 import { detectIntent } from "./orchestrator.js";
+import { formatForWhatsApp } from "./formatter.js";
 
 /** Max chars per WhatsApp message for readability. */
 const MAX_CHUNK_SIZE = 4000;
 
 /** Extract a human-readable harness label from a delegation task file path. */
-function harness_from_path(filePath: string): string | null {
+function harnessFromPath(filePath: string): string | null {
   if (filePath.includes("gemini")) return "Gemini";
   if (filePath.includes("claude")) return "Claude Code";
   if (filePath.includes("opencode")) return "OpenCode";
@@ -38,8 +42,12 @@ export interface RelayWhatsAppBotConfig {
   relayPort?: number;
   apiKey?: string;
   debug?: boolean;
-  /** Optional voice handler for transcription + TTS. Requires OPENAI_API_KEY. */
+  /** Optional voice handler for transcription + TTS. */
   voiceHandler?: VoiceHandler;
+  /** Optional media handler for downloads, vision, stickers. */
+  mediaHandler?: MediaHandler;
+  /** Auto-process received media with AI (default: true). */
+  mediaAutoProcess?: boolean;
 }
 
 export class RelayWhatsAppBot {
@@ -47,21 +55,33 @@ export class RelayWhatsAppBot {
   private bridge: WhatsAppBridge;
   private guard: WhatsAppGuard;
   private voiceHandler: VoiceHandler | null;
+  private mediaHandler: MediaHandler | null;
   private voiceReplyEnabled = false;
+  private mediaAutoProcess: boolean;
+  private formatEnabled = true;
   private processedMessages = new Set<string>();
   private threadId: string | null = null;
   private modelOverride: string | undefined;
   private processing = false;
   private messageQueue: WhatsAppMessage[] = [];
+
   /** Active orchestration job tracking */
   private activeJobId: string | null = null;
   private activeJobLabel: string | null = null;
   private activeJobResultDelivered = false;
+  /** Track task IDs associated with the active job. */
+  private activeTaskIds = new Set<string>();
+
+  /** Track last received/sent messages for !react, !delete, !edit, !forward, !sticker */
+  private lastReceivedMsg: WhatsAppMessage | null = null;
+  private lastSentMsgKey: proto.IMessageKey | null = null;
 
   constructor(config: RelayWhatsAppBotConfig) {
     this.guard = config.guard;
     this.bridge = config.bridge;
     this.voiceHandler = config.voiceHandler ?? null;
+    this.mediaHandler = config.mediaHandler ?? null;
+    this.mediaAutoProcess = config.mediaAutoProcess ?? true;
 
     const relayConfig: RelayClientConfig = {
       host: config.relayHost,
@@ -91,6 +111,21 @@ export class RelayWhatsAppBot {
     // Register message handler on the WhatsApp bridge
     this.bridge.onMessage((msg) => this.handleMessage(msg));
 
+    // Register message update handler for poll votes etc.
+    this.bridge.onMessageUpdate((update) => {
+      if (update.type === "poll_vote") {
+        const votes = update.data?.votes;
+        if (votes) {
+          const summary = votes
+            .map((v: any) => `${v.name}: ${v.voters?.length ?? 0} votes`)
+            .join("\n");
+          this.bridge
+            .sendMessage(`*Poll Results*\n\n${summary}`)
+            .catch(console.error);
+        }
+      }
+    });
+
     // Start the WhatsApp bridge
     await this.bridge.start();
     console.log(
@@ -101,12 +136,15 @@ export class RelayWhatsAppBot {
   async stop(): Promise<void> {
     this.relay.disconnect();
     await this.bridge.stop();
+    if (this.mediaHandler) {
+      this.mediaHandler.destroy();
+    }
     console.log("[relay-whatsapp] Bot stopped");
   }
 
   private async handleMessage(msg: WhatsAppMessage): Promise<void> {
     console.log(
-      `[relay-whatsapp] handleMessage called: id=${msg.id}, content="${msg.content.substring(0, 60)}", fromMe=${msg.fromMe}`,
+      `[relay-whatsapp] handleMessage called: id=${msg.id}, content="${msg.content.substring(0, 60)}", fromMe=${msg.fromMe}, mediaType=${msg.mediaType ?? "none"}`,
     );
 
     // Dedup
@@ -131,39 +169,98 @@ export class RelayWhatsAppBot {
     // Mark the message as read early so UI shows it
     await this.bridge.markRead(msg);
 
-    // ── Voice note handling ─────────────────────────────────────
+    // Track last received message
+    this.lastReceivedMsg = msg;
+
+    // ── Reaction messages — log but don't process as chat ─────
+    if (msg.reaction) {
+      console.log(
+        `[relay-whatsapp] Reaction received: ${msg.reaction.emoji} on ${msg.reaction.targetId}`,
+      );
+      return;
+    }
+
+    // ── Auto-react to acknowledge receipt ─────────────────────
+    if (msg.rawMessage?.key) {
+      await this.bridge.sendReaction(msg.rawMessage.key, "👁️");
+    }
+
+    // ── Voice note handling ───────────────────────────────────
     if (msg.isVoiceNote) {
       if (!this.voiceHandler) {
-        await this.bridge.sendMessage(
+        await this.sendReply(
           "Voice notes received but transcription is not configured.\n" +
-            "Set OPENAI_API_KEY in .env.local to enable voice note support.",
+            "Set GROQ_API_KEY in .env.local to enable voice note support.",
+          msg,
         );
         return;
       }
       if (!msg.audioBuffer) {
-        await this.bridge.sendMessage("Received a voice note but failed to download the audio.");
+        await this.sendReply(
+          "Received a voice note but failed to download the audio.",
+          msg,
+        );
         return;
       }
       try {
         console.log("[relay-whatsapp] Transcribing voice note...");
-        await this.bridge.sendTyping();
+        await this.bridge.sendRecording();
         const transcript = await this.voiceHandler.transcribe(msg.audioBuffer);
         if (!transcript) {
-          await this.bridge.sendMessage("I received your voice note but couldn't make out what was said.");
+          await this.sendReply(
+            "I received your voice note but couldn't make out what was said.",
+            msg,
+          );
           return;
         }
-        console.log(`[relay-whatsapp] Voice note transcribed: "${transcript.substring(0, 80)}"`);
-        // Route transcript as a regular chat message with a prefix
-        await this.handleChat(`[Voice note]: ${transcript}`);
+        console.log(
+          `[relay-whatsapp] Voice note transcribed: "${transcript.substring(0, 80)}"`,
+        );
+        await this.handleChat(`[Voice note]: ${transcript}`, msg);
         await this.processQueue();
         return;
       } catch (err) {
         console.error("[relay-whatsapp] Transcription failed:", err);
-        await this.bridge.sendMessage(
+        await this.sendReply(
           `Failed to transcribe voice note: ${err instanceof Error ? err.message : String(err)}`,
+          msg,
         );
         return;
       }
+    }
+
+    // ── Media message handling ────────────────────────────────
+    if (msg.mediaType && msg.mediaType !== "audio") {
+      await this.handleMediaMessage(msg);
+      await this.processQueue();
+      return;
+    }
+
+    // ── Location message ─────────────────────────────────────
+    if (msg.location) {
+      const { lat, lng, name, address } = msg.location;
+      const locText = name
+        ? `[Location shared]: ${name}${address ? ` — ${address}` : ""} (${lat.toFixed(6)}, ${lng.toFixed(6)})`
+        : `[Location shared]: ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+      await this.handleChat(locText, msg);
+      await this.processQueue();
+      return;
+    }
+
+    // ── Contact message ──────────────────────────────────────
+    if (msg.contactVcard) {
+      const contactText = `[Contact shared]: ${msg.contactName ?? "Unknown contact"}`;
+      await this.handleChat(contactText, msg);
+      await this.processQueue();
+      return;
+    }
+
+    // ── Poll message ─────────────────────────────────────────
+    if (msg.pollName) {
+      const pollText = `[Poll received]: ${msg.pollName}\nOptions: ${msg.pollOptions?.join(", ")}`;
+      await this.handleChat(pollText, msg);
+      await this.processQueue();
+      return;
     }
 
     const content = msg.content.trim();
@@ -181,168 +278,441 @@ export class RelayWhatsAppBot {
       return;
     }
 
-    // ── ! Commands ─────────────────────────────────────────────────
+    // ── ! Commands ───────────────────────────────────────────
     if (content.startsWith("!")) {
       console.log(`[relay-whatsapp] Processing command: ${content}`);
-      await this.handleBangCommand(content);
+      await this.handleBangCommand(content, msg);
       return;
     }
 
-    // ── Intent-based routing ────────────────────────────────────────
+    // ── Intent-based routing ─────────────────────────────────
     const { intent, harness } = detectIntent(content);
     console.log(`[relay-whatsapp] Intent: ${intent}, harness: ${harness}`);
 
     if (intent !== "general" && !this.modelOverride) {
-      // Delegate to the appropriate Discord bot via vault delegation
-      console.log(`[relay-whatsapp] Delegating to ${harness}: "${content.substring(0, 60)}"`);
+      console.log(
+        `[relay-whatsapp] Delegating to ${harness}: "${content.substring(0, 60)}"`,
+      );
       await this.handleDelegation(content, harness);
     } else {
-      // General chat or user has explicitly set a model override
       console.log(
         `[relay-whatsapp] Processing chat message: "${content.substring(0, 60)}"`,
       );
-      await this.handleChat(content);
+      await this.handleChat(content, msg);
     }
 
     // Process any queued messages
     await this.processQueue();
   }
 
-  private async processQueue(): Promise<void> {
-    while (this.messageQueue.length > 0) {
-      const queuedMsg = this.messageQueue.shift()!;
-      const content = queuedMsg.content.trim();
-      if (!content) continue;
+  // ══════════════════════════════════════════════════════════════
+  // MEDIA HANDLING
+  // ══════════════════════════════════════════════════════════════
 
-      console.log(
-        `[relay-whatsapp] Processing queued message: "${content.substring(0, 40)}"`,
+  private async handleMediaMessage(msg: WhatsAppMessage): Promise<void> {
+    const { mediaType, mediaBuffer, mediaMimeType, mediaFilename, mediaSize } = msg;
+    const sizeStr = this.mediaHandler?.formatSize(mediaSize ?? 0) ?? `${mediaSize ?? 0}B`;
+
+    if (!mediaBuffer) {
+      await this.sendReply(
+        `Received ${mediaType} but failed to download it.`,
+        msg,
       );
+      return;
+    }
 
-      if (content.startsWith("!")) {
-        await this.handleBangCommand(content);
-      } else {
-        await this.handleChat(content);
+    switch (mediaType) {
+      case "image": {
+        if (this.mediaAutoProcess && this.mediaHandler?.canDescribe) {
+          await this.bridge.sendTyping();
+          const caption = msg.content ? `\n\nCaption: "${msg.content}"` : "";
+          const prompt = msg.content
+            ? `Describe this image. The sender included this caption: "${msg.content}"`
+            : undefined;
+          const description = await this.mediaHandler.describeImage(
+            mediaBuffer,
+            prompt,
+          );
+          await this.handleChat(
+            `[Image received (${sizeStr})]${caption}\n\nAI description: ${description}`,
+            msg,
+          );
+        } else {
+          const caption = msg.content ? ` — Caption: "${msg.content}"` : "";
+          await this.sendReply(
+            `Image received (${sizeStr})${caption}. AI vision not available.`,
+            msg,
+          );
+        }
+        break;
       }
+
+      case "video": {
+        const caption = msg.content ? ` — Caption: "${msg.content}"` : "";
+        await this.sendReply(
+          `Video received (${sizeStr})${caption}.`,
+          msg,
+        );
+        break;
+      }
+
+      case "document": {
+        const fname = mediaFilename ?? "unknown";
+        const caption = msg.content ? `\nCaption: "${msg.content}"` : "";
+
+        if (
+          this.mediaAutoProcess &&
+          this.mediaHandler &&
+          mediaMimeType
+        ) {
+          const extracted = this.mediaHandler.extractDocumentText(
+            mediaBuffer,
+            mediaMimeType,
+          );
+          if (extracted.startsWith("(Binary")) {
+            await this.handleChat(
+              `[Document: ${fname} (${sizeStr})]${caption}\n\n${extracted}`,
+              msg,
+            );
+          } else {
+            await this.handleChat(
+              `[Document: ${fname} (${sizeStr})]${caption}\n\nContent:\n${extracted}`,
+              msg,
+            );
+          }
+        } else {
+          await this.sendReply(
+            `Document received: ${fname} (${sizeStr})${caption}`,
+            msg,
+          );
+        }
+        break;
+      }
+
+      case "sticker": {
+        await this.sendReply(`Sticker received (${sizeStr}).`, msg);
+        break;
+      }
+
+      default:
+        await this.sendReply(
+          `${mediaType} received (${sizeStr}).`,
+          msg,
+        );
     }
   }
 
-  private async handleBangCommand(content: string): Promise<void> {
+  // ══════════════════════════════════════════════════════════════
+  // COMMANDS
+  // ══════════════════════════════════════════════════════════════
+
+  private async handleBangCommand(
+    content: string,
+    sourceMsg?: WhatsAppMessage,
+  ): Promise<void> {
     const parts = content.slice(1).split(/\s+/);
     const cmd = parts[0].toLowerCase();
     const argStr = parts.slice(1).join(" ").trim();
 
-    let command: string;
+    let command: string | undefined;
     let args: Record<string, unknown> = {};
 
     switch (cmd) {
       case "reset":
       case "new":
-        command = "reset";
         this.threadId = null;
         this.modelOverride = undefined;
         await this.bridge.sendMessage("Session reset.");
         return;
+
       case "model":
         if (argStr) {
           this.modelOverride = argStr;
           await this.bridge.sendMessage(`Model set to: ${argStr}`);
           return;
         }
-        // No arg: ask relay for actual active model name
         command = "model";
         break;
+
       case "opus":
         this.modelOverride = "claude-opus-4-6";
         await this.bridge.sendMessage("Model set to: claude-opus-4-6");
         return;
+
       case "sonnet":
         this.modelOverride = "claude-sonnet-4-6";
         await this.bridge.sendMessage("Model set to: claude-sonnet-4-6");
         return;
+
       case "haiku":
         this.modelOverride = "claude-haiku-4-5-20251001";
-        await this.bridge.sendMessage(
-          "Model set to: claude-haiku-4-5-20251001",
-        );
+        await this.bridge.sendMessage("Model set to: claude-haiku-4-5-20251001");
         return;
+
       case "gemini":
         this.modelOverride = "google/gemini-2.5-flash-preview-05-20";
         await this.bridge.sendMessage(
           "Switched to Gemini 2.5 Flash (via OpenRouter).\n\n" +
-          "_Note: This uses Gemini for general reasoning. For Google Workspace tasks (Docs, Drive, Gmail, Calendar), " +
-          "use the Gemini bot on Discord — it has full authenticated Workspace access._",
+            "_Note: This uses Gemini for general reasoning. For Google Workspace tasks (Docs, Drive, Gmail, Calendar), " +
+            "use the Gemini bot on Discord — it has full authenticated Workspace access._",
         );
         return;
+
       case "status":
       case "hq":
         if (this.activeJobId) {
           const label = this.activeJobLabel ?? "task";
           await this.bridge.sendMessage(
             `*Active task:* ${label}\n` +
-            `Job ID: \`${this.activeJobId}\`\n` +
-            `Status: running — waiting for result`,
+              `Job ID: \`${this.activeJobId}\`\n` +
+              `Status: running — waiting for result`,
           );
-        } else {
-          command = "status";
+          return;
         }
+        command = "status";
         break;
+
       case "memory":
         command = "memory";
         break;
+
       case "threads":
         command = "threads";
         break;
+
       case "search":
         command = "search";
         args.query = argStr;
         break;
+
       case "voice":
-        if (argStr === "on") {
-          if (!this.voiceHandler) {
-            await this.bridge.sendMessage(
-              "Voice reply not available — set OPENAI_API_KEY in .env.local to enable.",
-            );
-          } else {
-            this.voiceReplyEnabled = true;
-            await this.bridge.sendMessage(
-              "Voice reply enabled. I'll respond with voice notes.",
-            );
-          }
-        } else if (argStr === "off") {
-          this.voiceReplyEnabled = false;
-          await this.bridge.sendMessage("Voice reply disabled. Back to text mode.");
-        } else {
-          const voiceStatus = this.voiceReplyEnabled ? "on" : "off";
-          const voiceAvail = this.voiceHandler ? "available" : "not configured (set OPENAI_API_KEY)";
+        await this.handleVoiceCommand(argStr);
+        return;
+
+      // ── New commands ─────────────────────────────────────────
+
+      case "react": {
+        if (!argStr) {
+          await this.bridge.sendMessage("Usage: !react <emoji>\nExample: !react 🔥");
+          return;
+        }
+        const targetMsg = this.lastReceivedMsg;
+        if (!targetMsg?.rawMessage?.key) {
+          await this.bridge.sendMessage("No recent message to react to.");
+          return;
+        }
+        await this.bridge.sendReaction(targetMsg.rawMessage.key, argStr);
+        return;
+      }
+
+      case "poll": {
+        // Format: !poll Question | Option 1 | Option 2 | Option 3
+        const pollParts = argStr.split("|").map((s) => s.trim());
+        if (pollParts.length < 3) {
           await this.bridge.sendMessage(
-            `*Voice settings*\n\nTranscription: ${voiceAvail}\nReply mode: ${voiceStatus}\n\n!voice on — respond with voice notes\n!voice off — respond with text`,
+            "Usage: !poll Question | Option 1 | Option 2 | ...\n" +
+              "Example: !poll Favorite color | Red | Blue | Green",
+          );
+          return;
+        }
+        const pollName = pollParts[0];
+        const pollOptions = pollParts.slice(1);
+        await this.bridge.sendPoll(pollName, pollOptions);
+        return;
+      }
+
+      case "location":
+      case "loc": {
+        // Format: !location <lat> <lng> [name]
+        const locParts = argStr.split(/\s+/);
+        if (locParts.length < 2) {
+          await this.bridge.sendMessage(
+            "Usage: !location <lat> <lng> [name]\n" +
+              "Example: !location 0.3476 32.5825 Kampala",
+          );
+          return;
+        }
+        const lat = parseFloat(locParts[0]);
+        const lng = parseFloat(locParts[1]);
+        if (isNaN(lat) || isNaN(lng)) {
+          await this.bridge.sendMessage("Invalid coordinates. Use decimal numbers.");
+          return;
+        }
+        const locName = locParts.slice(2).join(" ") || undefined;
+        await this.bridge.sendLocation(lat, lng, locName);
+        return;
+      }
+
+      case "forward": {
+        const lastMsg = this.lastReceivedMsg;
+        if (!lastMsg?.rawMessage) {
+          await this.bridge.sendMessage("No recent message to forward.");
+          return;
+        }
+        await this.bridge.forwardMessage(lastMsg.rawMessage);
+        return;
+      }
+
+      case "delete":
+      case "del": {
+        if (!this.lastSentMsgKey) {
+          await this.bridge.sendMessage("No recent bot message to delete.");
+          return;
+        }
+        await this.bridge.deleteMessage(this.lastSentMsgKey);
+        this.lastSentMsgKey = null;
+        return;
+      }
+
+      case "edit": {
+        if (!argStr) {
+          await this.bridge.sendMessage("Usage: !edit <new text>");
+          return;
+        }
+        if (!this.lastSentMsgKey) {
+          await this.bridge.sendMessage("No recent bot message to edit.");
+          return;
+        }
+        await this.bridge.editMessage(this.lastSentMsgKey, argStr);
+        return;
+      }
+
+      case "sticker": {
+        const lastMsg = this.lastReceivedMsg;
+        if (!lastMsg?.mediaBuffer || lastMsg.mediaType !== "image") {
+          await this.bridge.sendMessage(
+            "No recent image to convert. Send an image first, then type !sticker.",
+          );
+          return;
+        }
+        if (!this.mediaHandler) {
+          await this.bridge.sendMessage("Media handler not available (sharp may not be installed).");
+          return;
+        }
+        await this.bridge.sendTyping();
+        const stickerBuf = await this.mediaHandler.prepareSticker(lastMsg.mediaBuffer);
+        if (!stickerBuf) {
+          await this.bridge.sendMessage(
+            "Failed to convert image to sticker. Ensure sharp is installed.",
+          );
+          return;
+        }
+        await this.bridge.sendSticker(stickerBuf);
+        return;
+      }
+
+      case "media": {
+        if (argStr === "on") {
+          this.mediaAutoProcess = true;
+          await this.bridge.sendMessage(
+            "Media auto-processing enabled. Images will be described by AI.",
+          );
+        } else if (argStr === "off") {
+          this.mediaAutoProcess = false;
+          await this.bridge.sendMessage(
+            "Media auto-processing disabled. Media will be acknowledged but not analyzed.",
+          );
+        } else {
+          const status = this.mediaAutoProcess ? "on" : "off";
+          const vision = this.mediaHandler?.canDescribe ? "available" : "not configured";
+          await this.bridge.sendMessage(
+            `*Media settings*\n\nAuto-process: ${status}\nAI vision: ${vision}\n\n!media on — enable AI processing\n!media off — disable`,
           );
         }
         return;
+      }
+
+      case "format": {
+        if (argStr === "on") {
+          this.formatEnabled = true;
+          await this.bridge.sendMessage("WhatsApp formatting enabled.");
+        } else if (argStr === "off") {
+          this.formatEnabled = false;
+          await this.bridge.sendMessage("WhatsApp formatting disabled. Raw text mode.");
+        } else {
+          await this.bridge.sendMessage(
+            `*Format settings*\n\nFormatting: ${this.formatEnabled ? "on" : "off"}\n\n!format on — convert markdown to WhatsApp\n!format off — send raw text`,
+          );
+        }
+        return;
+      }
+
       case "help":
       case "commands":
         await this.bridge.sendMessage(
           "*WhatsApp HQ Commands*\n\n" +
+            "*Chat*\n" +
             "!reset — Start new conversation\n" +
             "!model — Show active model\n" +
             "!model <name> — Set model by ID\n" +
-            "!opus / !sonnet / !haiku — Quick Claude model switch\n" +
-            "!gemini — Switch to Gemini 2.5 Flash\n" +
-            "!status — HQ agent status / active task status\n" +
+            "!opus / !sonnet / !haiku — Quick Claude switch\n" +
+            "!gemini — Switch to Gemini 2.5 Flash\n\n" +
+            "*HQ*\n" +
+            "!status — HQ agent / active task status\n" +
             "!memory — Show memory\n" +
             "!search <query> — Search vault\n" +
+            "!threads — List conversation threads\n\n" +
+            "*Media*\n" +
+            "!sticker — Convert last image to sticker\n" +
+            "!media [on|off] — Toggle AI media processing\n\n" +
+            "*Interactive*\n" +
+            "!react <emoji> — React to last message\n" +
+            "!poll Q | Opt1 | Opt2 — Create a poll\n" +
+            "!location <lat> <lng> [name] — Send location\n\n" +
+            "*Message Ops*\n" +
+            "!forward — Forward last received message\n" +
+            "!delete — Delete last bot message\n" +
+            "!edit <text> — Edit last bot message\n\n" +
+            "*Settings*\n" +
             "!voice [on|off] — Toggle voice note replies\n" +
+            "!format [on|off] — Toggle WhatsApp formatting\n" +
             "!help — This message\n\n" +
-            "_Workspace tasks (calendar, gmail, drive) auto-route to Gemini bot_\n" +
-            "_Coding tasks (git, debug, refactor) auto-route to Claude Code bot_",
+            "_Workspace tasks auto-route to Gemini bot_\n" +
+            "_Coding tasks auto-route to Claude Code bot_",
         );
         return;
+
       default:
         await this.bridge.sendMessage(`Unknown command: !${cmd}. Try !help.`);
         return;
     }
 
-    // Execute relay command
+    // Execute relay command (for commands that need relay)
+    if (command) {
+      await this.executeRelayCommand(command, args);
+    }
+  }
+
+  private async handleVoiceCommand(argStr: string): Promise<void> {
+    if (argStr === "on") {
+      if (!this.voiceHandler || !this.voiceHandler.canSynthesize) {
+        await this.bridge.sendMessage(
+          "Voice reply not available — set OPENAI_API_KEY in .env.local to enable TTS.",
+        );
+      } else {
+        this.voiceReplyEnabled = true;
+        await this.bridge.sendMessage(
+          "Voice reply enabled. I'll respond with voice notes.",
+        );
+      }
+    } else if (argStr === "off") {
+      this.voiceReplyEnabled = false;
+      await this.bridge.sendMessage("Voice reply disabled. Back to text mode.");
+    } else {
+      const voiceStatus = this.voiceReplyEnabled ? "on" : "off";
+      const voiceAvail = this.voiceHandler
+        ? "available"
+        : "not configured (set GROQ_API_KEY)";
+      await this.bridge.sendMessage(
+        `*Voice settings*\n\nTranscription: ${voiceAvail}\nReply mode: ${voiceStatus}\n\n!voice on — respond with voice notes\n!voice off — respond with text`,
+      );
+    }
+  }
+
+  private async executeRelayCommand(
+    command: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
     try {
       console.log(`[relay-whatsapp] Sending command to relay: ${command}`);
       const result = await new Promise<string>((resolve, reject) => {
@@ -352,9 +722,6 @@ export class RelayWhatsAppBot {
           (cmdMsg) => {
             if (cmdMsg.requestId === requestId) {
               unsub();
-              console.log(
-                `[relay-whatsapp] Command result received: success=${cmdMsg.success}`,
-              );
               if (cmdMsg.success) {
                 resolve(cmdMsg.output ?? "Done.");
               } else {
@@ -386,28 +753,54 @@ export class RelayWhatsAppBot {
     }
   }
 
-  /**
-   * Route a task through the HQ agent → Discord harness delegation pipeline.
-   * Submits a job to the HQ agent and tracks result via vault events.
-   * Falls back to direct OpenRouter chat if agent is unavailable.
-   */
+  private async processQueue(): Promise<void> {
+    while (this.messageQueue.length > 0) {
+      const queuedMsg = this.messageQueue.shift()!;
+      const content = queuedMsg.content.trim();
+
+      // Re-handle media messages from queue
+      if (queuedMsg.mediaType && queuedMsg.mediaType !== "audio") {
+        await this.handleMediaMessage(queuedMsg);
+        continue;
+      }
+
+      if (!content) continue;
+
+      console.log(
+        `[relay-whatsapp] Processing queued message: "${content.substring(0, 40)}"`,
+      );
+
+      if (content.startsWith("!")) {
+        await this.handleBangCommand(content, queuedMsg);
+      } else {
+        await this.handleChat(content, queuedMsg);
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // DELEGATION
+  // ══════════════════════════════════════════════════════════════
+
   private async handleDelegation(
     content: string,
     harness: "gemini-cli" | "claude-code" | "any",
   ): Promise<void> {
     this.processing = true;
     const harnessLabel =
-      harness === "gemini-cli" ? "Gemini (Google Workspace)" :
-      harness === "claude-code" ? "Claude Code" : "HQ";
+      harness === "gemini-cli"
+        ? "Gemini (Google Workspace)"
+        : harness === "claude-code"
+          ? "Claude Code"
+          : "HQ";
 
     try {
       await this.bridge.sendMessage(`_Routing to ${harnessLabel}..._`);
 
-      // Submit job to HQ agent with explicit delegation instruction
       const instruction =
         `[WHATSAPP_ORCHESTRATION targetHarness=${harness}]\n\n` +
-        `${content}\n\n` +
-        `Use the delegate_to_relay tool to handle this task via ${harness}. ` +
+        `<user_message>\n${content}\n</user_message>\n\n` +
+        `Use the delegate_to_relay tool to handle the user's request above via ${harness}. ` +
         `Return the complete response to the user.`;
 
       const jobId = await new Promise<string>((resolve, reject) => {
@@ -446,63 +839,82 @@ export class RelayWhatsAppBot {
         `_Task queued (job: \`${jobId.slice(-8)}\`). ${harnessLabel} will respond shortly. Type !status for updates._`,
       );
 
-      // Result is delivered via handleVaultEvent when job:completed fires.
-      // Set a 10-min failsafe — fall back to direct chat if nothing arrives.
+      // 10-min failsafe
       setTimeout(async () => {
         if (this.activeJobId === jobId && !this.activeJobResultDelivered) {
-          console.warn(`[relay-whatsapp] Job ${jobId} timed out — falling back to direct chat`);
+          console.warn(
+            `[relay-whatsapp] Job ${jobId} timed out — falling back to direct chat`,
+          );
           this.activeJobId = null;
           this.activeJobLabel = null;
+          this.activeTaskIds.clear();
           this.processing = false;
-          await this.bridge.sendMessage(`_${harnessLabel} didn't respond in time. Answering directly..._`);
+          await this.bridge.sendMessage(
+            `_${harnessLabel} didn't respond in time. Answering directly..._`,
+          );
           await this.handleChat(content);
         }
       }, 10 * 60 * 1000);
-
     } catch (err) {
       console.error("[relay-whatsapp] Delegation setup error:", err);
       this.activeJobId = null;
       this.activeJobLabel = null;
+      this.activeTaskIds.clear();
       this.processing = false;
-      await this.bridge.sendMessage(`_${harnessLabel} unavailable — answering directly..._`);
+      await this.bridge.sendMessage(
+        `_${harnessLabel} unavailable — answering directly..._`,
+      );
       await this.handleChat(content);
     }
-    // Note: processing stays true until handleVaultEvent delivers the result or timeout fires.
   }
 
-  /** Handle vault file-system events forwarded by the relay server. */
+  // ══════════════════════════════════════════════════════════════
+  // VAULT EVENTS
+  // ══════════════════════════════════════════════════════════════
+
   private async handleVaultEvent(event: string, data?: any): Promise<void> {
-    // Extract identifiers from file path (e.g. "_delegation/claimed/task-wa-123.md")
     const filePath: string = data?.path ?? data?.filePath ?? "";
     const taskIdMatch = filePath.match(/task-([^/]+?)\.md$/);
     const taskId = taskIdMatch?.[1] ?? null;
-
-    // Extract jobId from path (e.g. "_jobs/done/job-1234-abc.md")
     const jobIdMatch = filePath.match(/job-([^/]+?)\.md$/);
     const fileJobId = jobIdMatch ? `job-${jobIdMatch[1]}` : null;
 
     switch (event) {
       case "task:created":
-        if (this.activeJobId) {
-          console.log(`[relay-whatsapp] Task created: ${taskId} for job ${this.activeJobId}`);
+        if (this.activeJobId && taskId) {
+          this.activeTaskIds.add(taskId);
+          console.log(
+            `[relay-whatsapp] Task created: ${taskId} for job ${this.activeJobId}`,
+          );
         }
         break;
 
       case "task:claimed":
-        if (this.activeJobId) {
-          const claimedBy = data?.claimedBy ?? (harness_from_path(filePath) ?? "a bot");
-          await this.bridge.sendMessage(`_${claimedBy} is now working on your request..._`);
+        if (this.activeJobId && taskId && this.activeTaskIds.has(taskId)) {
+          const claimedBy =
+            data?.claimedBy ?? (harnessFromPath(filePath) ?? "a bot");
+          await this.bridge.sendMessage(
+            `_${claimedBy} is now working on your request..._`,
+          );
         }
         break;
 
       case "task:completed":
-        if (this.activeJobId && taskId && !this.activeJobResultDelivered) {
-          console.log(`[relay-whatsapp] Task completed: ${taskId} — fetching result`);
+        if (
+          this.activeJobId &&
+          taskId &&
+          this.activeTaskIds.has(taskId) &&
+          !this.activeJobResultDelivered
+        ) {
+          console.log(
+            `[relay-whatsapp] Task completed: ${taskId} — fetching result`,
+          );
           const result = await this.fetchTaskResult(taskId);
           if (result) {
             this.activeJobResultDelivered = true;
             this.activeJobId = null;
             this.activeJobLabel = null;
+            this.activeTaskIds.clear();
             this.processing = false;
             await this.sendChunked(result);
           }
@@ -510,13 +922,20 @@ export class RelayWhatsAppBot {
         break;
 
       case "job:completed":
-        if (this.activeJobId && (fileJobId === this.activeJobId) && !this.activeJobResultDelivered) {
-          console.log(`[relay-whatsapp] Job completed: ${fileJobId} — fetching result`);
+        if (
+          this.activeJobId &&
+          fileJobId === this.activeJobId &&
+          !this.activeJobResultDelivered
+        ) {
+          console.log(
+            `[relay-whatsapp] Job completed: ${fileJobId} — fetching result`,
+          );
           const result = await this.fetchJobResult(fileJobId);
           if (result) {
             this.activeJobResultDelivered = true;
             this.activeJobId = null;
             this.activeJobLabel = null;
+            this.activeTaskIds.clear();
             this.processing = false;
             await this.sendChunked(result);
           }
@@ -524,18 +943,24 @@ export class RelayWhatsAppBot {
         break;
 
       case "job:failed":
-        if (this.activeJobId && fileJobId === this.activeJobId && !this.activeJobResultDelivered) {
+        if (
+          this.activeJobId &&
+          fileJobId === this.activeJobId &&
+          !this.activeJobResultDelivered
+        ) {
           this.activeJobResultDelivered = true;
           this.activeJobId = null;
           this.activeJobLabel = null;
+          this.activeTaskIds.clear();
           this.processing = false;
-          await this.bridge.sendMessage("_The delegated task failed. Try again or rephrase._");
+          await this.bridge.sendMessage(
+            "_The delegated task failed. Try again or rephrase._",
+          );
         }
         break;
     }
   }
 
-  /** Extract harness label from a delegation task file path. */
   private fetchTaskResult(taskId: string): Promise<string | null> {
     return new Promise((resolve) => {
       const requestId = `wa-tres-${Date.now()}`;
@@ -546,12 +971,19 @@ export class RelayWhatsAppBot {
           resolve(out && out !== "__pending__" ? out : null);
         }
       });
-      this.relay.send({ type: "cmd:execute", command: "task-result", args: { taskId }, requestId });
-      setTimeout(() => { unsub(); resolve(null); }, 8_000);
+      this.relay.send({
+        type: "cmd:execute",
+        command: "task-result",
+        args: { taskId },
+        requestId,
+      });
+      setTimeout(() => {
+        unsub();
+        resolve(null);
+      }, 8_000);
     });
   }
 
-  /** Fetch a completed job's result from the vault. */
   private fetchJobResult(jobId: string): Promise<string | null> {
     return new Promise((resolve) => {
       const requestId = `wa-jres-${Date.now()}`;
@@ -562,12 +994,27 @@ export class RelayWhatsAppBot {
           resolve(out && out !== "__pending__" ? out : null);
         }
       });
-      this.relay.send({ type: "cmd:execute", command: "job-result", args: { jobId }, requestId });
-      setTimeout(() => { unsub(); resolve(null); }, 8_000);
+      this.relay.send({
+        type: "cmd:execute",
+        command: "job-result",
+        args: { jobId },
+        requestId,
+      });
+      setTimeout(() => {
+        unsub();
+        resolve(null);
+      }, 8_000);
     });
   }
 
-  private async handleChat(content: string): Promise<void> {
+  // ══════════════════════════════════════════════════════════════
+  // CHAT
+  // ══════════════════════════════════════════════════════════════
+
+  private async handleChat(
+    content: string,
+    sourceMsg?: WhatsAppMessage,
+  ): Promise<void> {
     this.processing = true;
     const requestId = `wa-chat-${Date.now()}`;
 
@@ -583,7 +1030,7 @@ export class RelayWhatsAppBot {
         }
       }, TYPING_KEEPALIVE_MS);
     } catch {
-      // Non-critical — continue even if typing fails
+      // Non-critical
     }
 
     try {
@@ -596,7 +1043,6 @@ export class RelayWhatsAppBot {
 
       const finalMsg = await new Promise<ChatFinalMessage>(
         (resolve, reject) => {
-          // Register ALL listeners FIRST before sending
           const unsub1 = this.relay.on<ChatDeltaMessage>(
             "chat:delta",
             (deltaMsg) => {
@@ -616,9 +1062,6 @@ export class RelayWhatsAppBot {
             "chat:final",
             (msg) => {
               if (msg.requestId === requestId) {
-                console.log(
-                  `[relay-whatsapp] chat:final received: ${msg.content?.length ?? 0} chars, threadId=${msg.threadId}`,
-                );
                 unsub1();
                 unsub2();
                 unsub3();
@@ -629,10 +1072,6 @@ export class RelayWhatsAppBot {
 
           const unsub3 = this.relay.on("error", (errMsg) => {
             if ((errMsg as any).requestId === requestId) {
-              console.error(
-                `[relay-whatsapp] Error from relay:`,
-                (errMsg as any).message,
-              );
               unsub1();
               unsub2();
               unsub3();
@@ -642,8 +1081,6 @@ export class RelayWhatsAppBot {
             }
           });
 
-          // NOW send the message — listeners are already registered
-          console.log(`[relay-whatsapp] Sending chat:send to relay...`);
           try {
             this.relay.send({
               type: "chat:send",
@@ -652,12 +1089,7 @@ export class RelayWhatsAppBot {
               requestId,
               modelOverride: this.modelOverride,
             });
-            console.log(`[relay-whatsapp] chat:send sent successfully`);
           } catch (sendErr) {
-            console.error(
-              `[relay-whatsapp] Failed to send chat:send:`,
-              sendErr,
-            );
             unsub1();
             unsub2();
             unsub3();
@@ -667,9 +1099,6 @@ export class RelayWhatsAppBot {
 
           // Timeout after 10 minutes
           setTimeout(() => {
-            console.error(
-              `[relay-whatsapp] Request timed out after 10 minutes (received ${deltaCount} deltas, ${buffer.length} chars)`,
-            );
             unsub1();
             unsub2();
             unsub3();
@@ -678,53 +1107,56 @@ export class RelayWhatsAppBot {
         },
       );
 
-      // Save thread ID for conversation continuity
+      // Save thread ID
       if (finalMsg.threadId && !this.threadId) {
         this.threadId = finalMsg.threadId;
-        console.log(
-          `[relay-whatsapp] Thread ID saved: ${this.threadId}`,
-        );
+        console.log(`[relay-whatsapp] Thread ID saved: ${this.threadId}`);
       }
 
-      // Stop typing before sending response
+      // Stop typing before sending
       if (typingInterval) {
         clearInterval(typingInterval);
         typingInterval = null;
       }
       await this.bridge.stopTyping();
 
-      // Send the complete response
+      // Send the response
       const responseText = finalMsg.content || buffer;
       console.log(
-        `[relay-whatsapp] Response ready: ${responseText.length} chars (final: ${finalMsg.content?.length ?? 0}, buffer: ${buffer.length})`,
+        `[relay-whatsapp] Response ready: ${responseText.length} chars`,
       );
 
       if (responseText.trim()) {
         if (this.voiceReplyEnabled && this.voiceHandler) {
           try {
             console.log("[relay-whatsapp] Synthesizing voice reply...");
-            const audioBuffer = await this.voiceHandler.synthesize(responseText);
+            await this.bridge.sendRecording();
+            const audioBuffer =
+              await this.voiceHandler.synthesize(responseText);
             await this.bridge.sendVoiceNote(audioBuffer);
-            console.log("[relay-whatsapp] Voice reply sent");
           } catch (err) {
-            console.error("[relay-whatsapp] TTS failed, falling back to text:", err);
-            await this.sendChunked(responseText);
+            console.error(
+              "[relay-whatsapp] TTS failed, falling back to text:",
+              err,
+            );
+            await this.sendFormattedResponse(responseText, sourceMsg);
           }
         } else {
-          await this.sendChunked(responseText);
+          await this.sendFormattedResponse(responseText, sourceMsg);
         }
-        console.log(`[relay-whatsapp] Response sent to WhatsApp`);
+
+        // Auto-react with ✅ to indicate completion
+        if (sourceMsg?.rawMessage?.key) {
+          await this.bridge.sendReaction(sourceMsg.rawMessage.key, "✅");
+        }
       } else {
-        console.warn(
-          `[relay-whatsapp] Empty response from relay — nothing to send`,
-        );
+        console.warn(`[relay-whatsapp] Empty response from relay`);
         await this.bridge.sendMessage(
           "(No response from agent — the relay server may not have an active agent or LLM backend configured.)",
         );
       }
     } catch (err) {
       console.error("[relay-whatsapp] Chat error:", err);
-      // Stop typing on error
       if (typingInterval) {
         clearInterval(typingInterval);
         typingInterval = null;
@@ -745,10 +1177,77 @@ export class RelayWhatsAppBot {
     }
   }
 
-  /** Split long messages into chunks and send sequentially. */
-  private async sendChunked(text: string): Promise<void> {
+  // ══════════════════════════════════════════════════════════════
+  // SEND HELPERS
+  // ══════════════════════════════════════════════════════════════
+
+  /** Send a response with optional formatting and quoting. */
+  private async sendFormattedResponse(
+    text: string,
+    sourceMsg?: WhatsAppMessage,
+  ): Promise<void> {
+    const formatted = this.formatEnabled ? formatForWhatsApp(text) : text;
+    await this.sendChunked(formatted, sourceMsg);
+  }
+
+  /** Send a reply quoting the original message. */
+  private async sendReply(
+    text: string,
+    sourceMsg?: WhatsAppMessage,
+  ): Promise<void> {
+    const formatted = this.formatEnabled ? formatForWhatsApp(text) : text;
+
+    if (sourceMsg?.rawMessage) {
+      const msgId = await this.bridge.sendMessage(formatted, {
+        quoted: sourceMsg.rawMessage,
+      });
+      if (msgId) {
+        this.lastSentMsgKey = {
+          remoteJid: this.guard.ownerJid,
+          id: msgId,
+          fromMe: true,
+        };
+      }
+    } else {
+      const msgId = await this.bridge.sendMessage(formatted);
+      if (msgId) {
+        this.lastSentMsgKey = {
+          remoteJid: this.guard.ownerJid,
+          id: msgId,
+          fromMe: true,
+        };
+      }
+    }
+  }
+
+  /** Split long messages into chunks and send sequentially. Quotes original on first chunk. */
+  private async sendChunked(
+    text: string,
+    sourceMsg?: WhatsAppMessage,
+  ): Promise<void> {
     if (text.length <= MAX_CHUNK_SIZE) {
-      await this.bridge.sendMessage(text);
+      // Single message — quote original if available
+      if (sourceMsg?.rawMessage) {
+        const msgId = await this.bridge.sendMessage(text, {
+          quoted: sourceMsg.rawMessage,
+        });
+        if (msgId) {
+          this.lastSentMsgKey = {
+            remoteJid: this.guard.ownerJid,
+            id: msgId,
+            fromMe: true,
+          };
+        }
+      } else {
+        const msgId = await this.bridge.sendMessage(text);
+        if (msgId) {
+          this.lastSentMsgKey = {
+            remoteJid: this.guard.ownerJid,
+            id: msgId,
+            fromMe: true,
+          };
+        }
+      }
       return;
     }
 
@@ -762,18 +1261,14 @@ export class RelayWhatsAppBot {
         break;
       }
 
-      // Try to split at a paragraph boundary
       let splitAt = remaining.lastIndexOf("\n\n", MAX_CHUNK_SIZE);
       if (splitAt < MAX_CHUNK_SIZE / 2) {
-        // No good paragraph break — split at last newline
         splitAt = remaining.lastIndexOf("\n", MAX_CHUNK_SIZE);
       }
       if (splitAt < MAX_CHUNK_SIZE / 2) {
-        // No good newline — split at last space
         splitAt = remaining.lastIndexOf(" ", MAX_CHUNK_SIZE);
       }
       if (splitAt < MAX_CHUNK_SIZE / 2) {
-        // Hard split
         splitAt = MAX_CHUNK_SIZE;
       }
 
@@ -784,8 +1279,30 @@ export class RelayWhatsAppBot {
     console.log(
       `[relay-whatsapp] Sending ${chunks.length} chunks (total: ${text.length} chars)`,
     );
-    for (const chunk of chunks) {
-      await this.bridge.sendMessage(chunk);
+
+    for (let i = 0; i < chunks.length; i++) {
+      // Quote original on first chunk only
+      if (i === 0 && sourceMsg?.rawMessage) {
+        const msgId = await this.bridge.sendMessage(chunks[i], {
+          quoted: sourceMsg.rawMessage,
+        });
+        if (msgId) {
+          this.lastSentMsgKey = {
+            remoteJid: this.guard.ownerJid,
+            id: msgId,
+            fromMe: true,
+          };
+        }
+      } else {
+        const msgId = await this.bridge.sendMessage(chunks[i]);
+        if (msgId) {
+          this.lastSentMsgKey = {
+            remoteJid: this.guard.ownerJid,
+            id: msgId,
+            fromMe: true,
+          };
+        }
+      }
     }
   }
 }

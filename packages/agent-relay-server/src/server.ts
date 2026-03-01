@@ -116,7 +116,8 @@ export class RelayServer {
           let msg: RelayMessage;
           try {
             msg = JSON.parse(data as string) as RelayMessage;
-          } catch {
+          } catch (parseErr) {
+            console.error("[relay-server] JSON parse failed:", parseErr);
             ws.send(
               JSON.stringify({
                 type: "error",
@@ -125,6 +126,11 @@ export class RelayServer {
               }),
             );
             return;
+          }
+
+          // Log all non-ping messages for debugging
+          if (msg.type !== "ping") {
+            console.log(`[relay-server] WS message: type=${msg.type}, authenticated=${!!ws.data?.sessionToken}`);
           }
 
           // ── Auth handshake ──────────────────────────────────────
@@ -202,7 +208,17 @@ export class RelayServer {
               break;
 
             case "chat:send":
-              chatHandler.handleChatSend(ws, msg);
+              chatHandler.handleChatSend(ws, msg).catch((err) => {
+                console.error("[relay-server] chat:send handler error:", err);
+                try {
+                  ws.send(JSON.stringify({
+                    type: "error",
+                    code: "CHAT_ERROR",
+                    message: err instanceof Error ? err.message : "Chat handler failed",
+                    requestId: (msg as any).requestId,
+                  }));
+                } catch { /* ws may be closed */ }
+              });
               break;
 
             case "chat:abort":

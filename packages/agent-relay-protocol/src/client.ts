@@ -30,7 +30,7 @@ export interface RelayClientConfig {
   port?: number;
   apiKey: string;
   clientId?: string;
-  clientType?: "web" | "cli" | "discord" | "mobile" | "obsidian";
+  clientType?: "web" | "cli" | "discord" | "mobile" | "obsidian" | "whatsapp";
   autoReconnect?: boolean;
   debug?: boolean;
 }

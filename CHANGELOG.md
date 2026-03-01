@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **WhatsApp Relay Adapter** (`apps/relay-adapter-whatsapp/`): Native WhatsApp self-chat relay using Baileys. This enables routing messages via the relay server and is securely locked to the owner's self-chat via `WHATSAPP_OWNER_JID`.
+- **`hq wa` commands** (`scripts/hq.ts`): New commands for managing the WhatsApp adapter including `hq wa` (foreground), `hq wa reset` (clear thread), `hq wa reauth` (clear credentials), and service management like `hq start whatsapp`.
+- **Relay Server fallback** (`packages/agent-relay-server/src/handlers/chat.ts`): Added OpenRouter fallback logic if the agent bridge is disabled (`AGENT_WS_PORT=0`), enabling direct OpenRouter routing.
 - **`hq init` command** (`scripts/hq.ts`): Full first-time setup in one command — checks prerequisites, installs dependencies, scaffolds vault, creates `.env.local` templates, installs macOS launchd daemons, and adds `hq` to PATH. Supports `--non-interactive` flag for agent-driven installs.
 - **`hq tools` command** (`scripts/hq.ts`): Installs and authenticates Claude CLI, Gemini CLI, and OpenCode. Automatically installs the Google Workspace extension for Gemini and writes the Obsidian MCP server config to `~/.gemini/settings.json`.
 - **`hq setup` command** (`scripts/hq.ts`): Inline vault scaffolding (previously only `scripts/setup.ts`). Creates all `.vault/` directories and seeds system files.
@@ -16,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`homebrew/hq.rb`**: Homebrew formula ready to publish as `brew install calvinmagezi/agent-hq/hq`.
 
 ### Changed
+- **`hq` CLI targets**: Updated `start`, `stop`, `restart`, `logs`, `errors`, `fg`, `status`, and `health` commands to natively support `whatsapp` and `relay-server`.
+- **`install-launchd.sh`**: Added `com.agent-hq.relay-server` and `com.agent-hq.whatsapp` to macOS launchd services installation.
 - **`scripts/hq.ts`** help text: Fixed spacing/alignment bugs; restructured into logical sections with new FIRST-TIME SETUP and BACKGROUND DAEMON groups.
 - **`package.json`** (root): `status` and `setup` scripts now delegate to `hq.ts`; added `tools` and `hq` script aliases.
 - **`README.md`**: Rewrote install, Quick Start, Full Setup, and "Setup for AI Agents" sections to use the `hq` CLI. Added `bunx agent-hq` / Homebrew install instructions and full `hq` CLI reference table.

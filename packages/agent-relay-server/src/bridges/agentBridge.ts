@@ -47,6 +47,11 @@ export class AgentBridge {
    * Silently fails if agent is not running — relay works without it.
    */
   async connect(): Promise<void> {
+    // Port 0 = agent bridge disabled (e.g. hq wa without agent running)
+    if (AGENT_WS_PORT === 0) {
+      console.log("[agent-bridge] Disabled (AGENT_WS_PORT=0) — using OpenRouter fallback");
+      return;
+    }
     try {
       await this.tryConnect();
     } catch {
@@ -146,6 +151,31 @@ export class AgentBridge {
       }),
     );
     return true;
+  }
+
+  /** Check if a request is still pending (no response received yet). */
+  hasPendingRequest(requestId?: string): boolean {
+    if (!requestId) return false;
+    for (const [key, value] of this.pendingStreams) {
+      if (key.startsWith("reqId-") && value === requestId) return true;
+    }
+    return false;
+  }
+
+  /** Clear a pending request (e.g. on timeout). */
+  clearPendingRequest(requestId?: string): void {
+    if (!requestId) return;
+    const toDelete: string[] = [];
+    for (const [key, value] of this.pendingStreams) {
+      if (key.startsWith("reqId-") && value === requestId) {
+        // Found the reqId entry — also clean up the main and threadId entries
+        const id = key.replace("reqId-", "");
+        toDelete.push(key, id, `threadId-${id}`);
+      }
+    }
+    for (const key of toDelete) {
+      this.pendingStreams.delete(key);
+    }
   }
 
   /**

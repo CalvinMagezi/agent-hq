@@ -134,11 +134,26 @@ export class ContextEnricher {
   }
 
   private getPreamble(clientType?: string): string {
+    const defaultModel = process.env.DEFAULT_MODEL ?? "moonshotai/kimi-k2.5";
+
     switch (clientType) {
       case "discord":
         return (
           "You are a personal AI assistant responding via Discord. " +
           "Keep responses concise and conversational. Use markdown formatting compatible with Discord."
+        );
+      case "whatsapp":
+        return (
+          `You are a personal AI assistant (model: ${defaultModel}) responding via WhatsApp. ` +
+          "Keep responses concise and use plain text — WhatsApp renders *bold* and _italic_ but not complex markdown. " +
+          "You have access to the user's knowledge vault (notes, projects, tasks, goals). " +
+          "\n\nCAPABILITIES GUIDANCE:\n" +
+          "- For code editing, git, and complex engineering tasks: recommend the Claude bot on Discord.\n" +
+          "- For Google Workspace tasks (reading/writing Docs, Drive files, Gmail, Calendar, Sheets): " +
+          "recommend the Gemini bot on Discord — it runs the Gemini CLI with full Google Workspace MCP integration and authenticated access.\n" +
+          "- To use Gemini's general intelligence in this WhatsApp chat: the user can type !gemini to switch to the Gemini model.\n" +
+          "- Note: !gemini in WhatsApp uses Gemini via OpenRouter for general reasoning/research — " +
+          "it does NOT have authenticated Google Workspace file access. That requires the Discord Gemini bot."
         );
       case "web":
         return (

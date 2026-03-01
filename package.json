@@ -26,6 +26,7 @@
     "setup": "bun run scripts/hq.ts setup",
     "sync-server": "bun run packages/vault-sync-server/src/index.ts",
     "relay-server": "bun run packages/agent-relay-server/src/index.ts",
+    "whatsapp": "bun --cwd apps/relay-adapter-whatsapp start",
     "plugin:build": "cd plugins/obsidian-vault-sync && bun run build",
     "plugin:install": "bash scripts/install-obsidian-plugin.sh",
     "hq": "bun run scripts/hq.ts"

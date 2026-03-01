@@ -258,6 +258,24 @@ GM
 )"
 install_service_plist "discord-relay" "$PROJECT_DIR/apps/discord-relay" "index.ts" "$RELAY_ENV"
 
+# 4. Relay Server — WebSocket relay for WhatsApp (and future adapters)
+# Disable agent bridge (AGENT_WS_PORT=0) — the relay server routes to OpenRouter directly
+RELAY_SERVER_ENV="    <key>AGENT_WS_PORT</key>
+    <string>0</string>"
+install_service_plist "relay-server" "$PROJECT_DIR/packages/agent-relay-server" "src/index.ts" "$RELAY_SERVER_ENV"
+
+# 5. WhatsApp Adapter — self-chat relay via Baileys
+# Source WhatsApp env for WHATSAPP_OWNER_JID
+source_env_file "$PROJECT_DIR/apps/relay-adapter-whatsapp/.env.local"
+
+if [ -n "$WHATSAPP_OWNER_JID" ]; then
+  WA_ENV="    <key>WHATSAPP_OWNER_JID</key>
+    <string>$WHATSAPP_OWNER_JID</string>"
+  install_service_plist "whatsapp" "$PROJECT_DIR/apps/relay-adapter-whatsapp" "src/index.ts" "$WA_ENV"
+else
+  echo "  Skipped: WhatsApp adapter (WHATSAPP_OWNER_JID not set in apps/relay-adapter-whatsapp/.env.local)"
+fi
+
 echo ""
 
 # ─── Install Scheduled Workflows ─────────────────────────────────────
@@ -281,6 +299,10 @@ echo "Services (KeepAlive — auto-restart):"
 echo "  com.agent-hq.daemon         — Background daemon"
 echo "  com.agent-hq.agent          — HQ agent (job processing)"
 echo "  com.agent-hq.discord-relay  — Discord multi-bot relay"
+echo "  com.agent-hq.relay-server   — WebSocket relay server"
+if [ -n "$WHATSAPP_OWNER_JID" ]; then
+echo "  com.agent-hq.whatsapp       — WhatsApp self-chat adapter"
+fi
 echo ""
 echo "Logs:"
 echo "  Services: ~/Library/Logs/agent-hq-*.log"

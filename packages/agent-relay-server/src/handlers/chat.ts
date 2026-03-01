@@ -45,6 +45,10 @@ export class ChatHandler {
     ws: ServerWebSocket<ClientData>,
     msg: ChatSendMessage,
   ): Promise<void> {
+    console.log(
+      `[chat-handler] chat:send received: requestId=${msg.requestId}, agentBridge=${this.agentBridge.isConnected ? "connected" : "disconnected"}`,
+    );
+
     // Try agent bridge first for real-time streaming
     if (this.agentBridge.isConnected) {
       const routed = this.agentBridge.sendChatMessage(
@@ -54,12 +58,33 @@ export class ChatHandler {
         msg.threadId,
       );
       if (routed) {
-        if (this.debug) console.log("[chat-handler] Routed to agent bridge");
+        console.log("[chat-handler] Routed to agent bridge — waiting for agent response");
+        // Safety timeout: if agent doesn't respond within 30s, fall back to OpenRouter
+        setTimeout(async () => {
+          // Check if the agent bridge still has a pending stream for this request
+          if (this.agentBridge.hasPendingRequest(msg.requestId)) {
+            console.warn("[chat-handler] Agent bridge timeout (30s) — falling back to OpenRouter");
+            this.agentBridge.clearPendingRequest(msg.requestId);
+            try {
+              await this.handleOpenRouterChat(ws, msg);
+            } catch (err) {
+              console.error("[chat-handler] OpenRouter fallback also failed:", err);
+              ws.send(JSON.stringify({
+                type: "error",
+                code: "CHAT_TIMEOUT",
+                message: "Agent did not respond and OpenRouter fallback failed",
+                requestId: msg.requestId,
+              }));
+            }
+          }
+        }, 30_000);
         return;
       }
+      console.log("[chat-handler] Agent bridge connected but sendChatMessage returned false, falling back to OpenRouter");
     }
 
     // Fallback: direct OpenRouter call with vault context
+    console.log(`[chat-handler] Using OpenRouter fallback (key configured: ${OPENROUTER_API_KEY ? "yes" : "NO"})`);
     await this.handleOpenRouterChat(ws, msg);
   }
 
@@ -83,11 +108,12 @@ export class ChatHandler {
     msg: ChatSendMessage,
   ): Promise<void> {
     if (!OPENROUTER_API_KEY) {
+      console.error("[chat-handler] OPENROUTER_API_KEY is not set — cannot process chat");
       ws.send(
         JSON.stringify({
           type: "error",
           code: "NO_API_KEY",
-          message: "OPENROUTER_API_KEY is not configured on the relay server",
+          message: "OPENROUTER_API_KEY is not configured on the relay server. Set it in your environment before starting the relay.",
           requestId: msg.requestId,
         }),
       );
@@ -95,6 +121,7 @@ export class ChatHandler {
     }
 
     const model = msg.modelOverride ?? DEFAULT_MODEL;
+    console.log(`[chat-handler] OpenRouter call: model=${model}, content="${msg.content.substring(0, 60)}..."`);
 
     try {
       // Build enriched system prompt
@@ -188,10 +215,9 @@ export class ChatHandler {
         }),
       );
 
-      if (this.debug) {
-        console.log(`[chat-handler] OpenRouter response (${cleaned.length} chars)`);
-      }
+      console.log(`[chat-handler] OpenRouter response complete (${cleaned.length} chars)`);
     } catch (err) {
+      console.error("[chat-handler] OpenRouter error:", err instanceof Error ? err.message : err);
       ws.send(
         JSON.stringify({
           type: "error",

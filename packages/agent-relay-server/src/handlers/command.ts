@@ -92,12 +92,13 @@ export class CommandHandler {
 
       // ─── Model ──────────────────────────────────────────────────
       case "model": {
+        const defaultModel = process.env.DEFAULT_MODEL ?? "moonshotai/kimi-k2.5";
         const modelArg = args.model as string | undefined;
         if (!modelArg) {
           const current = settings.model as string | undefined;
           return current
             ? `Current model: \`${current}\`\nSet with: model <id>`
-            : `Using default model.\nSet with: model <id>`;
+            : `Using default model: \`${defaultModel}\`\nSet with: model <id>`;
         }
         settings.model = modelArg;
         return `Model set to \`${modelArg}\`.`;

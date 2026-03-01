@@ -23,13 +23,23 @@ const HQ_DIR = path.join(REPO_ROOT, "apps/agent");
 const SCRIPTS_DIR = import.meta.dir;
 const LAUNCH_AGENTS = path.join(os.homedir(), "Library/LaunchAgents");
 
+const WA_DIR = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
+const RELAY_SERVER_DIR = path.join(REPO_ROOT, "packages/agent-relay-server");
+const WA_AUTH_DIR = path.join(WA_DIR, "auth_info");
+
 const AGENT_DAEMON = "com.agent-hq.agent";
 const RELAY_DAEMON = "com.agent-hq.discord-relay";
+const WA_DAEMON = "com.agent-hq.whatsapp";
+const RELAY_SERVER_DAEMON = "com.agent-hq.relay-server";
 
 const AGENT_LOG = path.join(os.homedir(), "Library/Logs/hq-agent.log");
 const AGENT_ERR = path.join(os.homedir(), "Library/Logs/hq-agent.error.log");
 const RELAY_LOG = path.join(os.homedir(), "Library/Logs/discord-relay.log");
 const RELAY_ERR = path.join(os.homedir(), "Library/Logs/discord-relay.error.log");
+const WA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.log");
+const WA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.error.log");
+const RELAY_SERVER_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.log");
+const RELAY_SERVER_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.error.log");
 const DAEMON_LOG = path.join(os.homedir(), "Library/Logs/hq-daemon.log");
 const DAEMON_PID = path.join(os.homedir(), "Library/Logs/hq-daemon.pid");
 
@@ -100,16 +110,37 @@ function relayPid(): string | null {
   return daemonPid(RELAY_DAEMON);
 }
 
+function whatsappPid(): string | null { return daemonPid(WA_DAEMON); }
+function relayServerPid(): string | null { return daemonPid(RELAY_SERVER_DAEMON); }
+
 function uptime(pid: string): string {
   return sh(`ps -o etime= -p ${pid} 2>/dev/null`).trim() || "?";
 }
 
-function resolveTargets(target?: string): Array<"agent" | "relay"> {
-  if (!target || target === "all") return ["agent", "relay"];
+type ServiceTarget = "agent" | "relay" | "whatsapp" | "relay-server";
+
+function resolveTargets(target?: string): ServiceTarget[] {
+  if (!target || target === "all") return ["agent", "relay", "relay-server", "whatsapp"];
   if (target === "agent") return ["agent"];
   if (target === "relay") return ["relay"];
-  warn(`Unknown target "${target}" — expected agent, relay, or all`);
+  if (target === "whatsapp" || target === "wa") return ["whatsapp"];
+  if (target === "relay-server") return ["relay-server"];
+  warn(`Unknown target "${target}" — expected agent, relay, whatsapp, relay-server, or all`);
   return [];
+}
+
+/** Map a service target to its daemon label, PID, labels, and log paths. */
+function serviceInfo(t: ServiceTarget) {
+  switch (t) {
+    case "agent":
+      return { daemon: AGENT_DAEMON, pid: agentPid, label: "HQ Agent", dir: HQ_DIR, log: AGENT_LOG, err: AGENT_ERR };
+    case "relay":
+      return { daemon: RELAY_DAEMON, pid: relayPid, label: "Discord Relay", dir: RELAY_DIR, log: RELAY_LOG, err: RELAY_ERR };
+    case "whatsapp":
+      return { daemon: WA_DAEMON, pid: whatsappPid, label: "WhatsApp", dir: WA_DIR, log: WA_LOG, err: WA_ERR };
+    case "relay-server":
+      return { daemon: RELAY_SERVER_DAEMON, pid: relayServerPid, label: "Relay Server", dir: RELAY_SERVER_DIR, log: RELAY_SERVER_LOG, err: RELAY_SERVER_ERR };
+  }
 }
 
 /**
@@ -136,12 +167,12 @@ function killProcessTree(pid: string, label: string): number {
  * Find ALL instances of a service by scanning process table.
  * Returns unique PIDs matching the service's working directory or entry script.
  */
-function findAllInstances(target: "agent" | "relay"): string[] {
-  const dir = target === "agent" ? HQ_DIR : RELAY_DIR;
+function findAllInstances(target: ServiceTarget): string[] {
+  const svc = serviceInfo(target);
   const pids = new Set<string>();
 
   // Method 1: pgrep by command matching the app directory
-  for (const pid of sh(`pgrep -f "${dir}" 2>/dev/null`).split("\n").filter(Boolean)) {
+  for (const pid of sh(`pgrep -f "${svc.dir}" 2>/dev/null`).split("\n").filter(Boolean)) {
     // Exclude our own hq.ts process
     const cmdline = sh(`ps -o command= -p ${pid} 2>/dev/null`);
     if (cmdline && !cmdline.includes("hq.ts") && !cmdline.includes("scripts/hq")) {
@@ -150,7 +181,7 @@ function findAllInstances(target: "agent" | "relay"): string[] {
   }
 
   // Method 2: lsof to find processes with cwd in the app directory
-  for (const line of sh(`lsof +D "${dir}" -t 2>/dev/null`).split("\n").filter(Boolean)) {
+  for (const line of sh(`lsof +D "${svc.dir}" -t 2>/dev/null`).split("\n").filter(Boolean)) {
     const cmdline = sh(`ps -o command= -p ${line} 2>/dev/null`);
     if (cmdline && !cmdline.includes("hq.ts") && !cmdline.includes("scripts/hq")) {
       pids.add(line);
@@ -164,18 +195,17 @@ function findAllInstances(target: "agent" | "relay"): string[] {
  * Aggressively stop all instances of a target service.
  * Kills daemon PID + children, then sweeps for any remaining instances.
  */
-async function killAllInstances(target: "agent" | "relay"): Promise<number> {
-  const daemon = target === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-  const label = target === "agent" ? "HQ Agent" : "Relay";
+async function killAllInstances(target: ServiceTarget): Promise<number> {
+  const svc = serviceInfo(target);
   let killed = 0;
 
   // 1. Stop via launchctl
-  sh(`launchctl stop "${daemon}" 2>/dev/null`);
+  sh(`launchctl stop "${svc.daemon}" 2>/dev/null`);
 
   // 2. Kill the primary daemon PID and its entire process tree
-  const primaryPid = target === "agent" ? agentPid() : relayPid();
+  const primaryPid = svc.pid();
   if (primaryPid) {
-    killed += killProcessTree(primaryPid, `${label} (primary)`);
+    killed += killProcessTree(primaryPid, `${svc.label} (primary)`);
   }
 
   // 3. Sweep for any remaining instances (duplicates, orphans, zombies)
@@ -183,14 +213,15 @@ async function killAllInstances(target: "agent" | "relay"): Promise<number> {
   const remaining = findAllInstances(target);
   for (const pid of remaining) {
     if (isAlive(pid)) {
-      killed += killProcessTree(pid, `${label} (stale instance)`);
+      killed += killProcessTree(pid, `${svc.label} (stale instance)`);
     }
   }
 
   // 4. Final pkill sweep as a safety net
-  const dir = target === "agent" ? HQ_DIR : RELAY_DIR;
-  sh(`pkill -9 -f "bun.*${dir}/index.ts" 2>/dev/null`);
-  sh(`pkill -9 -f "node.*${dir}/index.ts" 2>/dev/null`);
+  // Use the entry script pattern (index.ts or src/index.ts)
+  const entryPattern = target === "relay-server" ? `${svc.dir}/src/index.ts` : `${svc.dir}/index.ts`;
+  sh(`pkill -9 -f "bun.*${entryPattern}" 2>/dev/null`);
+  sh(`pkill -9 -f "node.*${entryPattern}" 2>/dev/null`);
 
   return killed;
 }
@@ -204,46 +235,60 @@ async function cmdChat(): Promise<void> {
 }
 
 // hq status  |  hq s
-async function cmdStatus(): Promise<void> {
+async function cmdStatus(onlyTarget?: string): Promise<void> {
   console.log(`\n${c.bold}━━━ Agent HQ Status ━━━${c.reset}\n`);
 
-  const ap = agentPid();
-  const rp = relayPid();
-
-  ap
-    ? ok(`HQ Agent   running  ${c.gray}(PID: ${ap}, uptime: ${uptime(ap)})${c.reset}`)
-    : fail("HQ Agent   not running");
-
-  rp
-    ? ok(`Relay      running  ${c.gray}(PID: ${rp}, uptime: ${uptime(rp)})${c.reset}`)
-    : fail("Relay      not running");
+  const targets = onlyTarget ? resolveTargets(onlyTarget) : resolveTargets("all");
+  for (const t of targets) {
+    const svc = serviceInfo(t);
+    const pid = svc.pid();
+    const padded = svc.label.padEnd(14);
+    pid
+      ? ok(`${padded} running  ${c.gray}(PID: ${pid}, uptime: ${uptime(pid)})${c.reset}`)
+      : fail(`${padded} not running`);
+  }
 
   console.log();
 }
 
-// hq start [agent|relay|all]
+// hq start [agent|relay|whatsapp|relay-server|all]
 async function cmdStart(target?: string): Promise<void> {
-  for (const t of resolveTargets(target)) {
-    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-    const label = t === "agent" ? "HQ Agent" : "Relay";
-    const pid = t === "agent" ? agentPid() : relayPid();
+  const targets = resolveTargets(target);
 
-    if (pid) { warn(`${label} already running (PID: ${pid})`); continue; }
+  // If starting whatsapp, ensure relay-server is started first
+  if (targets.includes("whatsapp") && !targets.includes("relay-server")) {
+    const rsPid = relayServerPid();
+    if (!rsPid) {
+      info("Starting relay server (required by WhatsApp adapter)...");
+      sh(`launchctl start "${RELAY_SERVER_DAEMON}" 2>/dev/null`);
+      await sleep(2500);
+      const rsNew = relayServerPid();
+      rsNew
+        ? ok(`Relay Server started (PID: ${rsNew})`)
+        : warn("Relay Server may not have started — WhatsApp may fail to connect");
+    }
+  }
 
-    sh(`launchctl start "${daemon}" 2>/dev/null`);
+  for (const t of targets) {
+    const svc = serviceInfo(t);
+    const pid = svc.pid();
+
+    if (pid) { warn(`${svc.label} already running (PID: ${pid})`); continue; }
+
+    sh(`launchctl start "${svc.daemon}" 2>/dev/null`);
     await sleep(2500);
 
-    const newPid = t === "agent" ? agentPid() : relayPid();
+    const newPid = svc.pid();
     newPid
-      ? ok(`${label} started (PID: ${newPid})`)
-      : fail(`${label} failed to start — run: hq errors ${t}`);
+      ? ok(`${svc.label} started (PID: ${newPid})`)
+      : fail(`${svc.label} failed to start — run: hq errors ${t}`);
   }
 }
 
-// hq stop [agent|relay|all]
+// hq stop [agent|relay|whatsapp|relay-server|all]
 async function cmdStop(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const svc = serviceInfo(t);
 
     const killed = await killAllInstances(t);
     await sleep(500);
@@ -251,7 +296,7 @@ async function cmdStop(target?: string): Promise<void> {
     // Verify nothing survived
     const survivors = findAllInstances(t).filter(p => isAlive(p));
     if (survivors.length > 0) {
-      warn(`${label}: ${survivors.length} process(es) still alive after stop, force-killing...`);
+      warn(`${svc.label}: ${survivors.length} process(es) still alive after stop, force-killing...`);
       for (const pid of survivors) {
         sh(`kill -9 ${pid} 2>/dev/null`);
       }
@@ -259,12 +304,12 @@ async function cmdStop(target?: string): Promise<void> {
     }
 
     killed > 0
-      ? console.log(`⏹️   ${label} stopped (killed ${killed} process${killed > 1 ? "es" : ""})`)
-      : console.log(`⏹️   ${label} stopped (was not running)`);
+      ? console.log(`⏹️   ${svc.label} stopped (killed ${killed} process${killed > 1 ? "es" : ""})`)
+      : console.log(`⏹️   ${svc.label} stopped (was not running)`);
   }
 }
 
-// hq restart [agent|relay|all]  |  hq r
+// hq restart [agent|relay|whatsapp|relay-server|all]  |  hq r
 async function cmdRestart(target?: string): Promise<void> {
   section("Stopping all instances");
   await cmdStop(target);
@@ -281,10 +326,10 @@ async function cmdRestart(target?: string): Promise<void> {
 
   // Final sanity check — ensure nothing survived
   for (const t of resolveTargets(target)) {
-    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const svc = serviceInfo(t);
     const zombies = findAllInstances(t).filter(p => isAlive(p));
     if (zombies.length > 0) {
-      warn(`${label}: ${zombies.length} zombie(s) found, force-killing before start...`);
+      warn(`${svc.label}: ${zombies.length} zombie(s) found, force-killing before start...`);
       for (const pid of zombies) {
         sh(`kill -9 ${pid} 2>/dev/null`);
       }
@@ -298,30 +343,29 @@ async function cmdRestart(target?: string): Promise<void> {
   // Confirm only one instance per target is running
   await sleep(1500);
   for (const t of resolveTargets(target)) {
-    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const svc = serviceInfo(t);
     const allPids = findAllInstances(t).filter(p => isAlive(p));
     if (allPids.length > 1) {
-      warn(`${label}: detected ${allPids.length} instances — killing extras...`);
-      const primary = t === "agent" ? agentPid() : relayPid();
+      warn(`${svc.label}: detected ${allPids.length} instances — killing extras...`);
+      const primary = svc.pid();
       for (const pid of allPids) {
         if (pid !== primary) {
-          killProcessTree(pid, `${label} (duplicate)`);
+          killProcessTree(pid, `${svc.label} (duplicate)`);
         }
       }
     } else if (allPids.length === 1) {
-      ok(`${label}: single instance confirmed (PID ${allPids[0]})`);
+      ok(`${svc.label}: single instance confirmed (PID ${allPids[0]})`);
     }
   }
 }
 
-// hq logs [agent|relay|all] [N]  |  hq l
+// hq logs [agent|relay|whatsapp|relay-server|all] [N]  |  hq l
 async function cmdLogs(target?: string, n = 30): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const file = t === "agent" ? AGENT_LOG : RELAY_LOG;
-    const label = t === "agent" ? "HQ Agent" : "Relay";
-    section(`${label} — last ${n} lines`);
-    if (fs.existsSync(file)) {
-      const lines = fs.readFileSync(file, "utf-8").split("\n").slice(-n).join("\n");
+    const svc = serviceInfo(t);
+    section(`${svc.label} — last ${n} lines`);
+    if (fs.existsSync(svc.log)) {
+      const lines = fs.readFileSync(svc.log, "utf-8").split("\n").slice(-n).join("\n");
       console.log(lines || "(empty)");
     } else {
       dim("(no log file yet)");
@@ -329,14 +373,13 @@ async function cmdLogs(target?: string, n = 30): Promise<void> {
   }
 }
 
-// hq errors [agent|relay|all] [N]  |  hq e
+// hq errors [agent|relay|whatsapp|relay-server|all] [N]  |  hq e
 async function cmdErrors(target?: string, n = 20): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const file = t === "agent" ? AGENT_ERR : RELAY_ERR;
-    const label = t === "agent" ? "HQ Agent" : "Relay";
-    section(`${label} errors — last ${n} lines`);
-    if (fs.existsSync(file)) {
-      const lines = fs.readFileSync(file, "utf-8").split("\n").slice(-n).join("\n");
+    const svc = serviceInfo(t);
+    section(`${svc.label} errors — last ${n} lines`);
+    if (fs.existsSync(svc.err)) {
+      const lines = fs.readFileSync(svc.err, "utf-8").split("\n").slice(-n).join("\n");
       console.log(lines || "(no errors)");
     } else {
       dim("(no error log yet)");
@@ -344,10 +387,10 @@ async function cmdErrors(target?: string, n = 20): Promise<void> {
   }
 }
 
-// hq follow [agent|relay|all]  |  hq f
+// hq follow [agent|relay|whatsapp|relay-server|all]  |  hq f
 async function cmdFollow(target?: string): Promise<void> {
   const targets = resolveTargets(target);
-  const files = targets.map(t => t === "agent" ? AGENT_LOG : RELAY_LOG);
+  const files = targets.map(t => serviceInfo(t).log);
   section(`Following ${targets.join(" + ")} logs (Ctrl+C to stop)`);
   spawnSync("tail", ["-f", ...files], { stdio: "inherit" });
 }
@@ -357,14 +400,15 @@ async function cmdPs(): Promise<void> {
   section("Agent HQ Processes");
   console.log();
 
-  const ap = agentPid();
-  const rp = relayPid();
-  console.log(ap
-    ? `🤖  HQ Agent     PID ${ap} (uptime: ${uptime(ap)})`
-    : `🤖  HQ Agent     not running`);
-  console.log(rp
-    ? `📡  Relay        PID ${rp} (uptime: ${uptime(rp)})`
-    : `📡  Relay        not running`);
+  const icons: Record<ServiceTarget, string> = { agent: "🤖", relay: "📡", "relay-server": "🔌", whatsapp: "📱" };
+  for (const t of resolveTargets("all")) {
+    const svc = serviceInfo(t);
+    const pid = svc.pid();
+    const padded = svc.label.padEnd(14);
+    console.log(pid
+      ? `${icons[t]}  ${padded} PID ${pid} (uptime: ${uptime(pid)})`
+      : `${icons[t]}  ${padded} not running`);
+  }
 
   console.log();
 
@@ -414,20 +458,23 @@ async function cmdHealth(): Promise<void> {
   bunV ? ok(`Bun: ${bunV}`) : fail("Bun: not found");
 
   section("Daemons");
-  const ap = path.join(LAUNCH_AGENTS, `${AGENT_DAEMON}.plist`);
-  const rp = path.join(LAUNCH_AGENTS, `${RELAY_DAEMON}.plist`);
-  fs.existsSync(ap) ? ok("HQ Agent daemon: installed") : warn("HQ Agent daemon: not installed  (run: hq install agent)");
-  fs.existsSync(rp) ? ok("Relay daemon: installed") : warn("Relay daemon: not installed     (run: hq install relay)");
+  for (const t of resolveTargets("all")) {
+    const svc = serviceInfo(t);
+    const plistPath = path.join(LAUNCH_AGENTS, `${svc.daemon}.plist`);
+    const padded = `${svc.label} daemon:`.padEnd(26);
+    fs.existsSync(plistPath)
+      ? ok(`${padded} installed`)
+      : warn(`${padded} not installed  (run: hq install)`);
+  }
 
-  section("Recent HQ Agent Logs");
-  dim(fs.existsSync(AGENT_LOG)
-    ? fs.readFileSync(AGENT_LOG, "utf-8").split("\n").slice(-5).join("\n")
-    : "(no logs yet)");
-
-  section("Recent Relay Logs");
-  dim(fs.existsSync(RELAY_LOG)
-    ? fs.readFileSync(RELAY_LOG, "utf-8").split("\n").slice(-5).join("\n")
-    : "(no logs yet)");
+  section("Recent Logs");
+  for (const t of resolveTargets("all")) {
+    const svc = serviceInfo(t);
+    console.log(`${c.bold}${svc.label}:${c.reset}`);
+    dim(fs.existsSync(svc.log)
+      ? fs.readFileSync(svc.log, "utf-8").split("\n").slice(-3).join("\n")
+      : "(no logs yet)");
+  }
 
   console.log();
 }
@@ -530,8 +577,15 @@ async function cmdClean(): Promise<void> {
   ok("Clean complete");
 }
 
-// hq fg [agent|relay]
+// hq fg [agent|relay|whatsapp]
 async function cmdFg(target = "agent"): Promise<void> {
+  if (target === "whatsapp") {
+    const waDir = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
+    console.log("Starting WhatsApp relay in foreground (Ctrl+C to stop)...");
+    spawnSync(process.execPath, ["src/index.ts"], { cwd: waDir, stdio: "inherit" });
+    return;
+  }
+
   const isAgent = target === "agent";
   const daemon = isAgent ? AGENT_DAEMON : RELAY_DAEMON;
   const dir = isAgent ? HQ_DIR : RELAY_DIR;
@@ -544,6 +598,173 @@ async function cmdFg(target = "agent"): Promise<void> {
 
   console.log(`Starting ${label} in foreground (Ctrl+C to stop)...`);
   spawnSync(process.execPath, ["index.ts"], { cwd: dir, stdio: "inherit" });
+}
+
+// hq whatsapp — start relay server (if needed) + WhatsApp adapter in foreground
+async function cmdWhatsApp(): Promise<void> {
+  const { spawn } = await import("child_process");
+  const fs = await import("fs");
+  const RELAY_PORT = 18900;
+  const RELAY_SERVER_DIR = path.join(REPO_ROOT, "packages/agent-relay-server");
+  const WA_DIR = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
+  const VAULT_PATH = process.env.VAULT_PATH || path.join(REPO_ROOT, ".vault");
+
+  // ── Load env vars from .env.local files so relay server gets them ─
+  const relayEnv: Record<string, string> = { ...process.env as Record<string, string>, VAULT_PATH };
+  // Check for OPENROUTER_API_KEY in common .env.local locations
+  for (const envDir of [
+    WA_DIR,
+    path.join(REPO_ROOT, "apps/agent"),
+    REPO_ROOT,
+  ]) {
+    const envFile = path.join(envDir, ".env.local");
+    try {
+      if (fs.existsSync(envFile)) {
+        const lines = fs.readFileSync(envFile, "utf-8").split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const eqIdx = trimmed.indexOf("=");
+          if (eqIdx === -1) continue;
+          const key = trimmed.substring(0, eqIdx).trim();
+          const val = trimmed.substring(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
+          // Only set if not already in env (shell env takes priority)
+          if (!relayEnv[key]) {
+            relayEnv[key] = val;
+          }
+        }
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // ── Check if relay server is already listening ──────────────────
+  let relayAlive = false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${RELAY_PORT}/health`);
+    relayAlive = res.ok;
+  } catch {
+    // Not reachable
+  }
+
+  let relayChild: ReturnType<typeof spawn> | null = null;
+
+  if (relayAlive) {
+    ok(`Relay server already running on port ${RELAY_PORT}`);
+  } else {
+    info(`Starting relay server on port ${RELAY_PORT}...`);
+    relayChild = spawn(process.execPath, ["src/index.ts"], {
+      cwd: RELAY_SERVER_DIR,
+      stdio: ["ignore", "pipe", "pipe"],
+      // Disable agent bridge — hq wa doesn't start the HQ agent,
+      // so routing to port 5678 would black-hole messages.
+      env: { ...relayEnv, AGENT_WS_PORT: "0" },
+    });
+
+    // Give it a moment to bind the port
+    relayChild.stdout?.on("data", (data: Buffer) => {
+      const line = data.toString().trim();
+      if (line) console.log(`${c.gray}[relay-server] ${line}${c.reset}`);
+    });
+    relayChild.stderr?.on("data", (data: Buffer) => {
+      const line = data.toString().trim();
+      if (line) console.error(`${c.red}[relay-server] ${line}${c.reset}`);
+    });
+
+    // Wait for the relay server to become ready (up to 10s)
+    let ready = false;
+    for (let i = 0; i < 20; i++) {
+      await sleep(500);
+      try {
+        const res = await fetch(`http://127.0.0.1:${RELAY_PORT}/health`);
+        if (res.ok) { ready = true; break; }
+      } catch { /* not yet */ }
+    }
+
+    if (ready) {
+      ok("Relay server started");
+    } else {
+      warn("Relay server may not be ready — proceeding anyway");
+    }
+  }
+
+  // ── Start WhatsApp adapter (async so relay server logs keep flowing) ─
+  console.log();
+  info("Starting WhatsApp adapter (Ctrl+C to stop both)...");
+  console.log();
+
+  const waChild = spawn(process.execPath, ["src/index.ts"], {
+    cwd: WA_DIR,
+    stdio: "inherit",
+    env: { ...process.env },
+  });
+
+  // Handle Ctrl+C — kill both processes
+  const cleanup = () => {
+    waChild.kill("SIGTERM");
+    if (relayChild) relayChild.kill("SIGTERM");
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  // Wait for the WhatsApp adapter to exit
+  const waExitCode = await new Promise<number>((resolve) => {
+    waChild.on("exit", (code) => resolve(code ?? 0));
+  });
+
+  // ── Cleanup: kill relay server if we started it ─────────────────
+  if (relayChild) {
+    info("Stopping relay server...");
+    relayChild.kill("SIGTERM");
+    // Give it a moment to shutdown gracefully
+    await sleep(1000);
+    if (!relayChild.killed) relayChild.kill("SIGKILL");
+    ok("Relay server stopped");
+  }
+
+  process.exit(waExitCode);
+}
+
+// hq wa reset — clear WhatsApp conversation thread
+async function cmdWaReset(): Promise<void> {
+  const VAULT_PATH = process.env.VAULT_PATH || path.join(REPO_ROOT, ".vault");
+  const threadFile = path.join(VAULT_PATH, "_threads", "wa-self.md");
+
+  if (fs.existsSync(threadFile)) {
+    fs.rmSync(threadFile);
+    ok("WhatsApp conversation thread cleared");
+  } else {
+    info("No WhatsApp thread file found (already clean)");
+  }
+
+  console.log();
+  info("If the adapter is running, send !reset in WhatsApp or restart the service:");
+  dim("  hq restart whatsapp");
+}
+
+// hq wa reauth — clear WhatsApp credentials and force QR re-scan
+async function cmdWaReauth(): Promise<void> {
+  // Stop the service first
+  const waPid = whatsappPid();
+  if (waPid) {
+    info("Stopping WhatsApp adapter...");
+    await cmdStop("whatsapp");
+  }
+
+  // Delete the auth directory
+  if (fs.existsSync(WA_AUTH_DIR)) {
+    fs.rmSync(WA_AUTH_DIR, { recursive: true });
+    ok("WhatsApp auth credentials cleared");
+  } else {
+    info("No auth credentials found (already clean)");
+  }
+
+  console.log();
+  ok("Auth cleared. To re-authenticate:");
+  dim("  1. Run: hq wa");
+  dim("  2. Scan the QR code with WhatsApp");
+  dim("  3. Once connected, Ctrl+C and run: hq start whatsapp");
 }
 
 // hq install-cli
@@ -1077,10 +1298,18 @@ ${c.bold}CHAT${c.reset}
 
 ${c.bold}SERVICE MANAGEMENT${c.reset}
   hq status                     Status of all services                 (alias: s)
-  hq start  [agent|relay|all]   Start services
-  hq stop   [agent|relay|all]   Stop services
-  hq restart [agent|relay|all]  Restart services                       (alias: r)
-  hq fg     [agent|relay]       Run a service in the foreground
+  hq start  [target]            Start services                         targets: agent, relay, whatsapp, relay-server, all
+  hq stop   [target]            Stop services
+  hq restart [target]           Restart services                       (alias: r)
+  hq fg     [target]            Run a service in the foreground
+
+${c.bold}WHATSAPP${c.reset}
+  hq wa                         Start WhatsApp in foreground (for QR scan / debug)
+  hq wa reset                   Clear conversation thread
+  hq wa reauth                  Clear credentials & re-scan QR         (alias: clear-auth)
+  hq wa status                  WhatsApp service status
+  hq wa logs [N]                WhatsApp adapter logs
+  hq wa errors [N]              WhatsApp adapter error logs
 
 ${c.bold}BACKGROUND DAEMON${c.reset}
   hq daemon start               Start the background daemon
@@ -1089,9 +1318,9 @@ ${c.bold}BACKGROUND DAEMON${c.reset}
   hq daemon logs [N]            Last N daemon log lines (default 40)
 
 ${c.bold}LOGS${c.reset}
-  hq logs   [agent|relay|all] [N]  Last N log lines (default 30)       (alias: l)
-  hq errors [agent|relay|all] [N]  Last N error lines (default 20)     (alias: e)
-  hq follow [agent|relay|all]      Live-tail logs                      (alias: f)
+  hq logs   [target] [N]        Last N log lines (default 30)          (alias: l)
+  hq errors [target] [N]        Last N error lines (default 20)        (alias: e)
+  hq follow [target]            Live-tail logs                         (alias: f)
 
 ${c.bold}PROCESSES & HEALTH${c.reset}
   hq ps                         All managed processes                  (alias: p)
@@ -1100,8 +1329,8 @@ ${c.bold}PROCESSES & HEALTH${c.reset}
   hq clean                      Remove stale locks & orphans           (alias: c)
 
 ${c.bold}DAEMONS (macOS launchd auto-start)${c.reset}
-  hq install   [agent|relay|all]  Install launchd daemons
-  hq uninstall [agent|relay|all]  Remove launchd daemons
+  hq install   [target]         Install launchd daemons
+  hq uninstall [target]         Remove launchd daemons
 
 ${c.bold}COO MANAGEMENT${c.reset}
   hq coo install <url>          Install a COO orchestrator
@@ -1112,13 +1341,13 @@ ${c.bold}COO MANAGEMENT${c.reset}
 
 ${c.bold}EXAMPLES${c.reset}
   hq                            Start chatting
-  hq init                       First-time setup (includes tool install + auth)
-  hq init --non-interactive     Agent-driven install (no prompts)
-  hq tools                      Install/re-auth CLI tools only
+  hq wa                         WhatsApp foreground (scan QR, debug)
+  hq start whatsapp             Start WhatsApp as background service
+  hq start all                  Start everything
+  hq wa reset                   Clear WhatsApp conversation
+  hq wa reauth                  Wipe WhatsApp auth, re-scan QR
   hq restart                    Restart everything
-  hq restart relay              Restart just the relay
-  hq daemon start               Start background scheduler
-  hq logs relay 50              Last 50 relay log lines
+  hq logs whatsapp 50           Last 50 WhatsApp log lines
   hq follow                     Live-tail all logs
   hq health                     Full system health report
 `);
@@ -1168,6 +1397,15 @@ switch (cmd) {
 
   case "fg":
     await cmdFg(arg1); break;
+
+  case "whatsapp": case "wa":
+    if (arg1 === "reset") { await cmdWaReset(); }
+    else if (arg1 === "reauth" || arg1 === "clear-auth") { await cmdWaReauth(); }
+    else if (arg1 === "status") { await cmdStatus("whatsapp"); }
+    else if (arg1 === "logs") { await cmdLogs("whatsapp", arg2 ? parseInt(arg2, 10) : 30); }
+    else if (arg1 === "errors") { await cmdErrors("whatsapp", arg2 ? parseInt(arg2, 10) : 20); }
+    else { await cmdWhatsApp(); }
+    break;
 
   case "install":
     await cmdInstall(arg1); break;

@@ -63,3 +63,8 @@ yarn-error.log*
 
 # Custom commands (private, local-only Discord relay commands)
 **/custom-commands/
+
+# WhatsApp Baileys auth session (machine-specific credentials)
+**/auth_info/
+
+logs

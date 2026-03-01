@@ -1,0 +1,24 @@
+{
+  "name": "relay-adapter-whatsapp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@repo/agent-relay-protocol": "workspace:*",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "dotenv": "^16.4.5",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3"
+  }
+}

@@ -18,6 +18,10 @@ import { Type } from "@sinclair/typebox";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { VaultClient } from "@repo/vault-client";
 import type { SearchResult, SystemContext } from "@repo/vault-client";
+import type { AgentRole } from "./agentRoles.js";
+import { buildRolePromptSection } from "./agentRoles.js";
+import type { ExecutionMode } from "./executionModes.js";
+import { getModeConfig } from "./executionModes.js";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -30,6 +34,8 @@ interface PromptBuildRequest {
     targetHarness?: HarnessType;
     projectName?: string;
     additionalContext?: string;
+    role?: AgentRole;
+    executionMode?: ExecutionMode;
 }
 
 interface BuiltPrompt {
@@ -264,18 +270,34 @@ export class PromptBuilder {
         const projectName = request.projectName || detectProjectName(request.rawInstruction, this.vaultPath);
         const contextSources: string[] = [];
 
+        // Apply execution mode budget multiplier
+        const modeMultiplier = request.executionMode
+            ? getModeConfig(request.executionMode).contextBudgetMultiplier
+            : 1.0;
+
+        const scaledBudget = {
+            preferences: Math.round(BUDGET.preferences * modeMultiplier),
+            memory: Math.round(BUDGET.memory * modeMultiplier),
+            searchResults: Math.round(BUDGET.searchResults * modeMultiplier),
+            projectContext: Math.round(BUDGET.projectContext * modeMultiplier),
+            pinnedNotes: Math.round(BUDGET.pinnedNotes * modeMultiplier),
+        };
+
+        // In "quick" mode, skip search and pinned notes entirely
+        const skipSearch = request.executionMode === "quick";
+
         // Gather context in parallel
         const [systemContext, searchResults, projectContext] = await Promise.all([
             this.vault.getAgentContext().catch(() => null),
-            this.vault.searchNotes(request.rawInstruction, 3).catch(() => [] as SearchResult[]),
+            skipSearch ? Promise.resolve([] as SearchResult[]) : this.vault.searchNotes(request.rawInstruction, 3).catch(() => [] as SearchResult[]),
             projectName ? this.getProjectContext(projectName) : Promise.resolve(null),
         ]);
 
-        // ── Build context sections ────────────────────────────────
+        // ── Build context sections (budgets scaled by execution mode) ──
 
         let preferencesSection = "";
         if (systemContext?.preferences) {
-            preferencesSection = truncate(systemContext.preferences, BUDGET.preferences);
+            preferencesSection = truncate(systemContext.preferences, scaledBudget.preferences);
             contextSources.push("PREFERENCES.md");
         }
 
@@ -284,7 +306,7 @@ export class PromptBuilder {
             memorySection = extractRelevantMemoryLines(
                 systemContext.memory,
                 request.rawInstruction,
-                BUDGET.memory,
+                scaledBudget.memory,
             );
             if (memorySection) contextSources.push("MEMORY.md");
         }
@@ -299,17 +321,17 @@ export class PromptBuilder {
 
         let projectSection = "";
         if (projectContext) {
-            projectSection = truncate(projectContext, BUDGET.projectContext);
+            projectSection = truncate(projectContext, scaledBudget.projectContext);
             contextSources.push(`Projects/${projectName}`);
         }
 
         let pinnedSection = "";
-        if (systemContext?.pinnedNotes && systemContext.pinnedNotes.length > 0) {
+        if (!skipSearch && systemContext?.pinnedNotes && systemContext.pinnedNotes.length > 0) {
             const pinned = systemContext.pinnedNotes
                 .slice(0, 3)
                 .map(n => `- **${n.title}**: ${truncate(n.content || "", 120)}`)
                 .join("\n");
-            pinnedSection = truncate(pinned, BUDGET.pinnedNotes);
+            pinnedSection = truncate(pinned, scaledBudget.pinnedNotes);
             contextSources.push("Pinned Notes");
         }
 
@@ -356,6 +378,12 @@ export class PromptBuilder {
 
         // Philosophy 5: Context Efficiency — constraints are compact
         sections.push(`## Constraints\n${harnessConstraints}`);
+
+        // Agent Role (if specified) — injects role identity, behavior, and output format
+        if (request.role) {
+            sections.push(buildRolePromptSection(request.role));
+            contextSources.push(`Role: ${request.role}`);
+        }
 
         const instruction = sections.join("\n\n");
 
@@ -416,6 +444,19 @@ const BuildPromptSchema = Type.Object({
         Type.Literal("gemini-cli"),
         Type.Literal("any"),
     ], { description: "Target relay bot type — used for harness-specific constraints" })),
+    role: Type.Optional(Type.Union([
+        Type.Literal("coder"),
+        Type.Literal("researcher"),
+        Type.Literal("reviewer"),
+        Type.Literal("planner"),
+        Type.Literal("devops"),
+        Type.Literal("workspace"),
+    ], { description: "Agent role — injects role-specific system prompt, behavior guidance, and output format." })),
+    executionMode: Type.Optional(Type.Union([
+        Type.Literal("quick"),
+        Type.Literal("standard"),
+        Type.Literal("thorough"),
+    ], { description: "Execution mode — affects context budget. Quick uses 0.5x budget, thorough uses 2x." })),
     projectName: Type.Optional(Type.String({
         description: "Project name to pull context from Notebooks/Projects/{name}/. Auto-detected if omitted.",
     })),
@@ -451,6 +492,8 @@ Use the returned instruction as the 'instruction' field in delegate_to_relay.`,
                 rawInstruction: args.rawInstruction,
                 taskType: args.taskType as TaskType | undefined,
                 targetHarness: args.targetHarness as HarnessType | undefined,
+                role: args.role as AgentRole | undefined,
+                executionMode: args.executionMode as ExecutionMode | undefined,
                 projectName: args.projectName,
                 additionalContext: args.additionalContext,
             });

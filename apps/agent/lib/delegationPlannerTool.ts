@@ -20,6 +20,14 @@ const ProposedTaskSchema = Type.Object({
         Type.Literal("gemini-cli"),
         Type.Literal("any"),
     ], { description: "Which relay bot type will execute this task" }),
+    role: Type.Optional(Type.Union([
+        Type.Literal("coder"),
+        Type.Literal("researcher"),
+        Type.Literal("reviewer"),
+        Type.Literal("planner"),
+        Type.Literal("devops"),
+        Type.Literal("workspace"),
+    ], { description: "Agent role for this task — affects system prompt and behavior" })),
     deliverable: Type.String({ description: "Concrete output: file path created, schema added, page built, etc." }),
     dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that must complete before this one" })),
 });
@@ -45,6 +53,7 @@ function formatDispatchPlan(args: {
         taskId: string;
         description: string;
         targetHarness: string;
+        role?: string;
         deliverable: string;
         dependsOn?: string[];
     }>;
@@ -78,7 +87,8 @@ function formatDispatchPlan(args: {
         const depNote = t.dependsOn && t.dependsOn.length > 0
             ? ` (after: ${t.dependsOn.join(", ")})`
             : "";
-        lines.push(`${i + 1}. [${t.targetHarness}] ${t.description}${depNote}`);
+        const roleNote = t.role ? ` / ${t.role}` : "";
+        lines.push(`${i + 1}. [${t.targetHarness}${roleNote}] ${t.description}${depNote}`);
         lines.push(`   -> Deliverable: ${t.deliverable}`);
     }
     lines.push("");

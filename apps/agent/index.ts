@@ -17,7 +17,7 @@ import { loadDiscordConfig, type DiscordBot } from "./discordBot.js";
 import { shouldFlushMemory, executeMemoryFlush, createFlushState, DEFAULT_FLUSH_OPTIONS } from "./lib/memoryFlush.js";
 import { logger } from "./lib/logger.js";
 import { ChatSessionManager } from "./lib/chatSession.js";
-import { buildModelConfig } from "./lib/modelConfig.js";
+import { buildModelConfig, getContextWindow } from "./lib/modelConfig.js";
 import { recordTaskUsage } from "./lib/cfoRouter.js";
 import { AgentWsServer } from "./lib/wsServer.js";
 import { PtyManager } from "./lib/ptyManager.js";
@@ -26,6 +26,7 @@ import { createDispatchParallelTasksTool } from "./lib/orchestrationTools.js";
 import {
     initDelegationTools,
     setCurrentJob,
+    setCurrentExecutionMode,
     setDelegationNotifiers,
     DelegateToRelayTool,
     CheckRelayHealthTool,
@@ -40,6 +41,9 @@ import { BuildPromptTool, initPromptBuilder } from "./lib/promptBuilder.js";
 import { DraftDispatchPlanTool } from "./lib/delegationPlannerTool.js";
 import { TraceDB } from "@repo/vault-client/trace";
 import { TraceReporter } from "./lib/traceReporter.js";
+import { detectExecutionMode, parseExplicitMode, getModeConfig } from "./lib/executionModes.js";
+import { getFallbackChain, executeWithFallback, classifyError } from "./lib/modelFallback.js";
+import { createDefaultRegistry, createHQGatewayTools } from "@repo/hq-tools";
 
 dotenv.config({ path: ".env.local" });
 
@@ -100,6 +104,14 @@ initDelegationTools(VAULT_PATH);
 
 // Initialize prompt builder for context-enriched delegations
 initPromptBuilder(VAULT_PATH);
+
+// Initialize HQ tool registry (2-tool gateway pattern — fixed context footprint)
+const hqToolRegistry = createDefaultRegistry();
+const hqGatewayContext = {
+    vaultPath: VAULT_PATH,
+    openrouterApiKey: OPENROUTER_API_KEY,
+    geminiApiKey: GEMINI_API_KEY,
+};
 
 // ── Task Classification ─────────────────────────────────────────────
 // Keywords that indicate the task is HQ-internal (not delegatable)
@@ -801,7 +813,17 @@ async function handleJob(job: any) {
 
         // Classify task: HQ-internal (uses local tools) vs delegatable (uses relay orchestration)
         const isHqTask = isHqInternalTask(job.instruction);
-        logger.info("Task classification", { jobId: job._id, isHqInternal: isHqTask, instruction: job.instruction.substring(0, 80) });
+
+        // Detect execution mode from instruction (quick/standard/thorough)
+        const { mode: explicitMode, cleanInstruction } = parseExplicitMode(job.instruction);
+        const executionMode = explicitMode ?? detectExecutionMode(job.instruction);
+        setCurrentExecutionMode(executionMode);
+        logger.info("Task classification", {
+            jobId: job._id,
+            isHqInternal: isHqTask,
+            executionMode,
+            instruction: job.instruction.substring(0, 80),
+        });
 
         // Create distributed trace for orchestration flows
         if (!isHqTask) {
@@ -831,6 +853,13 @@ async function handleJob(job: any) {
         // Set current job context for delegation tools (with trace context)
         setCurrentJob(job._id, job.userId, traceId, jobSpanId);
 
+        // HQ gateway tools — scoped to current job's security profile
+        const hqJobCtx = {
+            ...hqGatewayContext,
+            securityProfile: job.securityProfile as any ?? "standard",
+        };
+        const [hqDiscoverTool, hqCallTool] = createHQGatewayTools(hqToolRegistry, hqJobCtx) as [AgentTool<any>, AgentTool<any>];
+
         const rawTools: AgentTool<any>[] = isHqTask
             ? [
                 // HQ-internal: full local tools + relay monitoring
@@ -846,6 +875,8 @@ async function handleJob(job: any) {
                 CheckRelayHealthTool,
                 GetLiveTaskOutputTool,
                 DelegateToRelayTool,
+                hqDiscoverTool,
+                hqCallTool,
             ]
             : [
                 // Delegatable: orchestration tools only (no local execution)
@@ -863,6 +894,8 @@ async function handleJob(job: any) {
                 AggregateResultsTool,
                 CancelDelegationTool,
                 GetTraceStatusTool,
+                hqDiscoverTool,
+                hqCallTool,
             ];
 
         if (job.type === "rpc") {
@@ -979,7 +1012,8 @@ async function handleJob(job: any) {
         };
 
         // --- Event Listeners ---
-        session.subscribe(async (event: AgentSessionEvent) => {
+        // Named so it can be re-subscribed to a fallback session on model failure
+        const onSessionEvent = async (event: AgentSessionEvent) => {
             const eventType = event.type as string;
 
             // 1. Stream to Console and accumulate for web
@@ -1002,7 +1036,7 @@ async function handleJob(job: any) {
 
                 // Log context usage for observability
                 try {
-                    const usage = session.getContextUsage?.();
+                    const usage = currentSession.getContextUsage?.();
                     if (usage && usage.percent != null) {
                         void adapter.addJobLog({
                             jobId: job._id,
@@ -1032,7 +1066,7 @@ async function handleJob(job: any) {
                 toolCallCount++;
                 if (toolCallCount > MAX_TOOL_CALLS) {
                     console.error("\n🛑 SAFETY BREAKER: Too many tool calls. Aborting to save tokens.");
-                    await session.abort();
+                    await currentSession.abort();
                     throw new Error("Safety breaker: Maximum tool call limit reached.");
                 }
             } else if (eventType === "tool_execution_end") {
@@ -1051,26 +1085,26 @@ async function handleJob(job: any) {
                         if (latestJob.status === "cancelled") {
                             console.log("\n❌ Job cancelled by user");
                             logger.info("Job cancelled by user", { jobId: job._id });
-                            await session.abort();
+                            await currentSession.abort();
                             throw new Error("Job cancelled by user");
                         }
                         // Mid-job steering
                         if (latestJob.steeringMessage) {
                             console.log(`\n🎯 Steering: ${latestJob.steeringMessage}`);
                             logger.info("Job steered", { jobId: job._id, message: latestJob.steeringMessage });
-                            await session.steer(latestJob.steeringMessage);
+                            await currentSession.steer(latestJob.steeringMessage);
                             // Clear steering message
                             await adapter.clearSteeringMessage({
                                 jobId: job._id,
                             });
                         }
                         // Mid-job thinking level change
-                        if (latestJob.thinkingLevel && typeof session.setThinkingLevel === "function") {
-                            const currentLevel = session.thinkingLevel;
+                        if (latestJob.thinkingLevel && typeof currentSession.setThinkingLevel === "function") {
+                            const currentLevel = currentSession.thinkingLevel;
                             if (currentLevel !== latestJob.thinkingLevel) {
                                 console.log(`\n🧠 Thinking level: ${currentLevel} → ${latestJob.thinkingLevel}`);
                                 logger.info("Thinking level changed mid-job", { jobId: job._id, from: currentLevel, to: latestJob.thinkingLevel });
-                                session.setThinkingLevel(latestJob.thinkingLevel);
+                                currentSession.setThinkingLevel(latestJob.thinkingLevel);
                             }
                         }
                     }
@@ -1101,9 +1135,10 @@ async function handleJob(job: any) {
 
             // Periodic State Sync (Throttled)
             if (eventType === "message_stop" || eventType === "tool_execution_end") {
-                await syncSessionState(session, job._id);
+                await syncSessionState(currentSession, job._id);
             }
-        });
+        };
+        session.subscribe(onSessionEvent);
 
         // Build prompt
         const preloadedSkills = isHqTask ? SkillLoader.loadAllSkills() : "";
@@ -1139,8 +1174,14 @@ async function handleJob(job: any) {
                 : "No previous conversation.";
             historyBlock = `\n# CONVERSATION HISTORY\n${historyText}\n`;
         }
-        // Context Budget Accounting (~40k chars limit to avoid token bloat)
-        const MAX_VAR_CONTEXT_CHARS = 40000;
+        // Context Budget Accounting — scale by model context window and execution mode
+        // Use 10% of the model's context window in chars (4 chars/token est.), bounded 20K–120K
+        const modelContextTokens = getContextWindow(effectiveModelId);
+        const modeMultiplier = getModeConfig(executionMode).contextBudgetMultiplier;
+        const MAX_VAR_CONTEXT_CHARS = Math.min(
+            Math.max(Math.floor(modelContextTokens * 0.1 * modeMultiplier * 4), 20000),
+            120000,
+        );
         if (recentActivityContext.length > 20000) {
             recentActivityContext = "...[TRUNCATED]\n" + recentActivityContext.slice(-20000); // Keep most recent
         }
@@ -1295,9 +1336,34 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
             }, job.type || "background", job.instruction);
         }
 
-        // Run the Agent — Pi SDK handles retry internally via SettingsManager.retry config
-        // auto_retry_start/auto_retry_end events are emitted and logged via the event handler
-        await session.prompt(promptText);
+        // Run the Agent with cross-model fallback on transient provider failures.
+        // Pi SDK handles same-model retries internally (SettingsManager.retry).
+        // executeWithFallback handles provider-level failures (503, rate limit, network).
+        const fallbackChain = getFallbackChain(effectiveModelId);
+        await executeWithFallback(
+            fallbackChain,
+            async (modelId) => {
+                // First attempt reuses the already-created session
+                if (modelId === effectiveModelId) {
+                    await session.prompt(promptText);
+                    return;
+                }
+                // Fallback: rebuild session with new model and re-subscribe event handler
+                logger.warn(`Falling back to model: ${modelId}`, { previousModel: effectiveModelId, jobId: job._id });
+                await adapter.addJobLog({ jobId: job._id, type: "warning", content: `Model ${effectiveModelId} failed — retrying with ${modelId}` });
+                const fallbackModel = buildModelConfig({ modelId, geminiApiKey: GEMINI_API_KEY, openrouterApiKey: OPENROUTER_API_KEY });
+                const { session: fallbackSession } = await createAgentSession({ ...sessionOptions, model: fallbackModel });
+                currentSession = fallbackSession;
+                if (profileToolNames !== "*") {
+                    try { fallbackSession.setActiveToolsByName(profileToolNames); } catch (_) {}
+                }
+                fallbackSession.subscribe(onSessionEvent);
+                await fallbackSession.prompt(promptText);
+            },
+            (fromModel, toModel, error) => {
+                logger.warn(`Model ${fromModel} failed (${classifyError(error)}), trying ${toModel}`, { error: error.message, jobId: job._id });
+            },
+        );
 
         // Final completion message for interactive mode
         if (job.type === "interactive" && !currentAgentText.toLowerCase().includes("completed")) {
@@ -1383,6 +1449,7 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
     } catch (error: any) {
         const errorMsg = error.message || String(error);
         const isCancellation = errorMsg.includes("cancelled by user");
+        const errorClass = isCancellation ? "abort" : classifyError(error);
 
         if (isCancellation) {
             // Cancelled jobs: don't backoff, don't handover, just mark as cancelled
@@ -1393,8 +1460,8 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
             // Status already set to "cancelled" by the cancelJob mutation
             await adapter.addJobLog({ jobId: job._id, type: "info", content: "Job cancelled by user" });
         } else {
-            console.error("\n❌ Error:", errorMsg);
-            logger.error("Job failed", { jobId: job._id, error: errorMsg });
+            console.error(`\n❌ Error [${errorClass}]:`, errorMsg);
+            logger.error("Job failed", { jobId: job._id, error: errorMsg, errorClass });
             lastJobStatus = "failed";
             lastJobUpdatedAt = Date.now();
 

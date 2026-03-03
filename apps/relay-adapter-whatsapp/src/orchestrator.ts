@@ -6,7 +6,8 @@
  */
 
 export type OrchestrationIntent = "workspace" | "coding" | "general";
-export type TargetHarness = "gemini-cli" | "claude-code" | "any";
+export type TargetHarness = "gemini-cli" | "claude-code" | "opencode" | "any";
+export type DetectedRole = "workspace" | "coder" | "researcher" | "reviewer" | "planner" | "devops";
 
 const WORKSPACE_PATTERNS = [
   /\bcalendar\b/i,
@@ -54,27 +55,33 @@ const CODING_PATTERNS = [
 
 /**
  * Classify a message to determine which harness should handle it.
- * Returns the intent type and the target harness.
+ * Returns the intent type, target harness, and suggested agent role.
  */
 export function detectIntent(message: string): {
   intent: OrchestrationIntent;
   harness: TargetHarness;
+  role: DetectedRole;
 } {
   const lower = message.toLowerCase();
 
   // Check workspace patterns first (more specific)
   for (const pattern of WORKSPACE_PATTERNS) {
     if (pattern.test(lower)) {
-      return { intent: "workspace", harness: "gemini-cli" };
+      return { intent: "workspace", harness: "gemini-cli", role: "workspace" };
     }
   }
 
-  // Check coding patterns
+  // Check coding patterns — sub-classify into more specific roles
   for (const pattern of CODING_PATTERNS) {
     if (pattern.test(lower)) {
-      return { intent: "coding", harness: "claude-code" };
+      let role: DetectedRole = "coder";
+      if (/\b(review|audit|validate|security)\b/i.test(lower)) role = "reviewer";
+      else if (/\b(plan|design|architect|spec)\b/i.test(lower)) role = "planner";
+      else if (/\b(deploy|ci|cd|docker|infra|server)\b/i.test(lower)) role = "devops";
+      else if (/\b(research|investigate|explain|compare)\b/i.test(lower)) role = "researcher";
+      return { intent: "coding", harness: "claude-code", role };
     }
   }
 
-  return { intent: "general", harness: "any" };
+  return { intent: "general", harness: "any", role: "coder" };
 }

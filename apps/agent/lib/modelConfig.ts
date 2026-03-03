@@ -10,11 +10,45 @@
  */
 
 import { getModel } from "@mariozechner/pi-ai";
+export { getFallbackChain } from "./modelFallback.js";
 
 export interface BuildModelConfigOptions {
     modelId: string;
     geminiApiKey?: string;
     openrouterApiKey?: string;
+}
+
+// ── Known Model Context Windows ──────────────────────────────────────
+
+export interface ModelSpecs {
+    contextWindow: number;
+    maxOutputTokens: number;
+    provider: "google" | "anthropic" | "openai" | "openrouter";
+}
+
+const MODEL_SPECS: Record<string, ModelSpecs> = {
+    "gemini-2.5-flash": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    "gemini-2.5-flash-lite": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    "gemini-2.5-pro": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    "claude-opus-4-6": { contextWindow: 200000, maxOutputTokens: 32000, provider: "anthropic" },
+    "claude-sonnet-4-6": { contextWindow: 200000, maxOutputTokens: 16000, provider: "anthropic" },
+    "claude-haiku-4-5": { contextWindow: 200000, maxOutputTokens: 8192, provider: "anthropic" },
+    "gpt-5": { contextWindow: 200000, maxOutputTokens: 32768, provider: "openai" },
+    "gpt-4.1-mini": { contextWindow: 1048576, maxOutputTokens: 32768, provider: "openai" },
+};
+
+/** Get known specs for a model ID. Returns undefined for unknown models. */
+export function getModelSpecs(modelId: string): ModelSpecs | undefined {
+    // Try exact match
+    if (MODEL_SPECS[modelId]) return MODEL_SPECS[modelId];
+    // Try stripping provider prefix
+    const bareId = modelId.includes("/") ? modelId.split("/").pop()! : modelId;
+    return MODEL_SPECS[bareId];
+}
+
+/** Get context window size for a model (defaults to 200K if unknown). */
+export function getContextWindow(modelId: string): number {
+    return getModelSpecs(modelId)?.contextWindow ?? 200000;
 }
 
 /**

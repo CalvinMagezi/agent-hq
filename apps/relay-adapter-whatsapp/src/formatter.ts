@@ -29,17 +29,18 @@ export function formatForWhatsApp(markdown: string): string {
   let result = markdown;
 
   // Preserve code blocks from being modified
+  // Use null-byte delimiters so placeholders can't be matched by any markdown regex
   const codeBlocks: string[] = [];
   result = result.replace(/```[\s\S]*?```/g, (match) => {
     codeBlocks.push(match);
-    return `__CODEBLOCK_${codeBlocks.length - 1}__`;
+    return `\x00CB${codeBlocks.length - 1}\x00`;
   });
 
   // Preserve inline code
   const inlineCodes: string[] = [];
   result = result.replace(/`[^`]+`/g, (match) => {
     inlineCodes.push(match);
-    return `__INLINECODE_${inlineCodes.length - 1}__`;
+    return `\x00IC${inlineCodes.length - 1}\x00`;
   });
 
   // Headings: # Heading → *HEADING*
@@ -69,10 +70,10 @@ export function formatForWhatsApp(markdown: string): string {
   result = result.replace(/^[\t ]*[-*]\s+/gm, "• ");
 
   // Restore inline code
-  result = result.replace(/__INLINECODE_(\d+)__/g, (_, idx) => inlineCodes[parseInt(idx)]);
+  result = result.replace(/\x00IC(\d+)\x00/g, (_, idx) => inlineCodes[parseInt(idx)]);
 
   // Restore code blocks
-  result = result.replace(/__CODEBLOCK_(\d+)__/g, (_, idx) => codeBlocks[parseInt(idx)]);
+  result = result.replace(/\x00CB(\d+)\x00/g, (_, idx) => codeBlocks[parseInt(idx)]);
 
   return result.trim();
 }

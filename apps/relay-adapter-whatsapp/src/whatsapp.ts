@@ -161,8 +161,9 @@ export class WhatsAppBridge {
       logger: this.logger,
       printQRInTerminal: false, // We handle QR ourselves
       generateHighQualityLinkPreview: this.linkPreviews,
-      // First line of defense: tell Baileys to ignore all JIDs except owner
-      shouldIgnoreJid: (jid: string) => !this.guard.isAllowedChat(jid),
+      // Do NOT use shouldIgnoreJid — it filters Baileys' internal protocol
+      // messages and prevents message delivery. Security filtering is done
+      // in handleMessagesUpsert via the WhatsAppGuard check.
     });
 
     // ── Auth credential persistence ────────────────────────────────
@@ -535,11 +536,20 @@ export class WhatsAppBridge {
     if (connection === "close") {
       this.connected = false;
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      // connectionReplaced (440/515): another device (e.g. WhatsApp Desktop) took the slot
+      const isReplaced = statusCode === DisconnectReason.connectionReplaced;
 
-      if (shouldReconnect && !this.reconnecting) {
+      if (isLoggedOut) {
+        console.error(
+          "[whatsapp] Logged out. Please delete auth_info/ and restart to re-authenticate.",
+        );
+        process.exit(1);
+      } else if (!this.reconnecting) {
+        // Back off longer when replaced by another client (WhatsApp Desktop conflict)
+        const delay = isReplaced ? 15_000 : 3_000;
         console.log(
-          `[whatsapp] Connection closed (code: ${statusCode}). Reconnecting in 3s...`,
+          `[whatsapp] Connection closed (code: ${statusCode}${isReplaced ? " — replaced by another client" : ""}). Reconnecting in ${delay / 1000}s...`,
         );
         this.reconnecting = true;
         setTimeout(() => {
@@ -547,12 +557,7 @@ export class WhatsAppBridge {
           this.start().catch((err) => {
             console.error("[whatsapp] Reconnection failed:", err);
           });
-        }, 3000);
-      } else if (!shouldReconnect) {
-        console.error(
-          "[whatsapp] Logged out. Please delete auth_info/ and restart to re-authenticate.",
-        );
-        process.exit(1);
+        }, delay);
       }
     }
 

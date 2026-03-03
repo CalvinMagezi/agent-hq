@@ -50,6 +50,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/hq.ts` — `confirmInstall()`**: Prompt passed as `$1` positional argument to `bash -c` instead of string interpolation, eliminating bash injection via prompt text.
 - **`packages/discord-core/src/fileAttachments.ts`**: Added `isPathAllowed()` path confinement before reading any AI-referenced file. Permitted roots: `VAULT_PATH` and `tmpdir()`. Dotfiles rejected unconditionally, blocking prompt-injection exfiltration of `~/.ssh`, `~/.aws`, etc.
 
+### Added (2026-03-03)
+- **Agent roles system** (`apps/agent/lib/agentRoles.ts`): New `AgentRole` type (`worker | researcher | reviewer | planner | devops | coder | workspace`) formalising agent specialisations across the delegation pipeline.
+- **Execution modes** (`apps/agent/lib/executionModes.ts`): `ExecutionMode` type (`quick | standard | thorough`) with per-mode context budget multipliers (0.5× / 1× / 2×). Exposed as optional params on `delegate_to_relay` tool.
+- **Model fallback** (`apps/agent/lib/modelFallback.ts`): Automatic model fallback chain helper for graceful degradation when primary model is unavailable.
+- **WhatsApp `[FILE:]` attachment sending** (`apps/relay-adapter-whatsapp/src/bot.ts`): `extractAndSendFiles()` method strips `[FILE: /path | name]` markers from AI responses and sends each file as a WhatsApp image, matching the existing Discord attachment pattern.
+- **`opencode` harness target** (`apps/relay-adapter-whatsapp/src/orchestrator.ts`): Added `"opencode"` as an explicit `TargetHarness` value.
+- **Granular `DetectedRole`** (`apps/relay-adapter-whatsapp/src/orchestrator.ts`): `detectIntent()` now returns a `DetectedRole` alongside intent/harness — sub-classifies coding messages into `reviewer | planner | devops | researcher | coder`.
+- **Agent skill bridge** (`apps/agent/skills.ts`): `SKILLS_DIR`, `getAutoLoadedSkillContent`, `buildSkillsSummary` are now re-exported from `@repo/hq-tools`, keeping skills centrally managed and available to all agents.
+- **`@repo/hq-tools` workspace dependency** (`apps/agent/package.json`): Added `"@repo/hq-tools": "workspace:*"` so the agent can consume shared tools from the monorepo package.
+- **`packages/hq-tools/`**: New shared package consolidating skill loading utilities and shared tooling across agents.
+
+### Changed (2026-03-03)
+- **WhatsApp formatter placeholders** (`apps/relay-adapter-whatsapp/src/formatter.ts`): Replaced `__CODEBLOCK_N__` / `__INLINECODE_N__` string sentinels with null-byte delimiters (`\x00CBN\x00` / `\x00ICN\x00`) to prevent regex false-positives when code blocks contain double-underscores.
+- **WhatsApp reconnect logic** (`apps/relay-adapter-whatsapp/src/whatsapp.ts`): Separate handling for `loggedOut` (hard exit) vs `connectionReplaced` (15s back-off vs 3s). Removed `shouldIgnoreJid` hook from Baileys config — security filtering moved entirely to `handleMessagesUpsert` via `WhatsAppGuard` to prevent Baileys internal protocol message loss.
+- **`governance.ts` / `index.ts`** — `role` and `executionMode` args threaded through to delegation calls.
+- **`promptBuilder.ts`** — Updated to consume role and executionMode for context-aware prompt construction.
+- **`modelConfig.ts`** — Model configuration updated to support new fallback chain.
+- **`SkillLoader` methods** (`apps/agent/skills.ts`): `getAutoLoadedContent()` and `loadAllSkills()` now delegate to `@repo/hq-tools`, trimming ~40 lines of duplicate logic.
+
+### Fixed (2026-03-03)
+- **WhatsApp Desktop conflict**: `connectionReplaced` disconnect code now triggers a 15s delay (vs 3s) before reconnect, reducing rapid reconnection loops when WhatsApp Desktop is also active.
+- **`load_skill` error message**: Now lists available skills when the requested skill is not found, aiding discoverability.
+
 ### Added (prior entries)
 - **`hq` CLI — unified entry point** (`scripts/hq.ts`): All management now flows through the single `hq` command. New commands: `hq init` (full first-time setup), `hq tools` (install + authenticate Claude CLI / Gemini CLI / OpenCode), `hq setup` (vault scaffold), `hq daemon start|stop|status|logs` (background daemon management).
 - **`hq init --non-interactive`**: Fully scriptable, agent-runnable install — checks prerequisites, clones repo, installs deps, sets up CLI tools, scaffolds vault, creates `.env.local` templates, installs launchd daemons, and adds `hq` to PATH. No prompts required.

@@ -31,6 +31,8 @@ export const PROFILE_TOOL_NAMES: Record<SecurityProfile, string[] | "*"> = {
         "list_skills", "load_skill",
         // Delegation: read-only monitoring
         "check_relay_health", "check_delegation_status", "get_live_task_output",
+        // HQ tool gateway (hq_call respects requiresWriteAccess internally)
+        "hq_discover", "hq_call",
     ],
     [SecurityProfile.STANDARD]: [
         "read", "ls", "find", "grep", "local_context", "mcp_bridge", "heartbeat",
@@ -39,6 +41,8 @@ export const PROFILE_TOOL_NAMES: Record<SecurityProfile, string[] | "*"> = {
         "chat_with_user", "draft_dispatch_plan", "build_prompt",
         // Delegation: full orchestration
         "delegate_to_relay", "check_relay_health", "check_delegation_status", "aggregate_results",
+        // HQ tool gateway
+        "hq_discover", "hq_call",
     ],
     [SecurityProfile.GUARDED]: "*",
     [SecurityProfile.ADMIN]: "*",

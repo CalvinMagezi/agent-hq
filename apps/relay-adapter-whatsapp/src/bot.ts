@@ -6,6 +6,9 @@
  * AI vision for received images, WhatsApp-native formatting, auto-reactions.
  */
 
+import { readFileSync, writeFileSync, existsSync } from "fs";
+import { basename } from "path";
+import { LocalHarness } from "./localHarness.js";
 import { RelayClient } from "@repo/agent-relay-protocol";
 import type {
   RelayClientConfig,
@@ -20,6 +23,9 @@ import type { VoiceHandler } from "./voice.js";
 import type { MediaHandler } from "./media.js";
 import { detectIntent } from "./orchestrator.js";
 import { formatForWhatsApp } from "./formatter.js";
+import { SessionOrchestrator } from "./sessionOrchestrator.js";
+
+type ActiveHarness = "auto" | "claude-code" | "opencode" | "gemini-cli";
 
 /** Max chars per WhatsApp message for readability. */
 const MAX_CHUNK_SIZE = 4000;
@@ -48,6 +54,8 @@ export interface RelayWhatsAppBotConfig {
   mediaHandler?: MediaHandler;
   /** Auto-process received media with AI (default: true). */
   mediaAutoProcess?: boolean;
+  /** Path to JSON file for persisting bot state (harness preference). Default: .whatsapp-state.json */
+  stateFile?: string;
 }
 
 export class RelayWhatsAppBot {
@@ -62,6 +70,10 @@ export class RelayWhatsAppBot {
   private processedMessages = new Set<string>();
   private threadId: string | null = null;
   private modelOverride: string | undefined;
+  private activeHarness: ActiveHarness = "auto";
+  private stateFile: string;
+  private localHarness: LocalHarness;
+  private sessionOrchestrator: SessionOrchestrator;
   private processing = false;
   private messageQueue: WhatsAppMessage[] = [];
 
@@ -82,6 +94,10 @@ export class RelayWhatsAppBot {
     this.voiceHandler = config.voiceHandler ?? null;
     this.mediaHandler = config.mediaHandler ?? null;
     this.mediaAutoProcess = config.mediaAutoProcess ?? true;
+    this.stateFile = config.stateFile ?? ".whatsapp-state.json";
+    this.loadState();
+    this.localHarness = new LocalHarness(".whatsapp-harness-sessions.json");
+    this.sessionOrchestrator = new SessionOrchestrator(this.localHarness);
 
     const relayConfig: RelayClientConfig = {
       host: config.relayHost,
@@ -285,20 +301,28 @@ export class RelayWhatsAppBot {
       return;
     }
 
-    // ── Intent-based routing ─────────────────────────────────
-    const { intent, harness } = detectIntent(content);
-    console.log(`[relay-whatsapp] Intent: ${intent}, harness: ${harness}`);
-
-    if (intent !== "general" && !this.modelOverride) {
+    // ── Harness routing ──────────────────────────────────────
+    if (this.activeHarness !== "auto") {
       console.log(
-        `[relay-whatsapp] Delegating to ${harness}: "${content.substring(0, 60)}"`,
+        `[relay-whatsapp] Local harness ${this.activeHarness}: "${content.substring(0, 60)}"`,
       );
-      await this.handleDelegation(content, harness);
+      await this.handleLocalHarness(content, this.activeHarness);
     } else {
-      console.log(
-        `[relay-whatsapp] Processing chat message: "${content.substring(0, 60)}"`,
-      );
-      await this.handleChat(content, msg);
+      // Intent-based auto routing
+      const { intent, harness, role } = detectIntent(content);
+      console.log(`[relay-whatsapp] Intent: ${intent}, harness: ${harness}, role: ${role}`);
+
+      if (intent !== "general" && !this.modelOverride) {
+        console.log(
+          `[relay-whatsapp] Delegating to ${harness} (${role}): "${content.substring(0, 60)}"`,
+        );
+        await this.handleDelegation(content, harness, role);
+      } else {
+        console.log(
+          `[relay-whatsapp] Processing chat message: "${content.substring(0, 60)}"`,
+        );
+        await this.handleChat(content, msg);
+      }
     }
 
     // Process any queued messages
@@ -422,7 +446,12 @@ export class RelayWhatsAppBot {
       case "new":
         this.threadId = null;
         this.modelOverride = undefined;
-        await this.bridge.sendMessage("Session reset.");
+        if (this.activeHarness !== "auto") {
+          this.localHarness.resetSession(this.activeHarness);
+        }
+        await this.bridge.sendMessage(
+          `Session reset.\n\n_Active harness: ${this.harnessLabel(this.activeHarness)}_`,
+        );
         return;
 
       case "model":
@@ -457,6 +486,20 @@ export class RelayWhatsAppBot {
             "use the Gemini bot on Discord — it has full authenticated Workspace access._",
         );
         return;
+
+      case "sessions": {
+        const active = this.sessionOrchestrator.getActiveSessions();
+        if (active.length === 0) {
+          await this.bridge.sendMessage("_No active orchestrated sessions._");
+        } else {
+          const lines = active.map((s) => {
+            const elapsedMin = Math.round((Date.now() - s.startedAt) / 60_000);
+            return `• *${s.harness}* [${s.state}] — ${elapsedMin}m — \`${s.id.slice(-8)}\``;
+          });
+          await this.bridge.sendMessage(`*Active sessions:*\n${lines.join("\n")}`);
+        }
+        return;
+      }
 
       case "status":
       case "hq":
@@ -637,16 +680,61 @@ export class RelayWhatsAppBot {
         return;
       }
 
+      case "harness":
+      case "switch": {
+        const HARNESS_ALIASES: Record<string, ActiveHarness> = {
+          claude: "claude-code",
+          "claude-code": "claude-code",
+          opencode: "opencode",
+          oc: "opencode",
+          gemini: "gemini-cli",
+          "gemini-cli": "gemini-cli",
+          auto: "auto",
+        };
+        if (!argStr) {
+          await this.bridge.sendMessage(
+            `*Active harness:* ${this.harnessLabel(this.activeHarness)}\n\n` +
+              `!harness claude — pin to Claude Code\n` +
+              `!harness opencode — pin to OpenCode\n` +
+              `!harness gemini — pin to Gemini CLI\n` +
+              `!harness auto — restore intent-based routing`,
+          );
+          return;
+        }
+        const target = HARNESS_ALIASES[argStr.toLowerCase()];
+        if (!target) {
+          await this.bridge.sendMessage(
+            `Unknown harness: "${argStr}"\n\nAvailable: claude, opencode, gemini, auto`,
+          );
+          return;
+        }
+        this.activeHarness = target;
+        this.saveState();
+        const desc =
+          target === "auto"
+            ? "Intent-based routing restored — workspace tasks → Gemini, coding tasks → Claude Code."
+            : `All messages will now route to *${this.harnessLabel(target)}* until you change it with !harness auto.`;
+        await this.bridge.sendMessage(
+          `✓ Switched to *${this.harnessLabel(target)}*\n\n${desc}`,
+        );
+        return;
+      }
+
       case "help":
       case "commands":
         await this.bridge.sendMessage(
           "*WhatsApp HQ Commands*\n\n" +
+            "*Harness*\n" +
+            "!harness — Show active harness\n" +
+            "!harness claude — Pin to Claude Code\n" +
+            "!harness opencode — Pin to OpenCode\n" +
+            "!harness gemini — Pin to Gemini CLI\n" +
+            "!harness auto — Auto-route by intent\n\n" +
             "*Chat*\n" +
             "!reset — Start new conversation\n" +
             "!model — Show active model\n" +
             "!model <name> — Set model by ID\n" +
-            "!opus / !sonnet / !haiku — Quick Claude switch\n" +
-            "!gemini — Switch to Gemini 2.5 Flash\n\n" +
+            "!opus / !sonnet / !haiku — Quick Claude switch\n\n" +
             "*HQ*\n" +
             "!status — HQ agent / active task status\n" +
             "!memory — Show memory\n" +
@@ -666,9 +754,7 @@ export class RelayWhatsAppBot {
             "*Settings*\n" +
             "!voice [on|off] — Toggle voice note replies\n" +
             "!format [on|off] — Toggle WhatsApp formatting\n" +
-            "!help — This message\n\n" +
-            "_Workspace tasks auto-route to Gemini bot_\n" +
-            "_Coding tasks auto-route to Claude Code bot_",
+            "!help — This message",
         );
         return;
 
@@ -772,9 +858,101 @@ export class RelayWhatsAppBot {
 
       if (content.startsWith("!")) {
         await this.handleBangCommand(content, queuedMsg);
+      } else if (this.activeHarness !== "auto") {
+        await this.handleLocalHarness(content, this.activeHarness);
       } else {
         await this.handleChat(content, queuedMsg);
       }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // LOCAL HARNESS (direct CLI execution)
+  // ══════════════════════════════════════════════════════════════
+
+  private async handleLocalHarness(
+    content: string,
+    harness: "claude-code" | "opencode" | "gemini-cli",
+  ): Promise<void> {
+    this.processing = true;
+    const label = this.harnessLabel(harness);
+    const sessionId = `wa-${Date.now()}`;
+
+    let typingInterval: ReturnType<typeof setInterval> | null = null;
+    try {
+      await this.bridge.sendTyping();
+      typingInterval = setInterval(async () => {
+        try { await this.bridge.sendTyping(); } catch { /* non-critical */ }
+      }, TYPING_KEEPALIVE_MS);
+
+      console.log(`[relay-whatsapp] SessionOrchestrator: spawning ${label} session ${sessionId}`);
+
+      await this.sessionOrchestrator.run(sessionId, harness, content, {
+        onStatusUpdate: (_session, message) => {
+          console.log(`[relay-whatsapp] Session ${sessionId}: ${message}`);
+          this.bridge.sendMessage(message).catch(console.error);
+        },
+        onResult: (_session, result) => {
+          if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
+          this.bridge.stopTyping().catch(() => {});
+          const formatted = this.formatEnabled ? formatForWhatsApp(result) : result;
+          this.sendChunked(formatted).catch(console.error);
+        },
+        onFailed: (_session, error) => {
+          if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
+          this.bridge.stopTyping().catch(() => {});
+          console.error(`[relay-whatsapp] Session ${sessionId} failed: ${error}`);
+          this.bridge.sendMessage(`_${label} failed: ${error}_`).catch(console.error);
+        },
+      });
+    } catch (err) {
+      if (typingInterval) clearInterval(typingInterval);
+      console.error(`[relay-whatsapp] Orchestrator error for session ${sessionId}:`, err);
+      await this.bridge.sendMessage(
+        `_${label} error: ${err instanceof Error ? err.message : String(err)}_`,
+      );
+    } finally {
+      if (typingInterval) clearInterval(typingInterval);
+      this.processing = false;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // STATE PERSISTENCE
+  // ══════════════════════════════════════════════════════════════
+
+  private loadState(): void {
+    try {
+      const raw = readFileSync(this.stateFile, "utf8");
+      const data = JSON.parse(raw) as { activeHarness?: string };
+      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli"];
+      if (data.activeHarness && valid.includes(data.activeHarness as ActiveHarness)) {
+        this.activeHarness = data.activeHarness as ActiveHarness;
+        console.log(`[relay-whatsapp] Loaded persisted harness: ${this.activeHarness}`);
+      }
+    } catch {
+      // File doesn't exist yet — default "auto" is already set
+    }
+  }
+
+  private saveState(): void {
+    try {
+      writeFileSync(
+        this.stateFile,
+        JSON.stringify({ activeHarness: this.activeHarness }, null, 2),
+        "utf8",
+      );
+    } catch (err) {
+      console.error("[relay-whatsapp] Failed to save state:", err);
+    }
+  }
+
+  private harnessLabel(h: ActiveHarness): string {
+    switch (h) {
+      case "claude-code": return "Claude Code";
+      case "opencode": return "OpenCode";
+      case "gemini-cli": return "Gemini CLI";
+      case "auto": return "Auto (intent-based)";
     }
   }
 
@@ -784,23 +962,27 @@ export class RelayWhatsAppBot {
 
   private async handleDelegation(
     content: string,
-    harness: "gemini-cli" | "claude-code" | "any",
+    harness: "gemini-cli" | "claude-code" | "opencode" | "any",
+    role?: string,
   ): Promise<void> {
     this.processing = true;
     const harnessLabel =
       harness === "gemini-cli"
-        ? "Gemini (Google Workspace)"
+        ? "Gemini CLI"
         : harness === "claude-code"
           ? "Claude Code"
-          : "HQ";
+          : harness === "opencode"
+            ? "OpenCode"
+            : "HQ";
 
     try {
       await this.bridge.sendMessage(`_Routing to ${harnessLabel}..._`);
 
+      const roleHint = role ? ` role=${role}` : "";
       const instruction =
-        `[WHATSAPP_ORCHESTRATION targetHarness=${harness}]\n\n` +
+        `[WHATSAPP_ORCHESTRATION targetHarness=${harness}${roleHint}]\n\n` +
         `<user_message>\n${content}\n</user_message>\n\n` +
-        `Use the delegate_to_relay tool to handle the user's request above via ${harness}. ` +
+        `Use the delegate_to_relay tool to handle the user's request above via ${harness}${role ? ` with role="${role}"` : ""}. ` +
         `Return the complete response to the user.`;
 
       const jobId = await new Promise<string>((resolve, reject) => {
@@ -1221,10 +1403,41 @@ export class RelayWhatsAppBot {
   }
 
   /** Split long messages into chunks and send sequentially. Quotes original on first chunk. */
+  /**
+   * Extract [FILE: /path | name] markers from text, send each as a WhatsApp image,
+   * and return the cleaned text (markers stripped).
+   */
+  private async extractAndSendFiles(text: string): Promise<string> {
+    const FILE_RE = /\[FILE:\s*([^\]|]+?)(?:\s*\|\s*([^\]]+?))?\s*\]/g;
+    const filePaths: Array<{ path: string; name: string }> = [];
+    const cleanText = text.replace(FILE_RE, (_match, rawPath, rawName) => {
+      filePaths.push({ path: rawPath.trim(), name: rawName?.trim() ?? basename(rawPath.trim()) });
+      return "";
+    }).replace(/\n{3,}/g, "\n\n").trim();
+
+    for (const f of filePaths) {
+      try {
+        if (!existsSync(f.path)) {
+          console.warn(`[whatsapp] File not found, skipping: ${f.path}`);
+          continue;
+        }
+        const buffer = readFileSync(f.path);
+        await this.bridge.sendImage(buffer, f.name);
+        console.log(`[whatsapp] Sent image: ${f.name}`);
+      } catch (err: any) {
+        console.error(`[whatsapp] Failed to send image ${f.path}:`, err.message);
+      }
+    }
+
+    return cleanText;
+  }
+
   private async sendChunked(
     text: string,
     sourceMsg?: WhatsAppMessage,
   ): Promise<void> {
+    // Extract and send any [FILE:] attachments before sending text
+    text = await this.extractAndSendFiles(text);
     if (text.length <= MAX_CHUNK_SIZE) {
       // Single message — quote original if available
       if (sourceMsg?.rawMessage) {

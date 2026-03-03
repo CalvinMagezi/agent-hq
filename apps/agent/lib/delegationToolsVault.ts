@@ -15,6 +15,11 @@ import type { DelegatedTask } from "@repo/vault-client";
 import { TraceDB } from "@repo/vault-client/trace";
 import * as fs from "fs";
 import * as path from "path";
+import type { AgentRole } from "./agentRoles.js";
+import { getRoleConfig, detectRole } from "./agentRoles.js";
+import type { ExecutionMode } from "./executionModes.js";
+import { getModeConfig } from "./executionModes.js";
+import { getFallbackChain, serializeFallbackChain } from "./modelFallback.js";
 
 // Module-level config set at init time
 let _vault: VaultClient | null = null;
@@ -24,6 +29,9 @@ let _currentUserId: string | null = null;
 let _traceDb: TraceDB | null = null;
 let _currentTraceId: string | null = null;
 let _currentJobSpanId: string | null = null;
+
+// Execution mode — set per-job via setCurrentExecutionMode()
+let _currentExecutionMode: ExecutionMode = "standard";
 
 // Notifiers — set at agent startup via setDelegationNotifiers()
 let _discordBot: { sendProgressMessage: (content: string, embed?: any) => Promise<void> } | null = null;
@@ -61,6 +69,11 @@ export function setCurrentJob(
     _currentJobSpanId = jobSpanId ?? null;
 }
 
+/** Set the execution mode for the current job (affects parallelism, timeouts, etc.) */
+export function setCurrentExecutionMode(mode: ExecutionMode): void {
+    _currentExecutionMode = mode;
+}
+
 // ── delegate_to_relay ──────────────────────────────────────────
 
 const SecurityConstraintsSchema = Type.Object({
@@ -76,6 +89,15 @@ const SecurityConstraintsSchema = Type.Object({
     maxExecutionMs: Type.Optional(Type.Number({ description: "Max execution time in ms" })),
 });
 
+const AgentRoleSchema = Type.Optional(Type.Union([
+    Type.Literal("coder"),
+    Type.Literal("researcher"),
+    Type.Literal("reviewer"),
+    Type.Literal("planner"),
+    Type.Literal("devops"),
+    Type.Literal("workspace"),
+], { description: "Agent role — affects system prompt, model hint, and turn limits. Auto-detected if omitted." }));
+
 const DelegateToRelaySchema = Type.Object({
     tasks: Type.Array(
         Type.Object({
@@ -87,6 +109,7 @@ const DelegateToRelaySchema = Type.Object({
                 Type.Literal("gemini-cli"),
                 Type.Literal("any"),
             ], { description: "Which relay bot type to target" }),
+            role: AgentRoleSchema,
             modelOverride: Type.Optional(Type.String({ description: "Optional model override" })),
             dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs that must complete first" })),
             priority: Type.Optional(Type.Number({ description: "Priority (higher = processed first, default 50)" })),
@@ -104,10 +127,19 @@ export const DelegateToRelayTool: AgentTool<typeof DelegateToRelaySchema> = {
 - gemini-cli: Google Workspace (Docs, Sheets, Drive, Gmail, Calendar, Keep), research, analysis, summarization. NOT for coding tasks.
 - any: Auto-select the healthiest available relay
 
+AGENT ROLES (optional — auto-detected if omitted):
+- coder: Writes, modifies, debugs code. Reads before editing, verifies after.
+- researcher: Investigates questions, explores codebases. Read-only — does NOT modify files.
+- reviewer: Validates code changes for correctness and security. Read-only — only reports findings.
+- planner: Analyzes requirements, creates implementation plans. Does NOT implement.
+- devops: Handles deployment, CI/CD, infrastructure. Validates before applying.
+- workspace: Google Workspace operations (Calendar, Gmail, Drive, Docs).
+
 ROUTING GUIDELINES:
-- Google Docs/Sheets/Drive/Gmail/Calendar/Keep tasks → gemini-cli
-- Code editing, debugging, git operations → claude-code
-- Multi-model comparison, quick generation → opencode
+- Google Docs/Sheets/Drive/Gmail/Calendar/Keep tasks → gemini-cli + workspace role
+- Code editing, debugging, git operations → claude-code + coder role
+- Code review, security audit → claude-code + reviewer role
+- Research, investigation → claude-code + researcher role
 
 Tasks can have dependencies (dependsOn) to create execution chains. Always check relay health first with check_relay_health.
 Use securityConstraints per task to restrict what the relay can do (e.g., noGit: true, filesystemAccess: "read-only").`,
@@ -121,9 +153,42 @@ Use securityConstraints per task to restrict what the relay can do (e.g., noGit:
             };
         }
 
+        // Check execution mode limits
+        const modeConfig = getModeConfig(_currentExecutionMode);
+        if (args.tasks.length > modeConfig.maxParallelTasks) {
+            const independent = args.tasks.filter(t => !t.dependsOn || t.dependsOn.length === 0);
+            if (independent.length > modeConfig.maxParallelTasks) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `⚠️ Execution mode "${_currentExecutionMode}" allows max ${modeConfig.maxParallelTasks} parallel tasks, but ${independent.length} independent tasks were submitted. Reduce the number of parallel tasks or switch to a higher mode (e.g., [THOROUGH] prefix in instruction).`,
+                    }],
+                    details: { mode: _currentExecutionMode, maxParallel: modeConfig.maxParallelTasks },
+                };
+            }
+        }
+
         try {
             // Create spans for each task and attach trace context
             const tasksWithTrace = args.tasks.map((t) => {
+                // Resolve role: explicit > auto-detected from instruction
+                const role: AgentRole = (t.role as AgentRole | undefined) ?? detectRole(t.instruction);
+                const roleConfig = getRoleConfig(role);
+
+                // If role specifies a preferred harness and task uses "any", use role's preference
+                let effectiveHarness = t.targetHarnessType;
+                if (effectiveHarness === "any" && roleConfig?.preferredHarness && roleConfig.preferredHarness !== "any") {
+                    effectiveHarness = roleConfig.preferredHarness;
+                }
+
+                // Build model override: explicit > role hint > mode preference > none
+                const effectiveModel = t.modelOverride
+                    ?? roleConfig?.modelHint
+                    ?? (modeConfig.preferredModel || undefined);
+
+                // Build fallback chain for this task's model
+                const fallbackChain = effectiveModel ? getFallbackChain(effectiveModel) : undefined;
+
                 let spanId: string | undefined;
                 if (_traceDb && _currentTraceId) {
                     spanId = _traceDb.createSpan({
@@ -131,40 +196,55 @@ Use securityConstraints per task to restrict what the relay can do (e.g., noGit:
                         parentSpanId: _currentJobSpanId ?? undefined,
                         taskId: t.taskId,
                         type: "delegation",
-                        name: `${t.targetHarnessType}: ${t.taskId}`,
+                        name: `${effectiveHarness}${role ? `/${role}` : ""}: ${t.taskId}`,
                     });
                     _traceDb.addSpanEvent(spanId, _currentTraceId, "started",
-                        `Delegated to ${t.targetHarnessType}: ${t.instruction.substring(0, 80)}`);
+                        `Delegated to ${effectiveHarness}${role ? ` (role: ${role})` : ""}: ${t.instruction.substring(0, 80)}`);
                     _traceDb.updateTraceCounts(_currentTraceId, { total: 1 });
                 }
+
                 return {
                     taskId: t.taskId,
                     instruction: t.instruction,
-                    targetHarnessType: t.targetHarnessType as any,
-                    modelOverride: t.modelOverride,
+                    targetHarnessType: effectiveHarness as any,
+                    modelOverride: effectiveModel,
                     dependsOn: t.dependsOn || [],
                     priority: t.priority,
                     traceId: _currentTraceId ?? undefined,
                     spanId,
                     parentSpanId: _currentJobSpanId ?? undefined,
                     securityConstraints: t.securityConstraints as any,
+                    // Extended metadata for role + fallback (stored in frontmatter)
+                    metadata: {
+                        role,
+                        ...(fallbackChain && fallbackChain.fallbacks.length > 0 && {
+                            fallbackModels: serializeFallbackChain(fallbackChain),
+                        }),
+                        executionMode: _currentExecutionMode,
+                    },
                 };
             });
 
             await _vault.createDelegatedTasks(_currentJobId, tasksWithTrace);
 
             const taskList = args.tasks
-                .map((t) => `  - ${t.taskId} → ${t.targetHarnessType}: ${t.instruction.substring(0, 80)}${t.instruction.length > 80 ? "..." : ""}`)
+                .map((t) => {
+                    const detectedRole = (t.role as AgentRole | undefined) ?? detectRole(t.instruction);
+                    const roleTag = ` [${detectedRole}]`;
+                    return `  - ${t.taskId}${roleTag} → ${t.targetHarnessType}: ${t.instruction.substring(0, 80)}${t.instruction.length > 80 ? "..." : ""}`;
+                })
                 .join("\n");
 
             const traceInfo = _currentTraceId
                 ? `\nTrace ID: ${_currentTraceId} (use get_trace_status for real-time progress)`
                 : "";
 
+            const modeInfo = `\nExecution mode: ${_currentExecutionMode} (max ${modeConfig.maxParallelTasks} parallel, ${Math.round(modeConfig.delegationTimeoutMs / 60000)}min timeout)`;
+
             return {
                 content: [{
                     type: "text",
-                    text: `Delegated ${args.tasks.length} task(s) to vault queue:\n${taskList}\n${traceInfo}\nUse check_delegation_status to monitor progress.`,
+                    text: `Delegated ${args.tasks.length} task(s) to vault queue:\n${taskList}\n${traceInfo}${modeInfo}\nUse check_delegation_status to monitor progress.`,
                 }],
                 details: { taskIds: args.tasks.map((t) => t.taskId) },
             };
@@ -524,7 +604,11 @@ Replaces the manual check_delegation_status loop + aggregate_results pattern for
 
         const monitoredTaskIds = new Set(args.taskIds);
         const summary = args.instructionSummary;
-        const timeoutMs = (args.timeoutMinutes ?? 30) * 60 * 1000;
+        // Use explicit timeout if provided, otherwise derive from execution mode
+        const modeConfig = getModeConfig(_currentExecutionMode);
+        const timeoutMs = args.timeoutMinutes
+            ? args.timeoutMinutes * 60 * 1000
+            : modeConfig.delegationTimeoutMs;
         const pollIntervalMs = 15_000;
         const startTime = Date.now();
         const announcedTerminal = new Set<string>();

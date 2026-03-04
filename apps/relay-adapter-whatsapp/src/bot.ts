@@ -7,6 +7,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync } from "fs";
+import { execSync } from "child_process";
 import { basename } from "path";
 import { LocalHarness } from "./localHarness.js";
 import { RelayClient } from "@repo/agent-relay-protocol";
@@ -751,12 +752,70 @@ export class RelayWhatsAppBot {
             "!forward — Forward last received message\n" +
             "!delete — Delete last bot message\n" +
             "!edit <text> — Edit last bot message\n\n" +
+            "*Diagrams* (instant)\n" +
+            '!diagram flow "A" "B" "C?" "D" — Flowchart\n' +
+            '!diagram create --title "X" --nodes "A,B" --edges "A>B"\n' +
+            "!diagram map [path] — Codebase map\n\n" +
             "*Settings*\n" +
             "!voice [on|off] — Toggle voice note replies\n" +
             "!format [on|off] — Toggle WhatsApp formatting\n" +
             "!help — This message",
         );
         return;
+
+      case "diagram":
+      case "draw": {
+        if (!argStr) {
+          await this.bridge.sendMessage(
+            "*Diagram Commands* (instant)\n\n" +
+              '!diagram flow "Step 1" "Step 2" "Decision?" "Done"\n' +
+              '!diagram create --title "Name" --nodes "A,B,C" --edges "A>B,B>C"\n' +
+              "!diagram map [path]\n" +
+              "!diagram deps [path]\n" +
+              "!diagram render file.drawit",
+          );
+          return;
+        }
+
+        try {
+          await this.bridge.sendTyping();
+          const output = execSync(`hq diagram ${argStr}`, {
+            timeout: 30_000,
+            encoding: "utf-8",
+            env: { ...process.env, FORCE_COLOR: "0" },
+          });
+
+          // Parse [FILE: path | name] marker
+          const fileMatch = output.match(
+            /\[FILE:\s*([^\]|]+?)(?:\s*\|\s*([^\]]+?))?\s*\]/,
+          );
+          if (fileMatch) {
+            const filePath = fileMatch[1].trim();
+            const fileName = fileMatch[2]?.trim() ?? "diagram.png";
+            if (existsSync(filePath)) {
+              const buffer = readFileSync(filePath);
+              await this.bridge.sendImage(Buffer.from(buffer), fileName);
+              return;
+            }
+          }
+
+          // No file — send text output
+          const cleanOutput = output
+            .replace(/\[FILE:[^\]]+\]/g, "")
+            .replace(/\n{3,}/g, "\n")
+            .trim();
+          await this.bridge.sendMessage(
+            cleanOutput.substring(0, 2000) || "Diagram generated.",
+          );
+        } catch (err: any) {
+          const msg =
+            err.stderr?.toString().trim() || err.message || "Unknown error";
+          await this.bridge.sendMessage(
+            `Diagram error: ${msg.substring(0, 500)}`,
+          );
+        }
+        return;
+      }
 
       default:
         await this.bridge.sendMessage(`Unknown command: !${cmd}. Try !help.`);

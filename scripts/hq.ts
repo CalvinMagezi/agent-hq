@@ -24,12 +24,14 @@ const SCRIPTS_DIR = import.meta.dir;
 const LAUNCH_AGENTS = path.join(os.homedir(), "Library/LaunchAgents");
 
 const WA_DIR = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
+const TG_DIR = path.join(REPO_ROOT, "apps/relay-adapter-telegram");
 const RELAY_SERVER_DIR = path.join(REPO_ROOT, "packages/agent-relay-server");
 const WA_AUTH_DIR = path.join(WA_DIR, "auth_info");
 
 const AGENT_DAEMON = "com.agent-hq.agent";
 const RELAY_DAEMON = "com.agent-hq.discord-relay";
 const WA_DAEMON = "com.agent-hq.whatsapp";
+const TG_DAEMON = "com.agent-hq.telegram";
 const RELAY_SERVER_DAEMON = "com.agent-hq.relay-server";
 
 const AGENT_LOG = path.join(os.homedir(), "Library/Logs/hq-agent.log");
@@ -38,6 +40,8 @@ const RELAY_LOG = path.join(os.homedir(), "Library/Logs/discord-relay.log");
 const RELAY_ERR = path.join(os.homedir(), "Library/Logs/discord-relay.error.log");
 const WA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.log");
 const WA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.error.log");
+const TG_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.log");
+const TG_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.error.log");
 const RELAY_SERVER_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.log");
 const RELAY_SERVER_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.error.log");
 const DAEMON_LOG = path.join(os.homedir(), "Library/Logs/hq-daemon.log");
@@ -111,21 +115,23 @@ function relayPid(): string | null {
 }
 
 function whatsappPid(): string | null { return daemonPid(WA_DAEMON); }
+function telegramPid(): string | null { return daemonPid(TG_DAEMON); }
 function relayServerPid(): string | null { return daemonPid(RELAY_SERVER_DAEMON); }
 
 function uptime(pid: string): string {
   return sh(`ps -o etime= -p ${pid} 2>/dev/null`).trim() || "?";
 }
 
-type ServiceTarget = "agent" | "relay" | "whatsapp" | "relay-server";
+type ServiceTarget = "agent" | "relay" | "whatsapp" | "telegram" | "relay-server";
 
 function resolveTargets(target?: string): ServiceTarget[] {
-  if (!target || target === "all") return ["agent", "relay", "relay-server", "whatsapp"];
+  if (!target || target === "all") return ["agent", "relay", "relay-server", "whatsapp", "telegram"];
   if (target === "agent") return ["agent"];
   if (target === "relay") return ["relay"];
   if (target === "whatsapp" || target === "wa") return ["whatsapp"];
+  if (target === "telegram" || target === "tg") return ["telegram"];
   if (target === "relay-server") return ["relay-server"];
-  warn(`Unknown target "${target}" — expected agent, relay, whatsapp, relay-server, or all`);
+  warn(`Unknown target "${target}" — expected agent, relay, whatsapp, telegram, relay-server, or all`);
   return [];
 }
 
@@ -138,6 +144,8 @@ function serviceInfo(t: ServiceTarget) {
       return { daemon: RELAY_DAEMON, pid: relayPid, label: "Discord Relay", dir: RELAY_DIR, log: RELAY_LOG, err: RELAY_ERR };
     case "whatsapp":
       return { daemon: WA_DAEMON, pid: whatsappPid, label: "WhatsApp", dir: WA_DIR, log: WA_LOG, err: WA_ERR };
+    case "telegram":
+      return { daemon: TG_DAEMON, pid: telegramPid, label: "Telegram", dir: TG_DIR, log: TG_LOG, err: TG_ERR };
     case "relay-server":
       return { daemon: RELAY_SERVER_DAEMON, pid: relayServerPid, label: "Relay Server", dir: RELAY_SERVER_DIR, log: RELAY_SERVER_LOG, err: RELAY_SERVER_ERR };
   }
@@ -255,17 +263,17 @@ async function cmdStatus(onlyTarget?: string): Promise<void> {
 async function cmdStart(target?: string): Promise<void> {
   const targets = resolveTargets(target);
 
-  // If starting whatsapp, ensure relay-server is started first
-  if (targets.includes("whatsapp") && !targets.includes("relay-server")) {
+  // If starting whatsapp or telegram, ensure relay-server is started first
+  if ((targets.includes("whatsapp") || targets.includes("telegram")) && !targets.includes("relay-server")) {
     const rsPid = relayServerPid();
     if (!rsPid) {
-      info("Starting relay server (required by WhatsApp adapter)...");
+      info("Starting relay server (required by adapter)...");
       sh(`launchctl start "${RELAY_SERVER_DAEMON}" 2>/dev/null`);
       await sleep(2500);
       const rsNew = relayServerPid();
       rsNew
         ? ok(`Relay Server started (PID: ${rsNew})`)
-        : warn("Relay Server may not have started — WhatsApp may fail to connect");
+        : warn("Relay Server may not have started — adapter may fail to connect");
     }
   }
 
@@ -400,7 +408,7 @@ async function cmdPs(): Promise<void> {
   section("Agent HQ Processes");
   console.log();
 
-  const icons: Record<ServiceTarget, string> = { agent: "🤖", relay: "📡", "relay-server": "🔌", whatsapp: "📱" };
+  const icons: Record<ServiceTarget, string> = { agent: "🤖", relay: "📡", "relay-server": "🔌", whatsapp: "📱", telegram: "✈️" };
   for (const t of resolveTargets("all")) {
     const svc = serviceInfo(t);
     const pid = svc.pid();
@@ -577,12 +585,18 @@ async function cmdClean(): Promise<void> {
   ok("Clean complete");
 }
 
-// hq fg [agent|relay|whatsapp]
+// hq fg [agent|relay|whatsapp|telegram]
 async function cmdFg(target = "agent"): Promise<void> {
   if (target === "whatsapp") {
     const waDir = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
     console.log("Starting WhatsApp relay in foreground (Ctrl+C to stop)...");
     spawnSync(process.execPath, ["src/index.ts"], { cwd: waDir, stdio: "inherit" });
+    return;
+  }
+
+  if (target === "telegram") {
+    console.log("Starting Telegram relay in foreground (Ctrl+C to stop)...");
+    spawnSync(process.execPath, ["src/index.ts"], { cwd: TG_DIR, stdio: "inherit" });
     return;
   }
 
@@ -767,6 +781,143 @@ async function cmdWaReauth(): Promise<void> {
   dim("  3. Once connected, Ctrl+C and run: hq start whatsapp");
 }
 
+// hq telegram / hq tg — start relay server (if needed) + Telegram adapter in foreground
+async function cmdTelegram(): Promise<void> {
+  const { spawn } = await import("child_process");
+  const RELAY_PORT = 18900;
+  const VAULT_PATH = process.env.VAULT_PATH || path.join(REPO_ROOT, ".vault");
+
+  // ── Load env vars from .env.local files so relay server gets them ─
+  const relayEnv: Record<string, string> = { ...process.env as Record<string, string>, VAULT_PATH };
+  for (const envDir of [
+    TG_DIR,
+    path.join(REPO_ROOT, "apps/agent"),
+    REPO_ROOT,
+  ]) {
+    const envFile = path.join(envDir, ".env.local");
+    try {
+      if (fs.existsSync(envFile)) {
+        const lines = fs.readFileSync(envFile, "utf-8").split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith("#")) continue;
+          const eqIdx = trimmed.indexOf("=");
+          if (eqIdx === -1) continue;
+          const key = trimmed.substring(0, eqIdx).trim();
+          const val = trimmed.substring(eqIdx + 1).trim().replace(/^["']|["']$/g, "");
+          if (!relayEnv[key]) {
+            relayEnv[key] = val;
+          }
+        }
+      }
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // ── Check if relay server is already listening ──────────────────
+  let relayAlive = false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${RELAY_PORT}/health`);
+    relayAlive = res.ok;
+  } catch {
+    // Not reachable
+  }
+
+  let relayChild: ReturnType<typeof spawn> | null = null;
+
+  if (relayAlive) {
+    ok(`Relay server already running on port ${RELAY_PORT}`);
+  } else {
+    info(`Starting relay server on port ${RELAY_PORT}...`);
+    relayChild = spawn(process.execPath, ["src/index.ts"], {
+      cwd: RELAY_SERVER_DIR,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...relayEnv, AGENT_WS_PORT: "0" },
+    });
+
+    relayChild.stdout?.on("data", (data: Buffer) => {
+      const line = data.toString().trim();
+      if (line) console.log(`${c.gray}[relay-server] ${line}${c.reset}`);
+    });
+    relayChild.stderr?.on("data", (data: Buffer) => {
+      const line = data.toString().trim();
+      if (line) console.error(`${c.red}[relay-server] ${line}${c.reset}`);
+    });
+
+    // Wait for the relay server to become ready (up to 10s)
+    let ready = false;
+    for (let i = 0; i < 20; i++) {
+      await sleep(500);
+      try {
+        const res = await fetch(`http://127.0.0.1:${RELAY_PORT}/health`);
+        if (res.ok) { ready = true; break; }
+      } catch { /* not yet */ }
+    }
+
+    if (ready) {
+      ok("Relay server started");
+    } else {
+      warn("Relay server may not be ready — proceeding anyway");
+    }
+  }
+
+  // ── Start Telegram adapter ─────────────────────────────────────
+  console.log();
+  info("Starting Telegram adapter (Ctrl+C to stop both)...");
+  console.log();
+
+  const tgChild = spawn(process.execPath, ["src/index.ts"], {
+    cwd: TG_DIR,
+    stdio: "inherit",
+    env: { ...process.env },
+  });
+
+  const cleanup = () => {
+    tgChild.kill("SIGTERM");
+    if (relayChild) relayChild.kill("SIGTERM");
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  const tgExitCode = await new Promise<number>((resolve) => {
+    tgChild.on("exit", (code) => resolve(code ?? 0));
+  });
+
+  if (relayChild) {
+    info("Stopping relay server...");
+    relayChild.kill("SIGTERM");
+    await sleep(1000);
+    if (!relayChild.killed) relayChild.kill("SIGKILL");
+    ok("Relay server stopped");
+  }
+
+  process.exit(tgExitCode);
+}
+
+// hq tg reset — clear Telegram conversation thread
+async function cmdTgReset(): Promise<void> {
+  const VAULT_PATH = process.env.VAULT_PATH || path.join(REPO_ROOT, ".vault");
+  const threadFile = path.join(VAULT_PATH, "_threads", "tg-self.md");
+  const stateFile = path.join(TG_DIR, ".telegram-state.json");
+
+  if (fs.existsSync(threadFile)) {
+    fs.rmSync(threadFile);
+    ok("Telegram conversation thread cleared");
+  } else {
+    info("No Telegram thread file found (already clean)");
+  }
+
+  if (fs.existsSync(stateFile)) {
+    fs.rmSync(stateFile);
+    ok("Telegram state file cleared");
+  }
+
+  console.log();
+  info("If the adapter is running, send !reset in Telegram or restart the service:");
+  dim("  hq restart telegram");
+}
+
 // hq install-cli
 async function cmdInstallCli(): Promise<void> {
   const hqScript = path.join(SCRIPTS_DIR, "hq.ts");
@@ -787,6 +938,231 @@ async function cmdInstallCli(): Promise<void> {
     console.log(`  ${c.bold}export PATH="$HOME/.local/bin:$PATH"${c.reset}`);
   } else {
     ok(`${binDir} is already in PATH`);
+  }
+}
+
+// ─── hq diagram ──────────────────────────────────────────────────────────────
+
+/**
+ * hq diagram — Fast diagram pipeline for relay harnesses.
+ *
+ * Single bash command that any harness (Claude Code, Gemini CLI) can call
+ * for instant diagram creation. Handles the full pipeline:
+ *   generate → export SVG → convert PNG → output [FILE:] marker
+ *
+ * Usage:
+ *   hq diagram flow "Step 1" "Step 2" "Decision?" "Step 3"
+ *   hq diagram map ./src
+ *   hq diagram deps .
+ *   hq diagram routes ./app
+ *   hq diagram render existing.drawit
+ *   hq diagram create --title "My Arch" --nodes "Frontend,Backend,DB" --edges "Frontend>Backend,Backend>DB"
+ */
+async function cmdDiagram(sub?: string, ...rest: string[]): Promise<void> {
+  const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+  const diagramsDir = path.join(VAULT_PATH, "Notebooks", "Diagrams");
+  const outputsDir = path.join(VAULT_PATH, "_jobs", "outputs");
+  fs.mkdirSync(diagramsDir, { recursive: true });
+  fs.mkdirSync(outputsDir, { recursive: true });
+
+  // Resolve drawit binary
+  let drawitBin: string;
+  try {
+    drawitBin = execSync("which drawit", { encoding: "utf-8" }).trim();
+  } catch {
+    drawitBin = "/opt/homebrew/bin/drawit";
+    if (!fs.existsSync(drawitBin)) {
+      fail("DrawIt CLI not found. Install: npm i -g @chamuka-labs/drawit-cli");
+      return;
+    }
+  }
+
+  function runDrawIt(args: string[]): string {
+    try {
+      return execSync(
+        `"${drawitBin}" ${args.map(a => `"${a}"`).join(" ")}`,
+        { encoding: "utf-8", timeout: 60_000, stdio: ["pipe", "pipe", "pipe"] }
+      ).trim();
+    } catch (err: any) {
+      const stderr = err.stderr?.toString()?.trim() ?? "";
+      fail(`drawit: ${stderr || err.message}`);
+      return "";
+    }
+  }
+
+  function safeName(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9\-_ ]/g, "").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "diagram";
+  }
+
+  function uniqueOutput(ext: string): string {
+    const hash = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    return path.join(outputsDir, `diagram-${hash}.${ext}`);
+  }
+
+  async function svgToPng(svgPath: string): Promise<string> {
+    const { Resvg } = await import("@resvg/resvg-js");
+    const svgContent = fs.readFileSync(svgPath, "utf-8");
+    const resvg = new Resvg(svgContent);
+    const pngData = resvg.render().asPng();
+    const pngPath = uniqueOutput("png");
+    fs.writeFileSync(pngPath, pngData);
+    return pngPath;
+  }
+
+  async function exportAndConvert(drawitPath: string, name: string): Promise<void> {
+    const svgPath = uniqueOutput("svg");
+    runDrawIt(["export", drawitPath, "--format", "svg", "--output", svgPath, "--padding", "20"]);
+    const pngPath = await svgToPng(svgPath);
+    const displayName = `${name}.png`;
+    console.log(drawitPath);
+    console.log(`[FILE: ${pngPath} | ${displayName}]`);
+  }
+
+  if (!sub || sub === "help" || sub === "--help") {
+    console.log(`
+${c.bold}hq diagram${c.reset} — Fast diagram pipeline
+
+${c.bold}USAGE${c.reset}
+  hq diagram flow "Step 1" "Step 2" "Decision?" "End"     Quick flowchart
+  hq diagram map [path]                                     Codebase architecture map
+  hq diagram deps [path]                                    Package dependency graph
+  hq diagram routes [path]                                  Next.js route tree
+  hq diagram render <file.drawit>                           Export existing .drawit to PNG
+  hq diagram create --title "Name" --nodes "A,B,C" --edges "A>B,B>C"
+
+${c.bold}OUTPUT${c.reset}
+  Prints [FILE: /path/to/diagram.png | name.png] for auto-sharing via Discord/WhatsApp.
+  Source .drawit files saved to .vault/Notebooks/Diagrams/
+`);
+    return;
+  }
+
+  switch (sub) {
+    case "flow": {
+      const steps = rest.filter(s => !s.startsWith("--"));
+      const nameIdx = rest.indexOf("--name");
+      const name = nameIdx >= 0 && rest[nameIdx + 1] ? safeName(rest[nameIdx + 1]) : "flow";
+      const drawitPath = path.join(diagramsDir, `${name}.drawit`);
+      if (steps.length === 0) { fail("No steps provided. Usage: hq diagram flow \"Step 1\" \"Step 2\" ..."); return; }
+      runDrawIt(["flow", ...steps, "--output", drawitPath]);
+      await exportAndConvert(drawitPath, name);
+      break;
+    }
+
+    case "map": {
+      const targetPath = rest[0] || ".";
+      const dirName = safeName(path.basename(path.resolve(targetPath)));
+      const drawitPath = path.join(diagramsDir, `${dirName}-map.drawit`);
+      const args = ["map", targetPath, "--output", drawitPath];
+      // Pass through flags
+      for (let i = 1; i < rest.length; i++) {
+        if (rest[i].startsWith("--")) { args.push(rest[i]); if (rest[i + 1] && !rest[i + 1].startsWith("--")) { args.push(rest[++i]); } }
+      }
+      runDrawIt(args);
+      await exportAndConvert(drawitPath, `${dirName}-map`);
+      break;
+    }
+
+    case "deps": {
+      const targetPath = rest[0] || ".";
+      const dirName = safeName(path.basename(path.resolve(targetPath)));
+      const drawitPath = path.join(diagramsDir, `${dirName}-deps.drawit`);
+      runDrawIt(["deps", targetPath, "--output", drawitPath]);
+      await exportAndConvert(drawitPath, `${dirName}-deps`);
+      break;
+    }
+
+    case "routes": {
+      const targetPath = rest[0] || ".";
+      const dirName = safeName(path.basename(path.resolve(targetPath)));
+      const drawitPath = path.join(diagramsDir, `${dirName}-routes.drawit`);
+      runDrawIt(["routes", targetPath, "--output", drawitPath]);
+      await exportAndConvert(drawitPath, `${dirName}-routes`);
+      break;
+    }
+
+    case "render": {
+      const filePath = rest[0];
+      if (!filePath || !fs.existsSync(filePath)) { fail(`File not found: ${filePath}`); return; }
+      const name = safeName(path.basename(filePath, ".drawit"));
+      await exportAndConvert(filePath, name);
+      break;
+    }
+
+    case "create": {
+      // Parse --title, --nodes, --edges flags for quick structured diagrams
+      let title = "diagram";
+      let nodesStr = "";
+      let edgesStr = "";
+      let theme: "dark" | "light" = "dark";
+
+      for (let i = 0; i < rest.length; i++) {
+        if (rest[i] === "--title" && rest[i + 1]) title = rest[++i];
+        else if (rest[i] === "--nodes" && rest[i + 1]) nodesStr = rest[++i];
+        else if (rest[i] === "--edges" && rest[i + 1]) edgesStr = rest[++i];
+        else if (rest[i] === "--theme" && rest[i + 1]) theme = rest[++i] as "dark" | "light";
+      }
+
+      if (!nodesStr) { fail("--nodes required. Usage: hq diagram create --title 'Name' --nodes 'A,B,C' --edges 'A>B,B>C'"); return; }
+
+      const nodeLabels = nodesStr.split(",").map(s => s.trim()).filter(Boolean);
+      const edgePairs = edgesStr ? edgesStr.split(",").map(s => s.trim()).filter(Boolean) : [];
+
+      // Generate NDJSON with automatic grid layout
+      const isDark = theme === "dark";
+      const bg = isDark ? "#0a0f1e" : "#ffffff";
+      const textColor = isDark ? "#e2e8f0" : "#333333";
+      const palette = isDark
+        ? ["#1e3a5f", "#2d4a3f", "#4a2d5f", "#5f3a1e", "#1e5f5a", "#5f1e3a"]
+        : ["#e3f2fd", "#e8f5e9", "#f3e5f5", "#fff3e0", "#e0f7fa", "#fce4ec"];
+      const strokePalette = isDark
+        ? ["#3b82f6", "#34d399", "#a78bfa", "#f59e0b", "#22d3ee", "#f87171"]
+        : ["#1976d2", "#4caf50", "#7b1fa2", "#ff9800", "#00bcd4", "#f44336"];
+
+      const cols = Math.ceil(Math.sqrt(nodeLabels.length));
+      const nodeW = 180, nodeH = 60, gapX = 80, gapY = 80, pad = 80;
+      const canvasW = pad * 2 + cols * nodeW + (cols - 1) * gapX;
+      const rows = Math.ceil(nodeLabels.length / cols);
+      const canvasH = pad * 2 + rows * nodeH + (rows - 1) * gapY;
+
+      const lines: string[] = [];
+      lines.push(JSON.stringify({ width: canvasW, height: canvasH, background: bg, metadata: { name: title, diagramType: "architecture" } }));
+
+      const nodeIds: Record<string, string> = {};
+      nodeLabels.forEach((label, i) => {
+        const id = `n${i}`;
+        nodeIds[label] = id;
+        const col = i % cols, row = Math.floor(i / cols);
+        const x = pad + col * (nodeW + gapX), y = pad + row * (nodeH + gapY);
+        const ci = i % palette.length;
+        lines.push(JSON.stringify({
+          id, type: "node",
+          position: { x, y }, size: { width: nodeW, height: nodeH },
+          shape: "rectangle", zIndex: 2,
+          style: { fillStyle: palette[ci], strokeStyle: strokePalette[ci], lineWidth: 2, fillOpacity: 1, strokeOpacity: 1, cornerRadii: { topLeft: 8, topRight: 8, bottomRight: 8, bottomLeft: 8 } },
+          text: { content: label, fontSize: 14, fontFamily: "sans-serif", color: textColor, textAlign: "center", verticalAlign: "middle" },
+        }));
+      });
+
+      edgePairs.forEach((pair, i) => {
+        const [from, to] = pair.split(">").map(s => s.trim());
+        const sourceId = nodeIds[from], targetId = nodeIds[to];
+        if (!sourceId || !targetId) return;
+        lines.push(JSON.stringify({
+          id: `e${i}`, type: "edge", source: sourceId, target: targetId, zIndex: 1,
+          style: { strokeStyle: isDark ? "#94a3b8" : "#64748B", lineWidth: 2, arrowheadEnd: true, strokeOpacity: 0.8, routing: "orthogonal" },
+        }));
+      });
+
+      const name = safeName(title);
+      const drawitPath = path.join(diagramsDir, `${name}.drawit`);
+      fs.writeFileSync(drawitPath, lines.join("\n") + "\n", "utf-8");
+      await exportAndConvert(drawitPath, name);
+      break;
+    }
+
+    default:
+      fail(`Unknown diagram subcommand: ${sub}. Run 'hq diagram help' for usage.`);
   }
 }
 
@@ -1298,7 +1674,7 @@ ${c.bold}CHAT${c.reset}
 
 ${c.bold}SERVICE MANAGEMENT${c.reset}
   hq status                     Status of all services                 (alias: s)
-  hq start  [target]            Start services                         targets: agent, relay, whatsapp, relay-server, all
+  hq start  [target]            Start services                         targets: agent, relay, whatsapp, telegram, relay-server, all
   hq stop   [target]            Stop services
   hq restart [target]           Restart services                       (alias: r)
   hq fg     [target]            Run a service in the foreground
@@ -1310,6 +1686,13 @@ ${c.bold}WHATSAPP${c.reset}
   hq wa status                  WhatsApp service status
   hq wa logs [N]                WhatsApp adapter logs
   hq wa errors [N]              WhatsApp adapter error logs
+
+${c.bold}TELEGRAM${c.reset}
+  hq tg                         Start Telegram in foreground (debug)
+  hq tg reset                   Clear conversation thread + state
+  hq tg status                  Telegram service status
+  hq tg logs [N]                Telegram adapter logs
+  hq tg errors [N]              Telegram adapter error logs
 
 ${c.bold}BACKGROUND DAEMON${c.reset}
   hq daemon start               Start the background daemon
@@ -1332,6 +1715,14 @@ ${c.bold}DAEMONS (macOS launchd auto-start)${c.reset}
   hq install   [target]         Install launchd daemons
   hq uninstall [target]         Remove launchd daemons
 
+${c.bold}DIAGRAMS${c.reset}
+  hq diagram flow "A" "B" "C?"  Quick flowchart (? = decision diamond)
+  hq diagram create --title X --nodes "A,B,C" --edges "A>B,B>C"
+  hq diagram map [path]         Codebase architecture map
+  hq diagram deps [path]        Package dependency graph
+  hq diagram routes [path]      Next.js route tree
+  hq diagram render <file>      Export .drawit to PNG
+
 ${c.bold}COO MANAGEMENT${c.reset}
   hq coo install <url>          Install a COO orchestrator
   hq coo uninstall <name>       Remove COO (preserves memory)
@@ -1342,12 +1733,15 @@ ${c.bold}COO MANAGEMENT${c.reset}
 ${c.bold}EXAMPLES${c.reset}
   hq                            Start chatting
   hq wa                         WhatsApp foreground (scan QR, debug)
+  hq tg                         Telegram foreground (debug)
   hq start whatsapp             Start WhatsApp as background service
+  hq start telegram             Start Telegram as background service
   hq start all                  Start everything
   hq wa reset                   Clear WhatsApp conversation
+  hq tg reset                   Clear Telegram conversation + state
   hq wa reauth                  Wipe WhatsApp auth, re-scan QR
   hq restart                    Restart everything
-  hq logs whatsapp 50           Last 50 WhatsApp log lines
+  hq logs telegram 50           Last 50 Telegram log lines
   hq follow                     Live-tail all logs
   hq health                     Full system health report
 `);
@@ -1407,6 +1801,14 @@ switch (cmd) {
     else { await cmdWhatsApp(); }
     break;
 
+  case "telegram": case "tg":
+    if (arg1 === "reset") { await cmdTgReset(); }
+    else if (arg1 === "status") { await cmdStatus("telegram"); }
+    else if (arg1 === "logs") { await cmdLogs("telegram", arg2 ? parseInt(arg2, 10) : 30); }
+    else if (arg1 === "errors") { await cmdErrors("telegram", arg2 ? parseInt(arg2, 10) : 20); }
+    else { await cmdTelegram(); }
+    break;
+
   case "install":
     await cmdInstall(arg1); break;
 
@@ -1427,6 +1829,9 @@ switch (cmd) {
 
   case "init":
     await cmdInit(process.argv.slice(3)); break;
+
+  case "diagram": case "draw":
+    await cmdDiagram(arg1, ...process.argv.slice(4)); break;
 
   case "daemon": case "d":
     await cmdDaemon(arg1, arg2); break;

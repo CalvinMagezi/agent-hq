@@ -34,10 +34,26 @@ export {
   buildSkillsSummary,
   SKILLS_DIR,
 } from "./tools/skills.js";
+export {
+  DrawItRenderTool,
+  DrawItExportTool,
+  DrawItMapTool,
+  DrawItFlowTool,
+  DrawItAnalyzeTool,
+  CreateDiagramTool,
+} from "./tools/drawit.js";
 
 import { ToolRegistry, type HQContext } from "./registry.js";
 import { ImageGenTool } from "./tools/imageGen.js";
 import { ListSkillsTool, LoadSkillTool } from "./tools/skills.js";
+import {
+  DrawItRenderTool,
+  DrawItExportTool,
+  DrawItMapTool,
+  DrawItFlowTool,
+  DrawItAnalyzeTool,
+  CreateDiagramTool,
+} from "./tools/drawit.js";
 
 /**
  * Create the default registry with all built-in HQ tools pre-registered.
@@ -50,8 +66,13 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(LoadSkillTool);
   // Image generation via OpenRouter
   registry.register(ImageGenTool);
-  // Future tools:
-  // registry.register(WebSearchTool);
-  // registry.register(VaultSearchTool);
+  // DrawIt diagram tools (generate, export, map, flow, analyze)
+  registry.register(DrawItRenderTool);
+  registry.register(DrawItExportTool);
+  registry.register(DrawItMapTool);
+  registry.register(DrawItFlowTool);
+  registry.register(DrawItAnalyzeTool);
+  // High-level diagram creation (structured input, no NDJSON knowledge needed)
+  registry.register(CreateDiagramTool);
   return registry;
 }

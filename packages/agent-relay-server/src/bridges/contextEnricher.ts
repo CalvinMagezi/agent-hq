@@ -130,6 +130,19 @@ export class ContextEnricher {
       "[DONE: search text for completed goal]",
     );
 
+    // Diagram capabilities (available via hq CLI)
+    parts.push(
+      "\n## Diagrams:\n" +
+      "When the user asks for a diagram, flowchart, architecture visual, or chart, " +
+      "use the `hq diagram` CLI command. It outputs a [FILE:] marker that auto-shares the image.\n" +
+      "Commands:\n" +
+      '- `hq diagram flow "Step 1" "Step 2" "Decision?" "Step 3"`  — Flowchart (? = decision diamond)\n' +
+      '- `hq diagram create --title "Name" --nodes "A,B,C" --edges "A>B,B>C"`  — Architecture/graph\n' +
+      "- `hq diagram map ./src`  — Codebase architecture map\n" +
+      "- `hq diagram deps .`  — Package dependency graph\n" +
+      "Include the [FILE:] line from the output in your response so the image is shared.",
+    );
+
     return parts.join("\n");
   }
 
@@ -154,6 +167,16 @@ export class ContextEnricher {
           "- To use Gemini's general intelligence in this WhatsApp chat: the user can type !gemini to switch to the Gemini model.\n" +
           "- Note: !gemini in WhatsApp uses Gemini via OpenRouter for general reasoning/research — " +
           "it does NOT have authenticated Google Workspace file access. That requires the Discord Gemini bot."
+        );
+      case "telegram":
+        return (
+          "You are a personal AI assistant responding in a Telegram chat. " +
+          "Use Telegram HTML formatting: <b>bold</b>, <i>italic</i>, <code>inline code</code>, " +
+          "<pre><code>code blocks</code></pre>, <a href='url'>links</a>. " +
+          "Do NOT use markdown asterisks, underscores, or backtick syntax — " +
+          "Telegram only renders HTML tags in HTML parse mode. " +
+          "Keep responses concise and mobile-friendly. " +
+          "You have access to the user's knowledge vault (notes, projects, tasks, goals)."
         );
       case "web":
         return (

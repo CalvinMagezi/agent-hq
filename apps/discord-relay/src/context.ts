@@ -41,6 +41,18 @@ export class ContextEnricher {
       "[GOAL: goal text | DEADLINE: optional date]\n" +
       "[DONE: search text for completed goal]";
 
+    const diagramInstructions =
+      "\n\nDIAGRAMS (via `hq diagram` CLI):\n" +
+      "When the user asks for a diagram, chart, flowchart, or architecture visual, use the `hq diagram` bash command. " +
+      "It outputs a [FILE:] marker that auto-shares the PNG image.\n" +
+      "Commands (run via bash):\n" +
+      '  hq diagram flow "Step 1" "Step 2" "Decision?" "Step 3"   # Flowchart (? = diamond)\n' +
+      '  hq diagram create --title "Name" --nodes "A,B,C" --edges "A>B,B>C"  # Architecture/graph\n' +
+      "  hq diagram map ./src                                      # Codebase architecture map\n" +
+      "  hq diagram deps .                                         # Package dependency graph\n" +
+      "  hq diagram render existing.drawit                         # Export existing .drawit to PNG\n" +
+      "Include the [FILE:] line from the output in your response so the image is shared automatically.";
+
     switch (this.harnessType) {
       case "gemini-cli":
         return (
@@ -51,7 +63,8 @@ export class ContextEnricher {
           "Keep responses concise and use Discord-compatible markdown. " +
           userName +
           continuityInstructions +
-          memoryInstructions
+          memoryInstructions +
+          diagramInstructions
         );
       case "opencode":
         return (
@@ -60,7 +73,8 @@ export class ContextEnricher {
           "Keep responses concise and conversational. Use markdown formatting compatible with Discord. " +
           userName +
           continuityInstructions +
-          memoryInstructions
+          memoryInstructions +
+          diagramInstructions
         );
       case "claude-code":
       default:
@@ -70,7 +84,8 @@ export class ContextEnricher {
           "Keep responses concise and conversational. Use markdown formatting compatible with Discord. " +
           userName +
           continuityInstructions +
-          memoryInstructions
+          memoryInstructions +
+          diagramInstructions
         );
     }
   }

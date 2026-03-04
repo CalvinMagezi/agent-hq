@@ -14,7 +14,7 @@ export interface AuthMessage {
   /** Client identifier (optional) */
   clientId?: string;
   /** Client type hint */
-  clientType?: "web" | "cli" | "discord" | "mobile" | "obsidian" | "whatsapp";
+  clientType?: "web" | "cli" | "discord" | "mobile" | "obsidian" | "whatsapp" | "telegram";
 }
 
 export interface AuthAckMessage {

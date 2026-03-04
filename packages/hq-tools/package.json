@@ -13,6 +13,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@resvg/resvg-js": "^2.6.0",
     "@sinclair/typebox": "^0.32.0"
   }
 }

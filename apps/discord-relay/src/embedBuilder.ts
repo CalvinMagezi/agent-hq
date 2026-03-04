@@ -208,6 +208,8 @@ export function buildHelpEmbed(harnessName: string): EmbedBuilder {
     .setFooter({ text: `${harnessName} | Use / or ! prefix` })
     .setTimestamp();
 
+  const diagramField = { name: "Diagrams", value: '`!diagram flow "A" "B"` `!diagram create` `!diagram map`' };
+
   if (harnessName === "OpenCode") {
     embed.addFields(
       { name: "Session", value: "`/reset` `/kill` `/session` `!continue`" },
@@ -215,6 +217,7 @@ export function buildHelpEmbed(harnessName: string): EmbedBuilder {
       { name: "Tuning", value: "`/effort` `!agent <name>` `/adddir <path>` `!rmdir`" },
       { name: "Info", value: "`/usage` `/memory` `/status` `/help`" },
       { name: "Settings", value: "`/clear` — Reset all to defaults" },
+      diagramField,
     );
   } else if (harnessName === "Gemini CLI") {
     embed.addFields(
@@ -223,6 +226,7 @@ export function buildHelpEmbed(harnessName: string): EmbedBuilder {
       { name: "Context", value: "`/adddir <path>` `!rmdir`" },
       { name: "Plugins", value: "`!plugins` `!plugin add/remove/clear`" },
       { name: "Info", value: "`/usage` `/memory` `/status` `/help` `!workspace`" },
+      diagramField,
     );
     embed.setDescription("Google Workspace specialist — Docs, Sheets, Drive, Gmail, Calendar");
   } else {
@@ -233,6 +237,7 @@ export function buildHelpEmbed(harnessName: string): EmbedBuilder {
       { name: "Info", value: "`/usage` `/memory` `/status` `/help`" },
       { name: "Settings", value: "`/clear` — Reset all to defaults" },
       { name: "Limits", value: "15 turns, $2.00 budget, 5 min timeout per call" },
+      diagramField,
     );
   }
 

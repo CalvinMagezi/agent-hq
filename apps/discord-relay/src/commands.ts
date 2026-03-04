@@ -1,3 +1,5 @@
+import { execSync } from "child_process";
+import { readFileSync, existsSync } from "fs";
 import type { BaseHarness } from "./harnesses/base.js";
 import type { GeminiHarness } from "./harnesses/gemini.js";
 import type { ConvexAPI } from "./vaultApi.js";
@@ -667,6 +669,63 @@ export async function handleCommand(
           "Ask me anything about your Google Workspace!",
         ].join("\n"),
       };
+    }
+
+    // ── Diagram Generation (bypasses LLM for speed) ─────────────
+
+    case "!diagram":
+    case "!draw": {
+      if (!arg) {
+        return {
+          handled: true,
+          response: [
+            "**Diagram Commands** (instant — no LLM needed)",
+            '`!diagram flow "Step 1" "Step 2" "Decision?" "Done"` — Flowchart (? = diamond)',
+            '`!diagram create --title "Name" --nodes "A,B,C" --edges "A>B,B>C"` — Architecture/graph',
+            "`!diagram map [path]` — Codebase architecture map",
+            "`!diagram deps [path]` — Package dependency graph",
+            "`!diagram render file.drawit` — Export existing .drawit to PNG",
+          ].join("\n"),
+        };
+      }
+
+      try {
+        const output = execSync(`hq diagram ${arg}`, {
+          timeout: 30_000,
+          encoding: "utf-8",
+          cwd: config.projectDir,
+          env: { ...process.env, FORCE_COLOR: "0" },
+        });
+
+        // Parse [FILE: path | name] marker from output
+        const fileMatch = output.match(/\[FILE:\s*([^\]|]+?)(?:\s*\|\s*([^\]]+?))?\s*\]/);
+        if (fileMatch) {
+          const filePath = fileMatch[1].trim();
+          const fileName = fileMatch[2]?.trim() ?? "diagram.png";
+          if (existsSync(filePath)) {
+            const buffer = readFileSync(filePath);
+            // Strip [FILE:] markers and excessive whitespace from response text
+            const cleanOutput = output
+              .replace(/\[FILE:[^\]]+\]/g, "")
+              .replace(/\n{3,}/g, "\n")
+              .trim();
+            return {
+              handled: true,
+              response: cleanOutput || undefined,
+              file: { name: fileName, buffer: Buffer.from(buffer) },
+            };
+          }
+        }
+
+        // No file marker — return text output
+        return { handled: true, response: output.trim().substring(0, 2000) || "Diagram generated." };
+      } catch (err: any) {
+        const msg = err.stderr?.toString().trim() || err.message || "Unknown error";
+        return {
+          handled: true,
+          response: `Diagram error: ${msg.substring(0, 500)}`,
+        };
+      }
     }
 
     // ── Custom Commands (loaded from custom-commands/ — not tracked in git) ──

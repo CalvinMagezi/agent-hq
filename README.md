@@ -7,16 +7,17 @@
 
 ---
 
-**Your personal AI assistant that lives on your machine.** Agent-HQ connects your favourite AI tools (Claude Code, Gemini CLI, OpenCode) to Discord and WhatsApp, giving you a powerful AI assistant accessible from anywhere — while keeping all your data 100% local in an [Obsidian](https://obsidian.md) vault.
+**Your personal AI assistant that lives on your machine.** Agent-HQ connects your favourite AI tools (Claude Code, Gemini CLI, OpenCode) to Discord, WhatsApp, and Telegram — giving you a powerful AI assistant accessible from anywhere — while keeping all your data 100% local in an [Obsidian](https://obsidian.md) vault.
 
 No cloud backend. No vendor lock-in. Your machine, your data, your agents.
 
 ```
-You (Discord / WhatsApp / Terminal)
+You (Discord / WhatsApp / Telegram / Terminal)
      │
-     ├── Discord Relay ──► Claude Code / Gemini CLI / OpenCode
+     ├── Discord Relay  ──► Claude Code / Gemini CLI / OpenCode
      ├── WhatsApp Relay ──► Voice, Images, Docs, Polls, Stickers
-     └── Terminal Chat ──► Streaming REPL
+     ├── Telegram Relay ──► Voice, Photos, Documents, Inline Harness Picker
+     └── Terminal Chat  ──► Streaming REPL
               │
               ▼
        Relay Server (WS + REST, port 18900)
@@ -33,16 +34,19 @@ You (Discord / WhatsApp / Terminal)
 
 ## What You Get
 
-- **Discord + WhatsApp as your AI interface** — DM your bots on Discord or chat via WhatsApp self-chat
-- **Full media support** — Send images (AI vision describes them), documents, voice notes, stickers, locations, polls
+- **Discord, WhatsApp, and Telegram as your AI interface** — DM your bots or use WhatsApp/Telegram self-chat
+- **Full media support** — Send images (AI vision), documents, voice notes, stickers, locations, polls
 - **Persistent memory** — The agent remembers facts, goals, and context across sessions
-- **Local job queue** — Queue background tasks, get results back in Discord or WhatsApp
-- **Multi-agent orchestration** — HQ delegates tasks to the right specialist bot with tracing
+- **Local job queue** — Queue background tasks, get results back in any channel
+- **Multi-agent orchestration** — HQ delegates tasks to specialist bots with full tracing
 - **Scheduled workflows** — Daily web digests, memory consolidation, project tracking
-- **Voice messages** — Send voice notes, get transcribed responses (+ TTS replies on WhatsApp)
+- **Voice messages** — Send voice notes, get transcribed responses (+ TTS replies on WhatsApp/Telegram)
+- **AI image generation** — Generate images via OpenRouter, auto-sent as attachments on Discord/Telegram
+- **DrawIT diagrams** — Generate flowcharts, architecture maps, dependency graphs — auto-shared as images
 - **Cross-device vault sync** — E2E encrypted sync between machines via Obsidian plugin
 - **Event-driven architecture** — VaultSync engine with real-time file change detection
 - **Full machine access** — Agent can run code, edit files, push git commits, search your vault
+- **Agent roles + execution modes** — Tasks auto-routed to coder/researcher/reviewer/planner/devops specialists; quick/standard/thorough execution scaling
 
 ## Architecture
 
@@ -56,23 +60,25 @@ You (Discord / WhatsApp / Terminal)
 │   ├── _logs/                 # Date-partitioned job logs
 │   └── Notebooks/             # User content (Memories, Projects, Daily Digest)
 ├── apps/
-│   ├── agent/                 # Local worker agent (Pi SDK, job execution)
-│   ├── discord-relay/         # Multi-bot Discord relay (Claude Code, OpenCode, Gemini CLI)
-│   ├── relay-adapter-whatsapp/# WhatsApp relay (Baileys, voice, media, AI vision)
-│   ├── relay-adapter-discord/ # Discord adapter for the relay server
-│   └── hq-control-center/    # Electron desktop dashboard (React, force-graph, xterm)
+│   ├── agent/                   # Local worker agent (Pi SDK, job execution)
+│   ├── discord-relay/           # Multi-bot Discord relay (Claude Code, OpenCode, Gemini CLI)
+│   ├── relay-adapter-whatsapp/  # WhatsApp relay (Baileys, voice, media, AI vision)
+│   ├── relay-adapter-discord/   # Discord adapter for the relay server
+│   ├── relay-adapter-telegram/  # Telegram relay (grammY, voice, photos, inline harness picker)
+│   └── hq-control-center/       # Electron desktop dashboard (React, force-graph, xterm)
 ├── packages/
-│   ├── vault-client/          # Shared vault data access layer (@repo/vault-client)
-│   ├── vault-sync/            # Event-driven file change detection engine
-│   ├── vault-sync-protocol/   # E2E encryption protocol for cross-device sync
-│   ├── vault-sync-server/     # WebSocket relay for multi-device vault sync
-│   ├── agent-relay-protocol/  # Types + RelayClient SDK for adapter ↔ server comms
-│   ├── agent-relay-server/    # Bun WS+REST gateway (port 18900)
-│   ├── discord-core/          # Shared Discord.js base class + utilities
-│   ├── vault-gateway/         # HTTP gateway for vault access
-│   ├── vault-mcp/             # MCP server for vault queries
-│   ├── queue-transport/       # Queue abstraction for vault-based messaging
-│   └── hq-cli/                # NPM package (@calvin.magezi/agent-hq)
+│   ├── vault-client/            # Shared vault data access layer (@repo/vault-client)
+│   ├── vault-sync/              # Event-driven file change detection engine
+│   ├── vault-sync-protocol/     # E2E encryption protocol for cross-device sync
+│   ├── vault-sync-server/       # WebSocket relay for multi-device vault sync
+│   ├── agent-relay-protocol/    # Types + RelayClient SDK for adapter ↔ server comms
+│   ├── agent-relay-server/      # Bun WS+REST gateway (port 18900)
+│   ├── discord-core/            # Shared Discord.js base class + utilities
+│   ├── hq-tools/                # Shared tool registry + built-in tools (image gen, DrawIT, skills)
+│   ├── vault-gateway/           # HTTP gateway for vault access
+│   ├── vault-mcp/               # MCP server for vault queries
+│   ├── queue-transport/         # Queue abstraction for vault-based messaging
+│   └── hq-cli/                  # NPM package (@calvin.magezi/agent-hq)
 ├── plugins/
 │   └── obsidian-vault-sync/   # Obsidian plugin for cross-device sync
 ├── scripts/
@@ -83,10 +89,13 @@ You (Discord / WhatsApp / Terminal)
 └── turbo.json                 # Turborepo pipeline config
 ```
 
-- **HQ Agent** — Picks up vault jobs via event-driven detection (with polling fallback), executes with Pi SDK
-- **Discord Relay** — Multi-bot system bridging Discord to CLI harnesses with session persistence
-- **WhatsApp Relay** — Native WhatsApp adapter via Baileys with voice notes, AI vision, media, polls, stickers, and orchestration
-- **Relay Server** — WebSocket + REST gateway routing messages between adapters, agent, and vault
+- **HQ Agent** — Picks up vault jobs via event-driven detection (with polling fallback), executes with Pi SDK. Supports background, RPC, and interactive job modes.
+- **Discord Relay** — Multi-bot system (Claude Code, OpenCode, Gemini CLI) bridging Discord to CLI harnesses with session persistence and streaming replies
+- **WhatsApp Relay** — Native WhatsApp adapter via Baileys with voice notes, AI vision, media, polls, stickers, and HQ orchestration
+- **Telegram Relay** — Telegram bot via grammY with voice transcription, photo AI vision, document handling, inline harness picker, and HTML formatting
+- **Relay Server** — WebSocket + REST gateway (port 18900) routing messages between all adapters, the agent, and the vault
+- **HQ Tools** — Shared tool registry with 2-tool gateway pattern (`hq_discover` + `hq_call`): built-in image generation, DrawIT diagrams, skill loader, and extensible registry
+- **Agent Roles & Execution Modes** — 6 sub-agent profiles (coder, researcher, reviewer, planner, devops, workspace) with auto-detection; 3 execution modes (quick/standard/thorough) with LLM fallback chains
 - **VaultSync** — Event-driven file watcher with append-only changelog, advisory locks, and typed pub/sub
 - **Cross-Device Sync** — E2E encrypted (AES-256-GCM) relay server + Obsidian plugin for multi-machine sync
 - **Discord Core** — Shared `DiscordBotBase` class, command routing, streaming replies, presence management
@@ -215,6 +224,21 @@ VISION_MODEL=google/gemini-2.5-flash-preview-05-20  # AI vision model (optional)
 MEDIA_AUTO_PROCESS=true                           # auto-process received media (optional)
 ```
 
+#### Telegram Relay (`apps/relay-adapter-telegram/.env.local`) — optional
+
+```bash
+TELEGRAM_BOT_TOKEN=your_token_from_botfather    # BotFather token
+TELEGRAM_USER_ID=your_numeric_telegram_id       # only this ID can interact with the bot
+RELAY_HOST=127.0.0.1                            # relay server host (default)
+RELAY_PORT=18900                                # relay server port (default)
+AGENTHQ_API_KEY=your_key                        # relay server auth (if set)
+GROQ_API_KEY=your_key                           # voice note transcription
+OPENAI_API_KEY=your_key                         # TTS voice replies (optional)
+OPENROUTER_API_KEY=your_key                     # AI vision for received images
+VISION_MODEL=google/gemini-2.5-flash            # vision model (optional)
+MEDIA_AUTO_PROCESS=true                         # auto-process received media (optional)
+```
+
 ### 5. Start services
 
 ```bash
@@ -223,6 +247,7 @@ hq start           # start agent + relay via launchd (after hq install)
 hq fg relay        # run relay in foreground (no launchd needed)
 hq fg agent        # run agent in foreground
 hq wa              # run WhatsApp in foreground (scan QR on first run)
+hq tg              # run Telegram in foreground (relay-server starts automatically)
 hq daemon start    # start background workflow daemon
 ```
 
@@ -272,11 +297,11 @@ GENERAL
   hq tools                        Install/re-auth CLI tools
   hq setup                        Scaffold vault only
 
-SERVICES                          targets: agent, relay, whatsapp, relay-server, all
+SERVICES                          targets: agent, relay, whatsapp, telegram, relay-server, all
   hq start  [target]              Start services
   hq stop   [target]              Stop services
   hq restart [target]             Restart services
-  hq fg [agent|relay|whatsapp]    Run in foreground
+  hq fg [agent|relay|whatsapp|telegram]  Run in foreground
 
 WHATSAPP
   hq wa                           Start WhatsApp in foreground (QR scan / debug)
@@ -285,6 +310,11 @@ WHATSAPP
   hq wa status                    WhatsApp service status
   hq wa logs [N]                  WhatsApp adapter logs
   hq wa errors [N]                WhatsApp adapter error logs
+
+TELEGRAM
+  hq tg                           Start Telegram in foreground (relay-server auto-starts)
+  hq tg logs [N]                  Telegram adapter logs
+  hq tg errors [N]                Telegram adapter error logs
 
 MONITORING
   hq status                       Service status
@@ -353,7 +383,58 @@ Send these in your WhatsApp self-chat:
 | `!status` | Show bot status and capabilities |
 | `!help` | Show all available commands |
 
-## Tech Stack
+## Telegram Relay
+
+The Telegram adapter (`apps/relay-adapter-telegram/`) uses [grammY](https://grammy.dev) with long polling — no webhook or SSL needed. Run `hq tg` to start. The relay server starts automatically if not already running.
+
+**Security**: Only the configured `TELEGRAM_USER_ID` can interact with the bot. All other senders are silently ignored.
+
+**Capabilities**: text chat, voice notes (Groq Whisper transcription + OpenAI TTS), photo AI vision, document handling, stickers, locations, contacts, HTML formatting, inline keyboard for harness selection (Claude / Gemini / OpenCode).
+
+### Telegram Commands
+
+Send these in your Telegram chat with the bot:
+
+| Command | Description |
+|---------|-------------|
+| `!reset` | Start a new conversation session |
+| `!model <name>` | Switch AI model |
+| `!voice on\|off` | Toggle TTS voice replies |
+| `!media on\|off` | Toggle auto media processing |
+| `!status` | Show bot status and relay connection |
+| `!help` | Show all available commands |
+
+## DrawIT — Diagram Generation
+
+The HQ agent has built-in diagram generation via the `drawit` tool family (powered by `@chamuka-labs/drawit-cli`). Diagrams are generated, converted to PNG, and auto-sent as image attachments on Discord and Telegram.
+
+```
+# Via Discord/Telegram chat:
+"Create a flowchart of the deployment pipeline"
+"Draw the database schema"
+"Generate an architecture diagram of the relay system"
+
+# Via hq CLI:
+hq diagram flow "Step 1" "Step 2" "Decision?" "Step 3"
+hq diagram map ./src
+hq diagram deps .
+hq diagram create --title "My Diagram"
+```
+
+The agent calls `drawit_flow`, `drawit_map`, `drawit_schema`, or `drawit_routes` depending on intent — the result is saved to `.vault/_jobs/outputs/` and automatically sent as an image attachment.
+
+## HQ Tools — Shared Tool Registry
+
+`packages/hq-tools/` provides the shared tool infrastructure used by the HQ agent. It uses a **2-tool gateway pattern** (inspired by Cloudflare's Code Mode MCP):
+
+- **`hq_discover`** — Search available tools with fuzzy matching (~1K token footprint)
+- **`hq_call`** — Execute a tool with TypeBox-validated arguments
+
+Built-in tools: `generate_image`, `drawit_flow`, `drawit_map`, `drawit_schema`, `drawit_routes`, `list_skills`, `load_skill`.
+
+Adding a new tool: create `packages/hq-tools/src/tools/myTool.ts`, register in `createDefaultRegistry()` — zero changes elsewhere, zero additional context tokens per new tool.
+
+
 
 | Layer | Technology |
 |-------|-----------|
@@ -364,8 +445,11 @@ Send these in your WhatsApp self-chat:
 | Agent | Pi SDK |
 | Discord | discord.js v14 |
 | WhatsApp | Baileys (WhatsApp Web multidevice) |
+| Telegram | grammY (long polling, no webhook required) |
 | Voice | Groq Whisper (STT), OpenAI TTS |
 | Vision | OpenRouter + Gemini Flash (image description) |
+| Image Gen | OpenRouter (`google/gemini-2.5-flash-image`) |
+| Diagrams | @chamuka-labs/drawit-cli + @resvg/resvg-js (SVG→PNG) |
 | Media | sharp (image/sticker processing) |
 | Sync | Custom E2E encrypted WebSocket protocol |
 | Build | Turborepo, Bun workspaces |

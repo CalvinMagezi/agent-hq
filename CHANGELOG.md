@@ -8,7 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Vault Workers** (`scripts/vault-workers/`): Six lightweight AI background agents that proactively improve the Obsidian vault. Runs within the existing daemon scheduler when `VAULT_WORKERS_ENABLED=true`. Workers are write-light — they only create new notes (tagged `source: vault-worker`) and never modify existing ones, making them fully reversible. LLM cascade: Ollama (free, local) → Gemini Flash Lite → Gemini Flash, so workers never reach expensive frontier models.
+  - **`gap-detector`** (6hr): Finds notes < 200 words and creates an analysis noting what content is likely missing.
+  - **`idea-connector`** (4hr): Uses vector embeddings to find note pairs with high similarity (0.75–0.95) that share no wiki-links and explains the conceptual bridge.
+  - **`project-nudger`** (24hr): Finds projects with no activity in 7+ days and suggests concrete next actions or archive decisions.
+  - **`note-enricher`** (8hr): Suggests tags and a one-sentence summary for recently-created untagged notes.
+  - **`daily-preparer`** (24hr, time-gated 22:00–23:59): Creates a briefing note for tomorrow based on today's memories and pending job queue.
+  - **`orphan-rescuer`** (12hr): Finds notes in the embedding index with zero graph connections and suggests which existing notes they could link to.
+  - **`AuditLog`** (`scripts/vault-workers/auditLog.ts`): Append-only per-day audit trail at `_logs/workers/YYYY-MM-DD.md`.
+  - **`WORKER-STATUS.md`** (`_system/WORKER-STATUS.md`): Per-worker run stats (processed, created, LLM calls, errors) written after each run, mirroring `DAEMON-STATUS.md`.
+- **Ollama provider** (`apps/agent/lib/modelConfig.ts`): Added `"ollama"` as a native provider. `isOllamaModel()` helper, `checkOllamaHealth()` lightweight health-check (2s timeout), and `buildModelConfig()` branch that maps `ollama/<model>` IDs to the OpenAI-compatible local endpoint (`http://localhost:11434/v1`). Zero cost config; no API key required.
+- **Worker-tier fallback chain** (`apps/agent/lib/modelFallback.ts`): `ollama/qwen3.5:9b → gemini-2.5-flash-lite → gemini-2.5-flash` and `ollama/llama3.2:3b → gemini-2.5-flash-lite → gemini-2.5-flash` chains ensure workers never escalate to expensive frontier models.
 - **WhatsApp full media capabilities** (`apps/relay-adapter-whatsapp/`): All Baileys-supported message types — image/video/document/sticker send+receive, AI vision for received images (OpenRouter), polls, locations, contacts (vCard), reactions (auto 👁️/✅), message editing/deletion/forwarding, reply quoting, WhatsApp-native markdown formatting. 9 new commands: `!react`, `!poll`, `!location`, `!sticker`, `!forward`, `!delete`, `!edit`, `!media`, `!format`. New files: `formatter.ts` (markdown→WhatsApp), `media.ts` (MediaHandler with vision, sticker conversion via sharp, temp file management).
+
 - **WhatsApp agentic orchestration** (`apps/relay-adapter-whatsapp/src/bot.ts`): Messages auto-route through the HQ agent → Discord harness delegation pipeline with live status updates via vault event subscriptions (`task:claimed`, `task:completed`, `job:completed`). 10-minute failsafe timeout with fallback to direct OpenRouter chat.
 - **WhatsApp native orchestration** (`apps/relay-adapter-whatsapp/src/orchestrator.ts`): Intent classification auto-delegates workspace tasks (calendar, Gmail, Drive) to Gemini CLI and coding tasks (git, debug, refactor) to Claude Code, with general chat going direct.
 - **WhatsApp model identity** (`apps/relay-adapter-whatsapp/src/bot.ts`): `!model` shows actual active model name; `!gemini` shortcut for Gemini 2.5 Flash via OpenRouter; system prompt includes model capabilities and routing guidance.

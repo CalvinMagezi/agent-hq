@@ -1543,6 +1543,27 @@ const tasks: {
   ];
 
 async function runScheduler(): Promise<void> {
+  // ── Vault Workers (opt-in via VAULT_WORKERS_ENABLED=true) ──────────
+  const VAULT_WORKERS_ENABLED = process.env.VAULT_WORKERS_ENABLED === "true";
+  let workerRunner: import("./vault-workers/index.js").WorkerRunner | null = null;
+
+  if (VAULT_WORKERS_ENABLED) {
+    console.log("[daemon] Vault workers enabled — loading worker registry...");
+    const { getWorkers, createWorkerRunner } = await import("./vault-workers/index.js");
+    workerRunner = createWorkerRunner(vault, search);
+    for (const worker of getWorkers()) {
+      tasks.push({
+        name: `worker:${worker.name}`,
+        intervalMs: worker.intervalMs,
+        fn: () => workerRunner!.run(worker),
+        lastRun: 0,
+      });
+    }
+    console.log(`[daemon] Registered ${getWorkers().length} vault workers`);
+  } else {
+    console.log("[daemon] Vault workers disabled (set VAULT_WORKERS_ENABLED=true to enable)");
+  }
+
   // Start the vault sync engine (file watching + change detection)
   try {
     await vault.startSync();

@@ -16,6 +16,7 @@ export interface BuildModelConfigOptions {
     modelId: string;
     geminiApiKey?: string;
     openrouterApiKey?: string;
+    ollamaBaseUrl?: string;
 }
 
 // ── Known Model Context Windows ──────────────────────────────────────
@@ -23,7 +24,7 @@ export interface BuildModelConfigOptions {
 export interface ModelSpecs {
     contextWindow: number;
     maxOutputTokens: number;
-    provider: "google" | "anthropic" | "openai" | "openrouter";
+    provider: "google" | "anthropic" | "openai" | "openrouter" | "ollama";
 }
 
 const MODEL_SPECS: Record<string, ModelSpecs> = {
@@ -35,6 +36,9 @@ const MODEL_SPECS: Record<string, ModelSpecs> = {
     "claude-haiku-4-5": { contextWindow: 200000, maxOutputTokens: 8192, provider: "anthropic" },
     "gpt-5": { contextWindow: 200000, maxOutputTokens: 32768, provider: "openai" },
     "gpt-4.1-mini": { contextWindow: 1048576, maxOutputTokens: 32768, provider: "openai" },
+    // Ollama local models (free, no API key required)
+    "ollama/qwen3.5:9b": { contextWindow: 32768, maxOutputTokens: 4096, provider: "ollama" },
+    "ollama/llama3.2:3b": { contextWindow: 32768, maxOutputTokens: 4096, provider: "ollama" },
 };
 
 /** Get known specs for a model ID. Returns undefined for unknown models. */
@@ -59,6 +63,30 @@ function isGeminiModel(modelId: string): boolean {
     return modelId.startsWith("gemini-") || modelId.startsWith("google/gemini-");
 }
 
+/**
+ * Returns true if the model ID refers to a local Ollama model.
+ * Matches IDs with "ollama/" prefix.
+ */
+export function isOllamaModel(modelId: string): boolean {
+    return modelId.startsWith("ollama/");
+}
+
+/**
+ * Check if the local Ollama server is healthy.
+ * Returns true if the server responds within 2 seconds.
+ */
+export async function checkOllamaHealth(baseUrl: string = "http://localhost:11434"): Promise<boolean> {
+    try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        const res = await fetch(`${baseUrl}/api/tags`, { signal: controller.signal });
+        clearTimeout(timeout);
+        return res.ok;
+    } catch {
+        return false;
+    }
+}
+
 /** Strip the "google/" prefix from an OpenRouter-style model ID. */
 function stripGooglePrefix(modelId: string): string {
     return modelId.startsWith("google/") ? modelId.slice("google/".length) : modelId;
@@ -78,7 +106,25 @@ function ensureGooglePrefix(modelId: string): string {
  *  - All other models → OpenRouter
  */
 export function buildModelConfig(options: BuildModelConfigOptions): any {
-    const { modelId, geminiApiKey, openrouterApiKey } = options;
+    const { modelId, geminiApiKey, openrouterApiKey, ollamaBaseUrl } = options;
+
+    // ── Ollama local path ───────────────────────────────────────────
+    if (isOllamaModel(modelId)) {
+        const bareId = modelId.slice("ollama/".length); // e.g. "qwen3.5:9b"
+        const base = ollamaBaseUrl ?? "http://localhost:11434";
+        return {
+            id: bareId,
+            name: bareId,
+            provider: "openrouter", // OpenAI-compat — Pi SDK treats it like OpenRouter
+            api: "openai-completions",
+            baseUrl: `${base}/v1`,
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 32768,
+            maxTokens: 4096,
+        };
+    }
 
     // ── Google direct path ──────────────────────────────────────────
     if (isGeminiModel(modelId) && geminiApiKey) {

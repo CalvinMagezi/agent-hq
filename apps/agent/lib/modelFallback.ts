@@ -55,6 +55,12 @@ const FALLBACK_CHAINS: Record<string, string[]> = {
 
     // ── Specialized ───────────────────────────────────────────────
     "gemini-2.5-flash-lite": ["gemini-2.5-flash-lite", "gemini-2.5-flash"],
+
+    // ── Worker tier (free/cheap models for background vault tasks) ─
+    // Tries local Ollama first (free), then cheap cloud fallbacks.
+    // Never reaches expensive frontier models.
+    "ollama/qwen3.5:9b": ["ollama/qwen3.5:9b", "gemini-2.5-flash-lite", "gemini-2.5-flash"],
+    "ollama/llama3.2:3b": ["ollama/llama3.2:3b", "gemini-2.5-flash-lite", "gemini-2.5-flash"],
 };
 
 // ── Error Classification ─────────────────────────────────────────────

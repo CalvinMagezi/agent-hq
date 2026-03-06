@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@repo/vault-client": "*",
+    "@repo/context-engine": "workspace:*",
     "@repo/discord-core": "workspace:*",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",

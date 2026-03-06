@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Context Engine** (`packages/context-engine/`): New unified, token-aware, and budget-driven context management layer. Replaces fragmented context assembly with a centralized engine that builds `ContextFrame`s. Features include token budgeting with cascaded surplus, layered assembly (system, memory, thread, injections), compaction strategies (thread summarization, chunk truncation), and an in-memory chunk index for notes. Wired into Discord relay and Agent Relay Server.
 - **Vault Workers** (`scripts/vault-workers/`): Six lightweight AI background agents that proactively improve the Obsidian vault. Runs within the existing daemon scheduler when `VAULT_WORKERS_ENABLED=true`. Workers are write-light — they only create new notes (tagged `source: vault-worker`) and never modify existing ones, making them fully reversible. LLM cascade: Ollama (free, local) → Gemini Flash Lite → Gemini Flash, so workers never reach expensive frontier models.
   - **`gap-detector`** (6hr): Finds notes < 200 words and creates an analysis noting what content is likely missing.
   - **`idea-connector`** (4hr): Uses vector embeddings to find note pairs with high similarity (0.75–0.95) that share no wiki-links and explains the conceptual bridge.

@@ -20,6 +20,8 @@ import {
 import type { BaseHarness } from "./harnesses/base.js";
 import { ContextEnricher } from "./context.js";
 import { VaultAPI as ConvexAPI } from "./vaultApi.js";
+import { ContextEngine } from "@repo/context-engine";
+import { createVaultAdapter } from "./contextEngineAdapter.js";
 import { processMemoryIntents } from "./memory.js";
 import { handleCommand } from "./commands.js";
 import { createTranscriber, type Transcriber } from "./transcribe.js";
@@ -59,6 +61,7 @@ export function buildConfig(): RelayConfig {
 export class BotInstance extends DiscordBotBase {
   private harness: BaseHarness;
   private enricher: ContextEnricher;
+  private contextEngine: ContextEngine | null = null;
   private convex: ConvexAPI;
   private relayConfig: RelayConfig;
   private transcriber: Transcriber | null = null;
@@ -92,6 +95,20 @@ export class BotInstance extends DiscordBotBase {
     this.convex = new ConvexAPI(config);
     this.enricher = new ContextEnricher(this.convex, config, this.harnessType);
     this.sharedSync = sharedSync ?? null;
+
+    // Initialize the new context engine for token-budgeted context assembly
+    try {
+      const vaultAdapter = createVaultAdapter(this.convex);
+      this.contextEngine = new ContextEngine({
+        vault: vaultAdapter,
+        model: process.env.DEFAULT_MODEL ?? "claude-sonnet-4-5",
+        profile: "standard",
+      });
+      console.log(`[${harness.harnessName}] Context engine initialized`);
+    } catch (err: any) {
+      console.warn(`[${harness.harnessName}] Context engine init failed, using fallback:`, err.message);
+      this.contextEngine = null;
+    }
   }
 
   async start(): Promise<void> {
@@ -139,7 +156,7 @@ export class BotInstance extends DiscordBotBase {
       this.syncCleanup();
       this.syncCleanup = null;
     }
-    await this.convex.sendHeartbeat(this.agentId, "offline").catch(() => {});
+    await this.convex.sendHeartbeat(this.agentId, "offline").catch(() => { });
     await super.stop();
   }
 
@@ -214,7 +231,7 @@ export class BotInstance extends DiscordBotBase {
         await writeFile(audioPath, buffer);
 
         const result = await this.transcriber.transcribe(audioPath);
-        await unlink(audioPath).catch(() => {});
+        await unlink(audioPath).catch(() => { });
 
         if (!result.text) {
           await message.reply("Could not transcribe voice message (empty result).");
@@ -321,13 +338,39 @@ export class BotInstance extends DiscordBotBase {
         }
       }
 
-      const enrichedPrompt = await this.enricher.buildPrompt(promptText, message.channelId, replyToContent);
+      // Build context using new engine (with fallback to legacy enricher)
+      let enrichedPrompt: string;
+      let systemInstruction: string;
+
+      if (this.contextEngine) {
+        try {
+          const frame = await this.contextEngine.buildFrame({
+            userMessage: promptText,
+            threadId: message.channelId,
+            channelId: message.channelId,
+            replyTo: replyToContent,
+            harnessHint: this.harnessType,
+          });
+          // Use the engine's flattened output as the user prompt
+          enrichedPrompt = this.contextEngine.flatten(frame);
+          // System instruction still comes from the enricher (it has harness-specific instructions)
+          systemInstruction = this.enricher.buildSystemInstruction();
+          console.log(`[${this.harness.harnessName}] Context frame: ${frame.budget.utilizationPct}% utilization, ${frame.meta.threadTurnsIncluded} turns, ${frame.meta.injectionsIncluded} injections`);
+        } catch (err: any) {
+          console.warn(`[${this.harness.harnessName}] Context engine failed, using fallback:`, err.message);
+          enrichedPrompt = await this.enricher.buildPrompt(promptText, message.channelId, replyToContent);
+          systemInstruction = this.enricher.buildSystemInstruction();
+        }
+      } else {
+        enrichedPrompt = await this.enricher.buildPrompt(promptText, message.channelId, replyToContent);
+        systemInstruction = this.enricher.buildSystemInstruction();
+      }
+
       await this.convex.saveMessage("user", content, message.channelId);
 
       await streaming.start();
       streamingStarted = true;
 
-      const systemInstruction = this.enricher.buildSystemInstruction();
       const callOptions = {
         filePaths,
         continueSession: isContinue,
@@ -378,7 +421,7 @@ export class BotInstance extends DiscordBotBase {
       }
 
       for (const fp of filePaths) {
-        await unlink(fp).catch(() => {});
+        await unlink(fp).catch(() => { });
       }
     } catch (error: any) {
       console.error("Message handling error:", error);
@@ -405,7 +448,7 @@ export class BotInstance extends DiscordBotBase {
       harnessType: this.harnessType,
       capabilities: this.getCapabilities(),
     };
-    this.convex.sendHeartbeat(this.agentId, status, heartbeatMeta).catch(() => {});
+    this.convex.sendHeartbeat(this.agentId, status, heartbeatMeta).catch(() => { });
   }
 
   private getCapabilities(): string[] {

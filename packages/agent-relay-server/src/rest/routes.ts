@@ -1,24 +1,43 @@
-/**
- * REST API routes for the relay server.
- *
- * Provides HTTP endpoints for clients that prefer REST over WebSocket.
- */
-
 import type { VaultBridge } from "../bridges/vaultBridge";
 import type { AuthManager } from "../auth";
 import type { ClientRegistry } from "../clientRegistry";
 import { RELAY_SERVER_VERSION } from "@repo/agent-relay-protocol";
+import { ContextEngine, type VaultClientLike } from "@repo/context-engine";
 
 export class RestRouter {
   private bridge: VaultBridge;
   private auth: AuthManager;
   private registry: ClientRegistry;
   private startTime = Date.now();
+  private contextEngine: ContextEngine | null = null;
 
   constructor(bridge: VaultBridge, auth: AuthManager, registry: ClientRegistry) {
     this.bridge = bridge;
     this.auth = auth;
     this.registry = registry;
+
+    // Initialize context engine with VaultBridge as the vault adapter
+    try {
+      const vaultAdapter: VaultClientLike = {
+        getAgentContext: () => bridge.getAgentContext(),
+        searchNotes: async (query, limit) => {
+          const results = await bridge.searchNotes(query, limit);
+          return results.map((r: any) => ({
+            title: r.title,
+            content: r.snippet ?? r.content ?? "",
+            notebook: r.notebook,
+            tags: r.tags,
+          }));
+        },
+      };
+      this.contextEngine = new ContextEngine({
+        vault: vaultAdapter,
+        model: process.env.DEFAULT_MODEL ?? "moonshotai/kimi-k2.5",
+        profile: "standard",
+      });
+    } catch {
+      this.contextEngine = null;
+    }
   }
 
   async handle(req: Request): Promise<Response | null> {
@@ -123,10 +142,34 @@ export class RestRouter {
 
       try {
         const model = body.modelOverride ?? process.env.DEFAULT_MODEL ?? "moonshotai/kimi-k2.5";
-        const ctx = await this.bridge.getAgentContext();
-        const systemParts: string[] = [];
-        if (ctx.soul) systemParts.push(ctx.soul);
-        if (ctx.memory) systemParts.push(`## Memory\n${ctx.memory}`);
+
+        // Use context engine for budgeted context assembly
+        let systemPrompt: string;
+        let userContent: string = body.content;
+
+        if (this.contextEngine) {
+          try {
+            const frame = await this.contextEngine.buildFrame({
+              userMessage: body.content,
+            });
+            systemPrompt = frame.system;
+            // Include memory and injections in the user prompt
+            userContent = this.contextEngine.flatten(frame);
+          } catch {
+            // Fallback to simple context assembly
+            const ctx = await this.bridge.getAgentContext();
+            const systemParts: string[] = [];
+            if (ctx.soul) systemParts.push(ctx.soul);
+            if (ctx.memory) systemParts.push(`## Memory\n${ctx.memory}`);
+            systemPrompt = systemParts.join("\n\n");
+          }
+        } else {
+          const ctx = await this.bridge.getAgentContext();
+          const systemParts: string[] = [];
+          if (ctx.soul) systemParts.push(ctx.soul);
+          if (ctx.memory) systemParts.push(`## Memory\n${ctx.memory}`);
+          systemPrompt = systemParts.join("\n\n");
+        }
 
         const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
@@ -139,8 +182,8 @@ export class RestRouter {
           body: JSON.stringify({
             model,
             messages: [
-              { role: "system", content: systemParts.join("\n\n") },
-              { role: "user", content: body.content },
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userContent },
             ],
           }),
         });

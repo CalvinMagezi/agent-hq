@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@repo/agent-relay-protocol": "workspace:*",
+    "@repo/context-engine": "workspace:*",
     "@repo/vault-client": "workspace:*",
     "@repo/vault-sync": "workspace:*"
   },

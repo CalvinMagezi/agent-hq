@@ -1,5 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { getNote } from '~/server/notes'
+import { useState } from 'react'
+import { getNote, togglePinNote } from '~/server/notes'
 import { MarkdownViewer } from '~/components/MarkdownViewer'
 import { PdfViewer } from '~/components/PdfViewer'
 import { ImageViewer } from '~/components/ImageViewer'
@@ -21,9 +22,26 @@ export const Route = createFileRoute('/vault/$')({
 
 function VaultFileView() {
     const { filePath, content } = Route.useLoaderData()
-    const { setChatPanelOpen, setChatContext, chatPanelOpen } = useHQStore()
+    const { setChatPanelOpen, setChatContext, chatPanelOpen, bumpPinnedVersion } = useHQStore()
 
     const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
+    const isMd = ext === 'md'
+
+    // Parse pinned state from frontmatter in content
+    const initialPinned = isMd && /^---[\s\S]*?^pinned:\s*true/m.test(content)
+    const [isPinned, setIsPinned] = useState(initialPinned)
+    const [pinning, setPinning] = useState(false)
+
+    const handleTogglePin = async () => {
+        setPinning(true)
+        try {
+            await togglePinNote({ data: { path: filePath, pinned: !isPinned } })
+            setIsPinned(!isPinned)
+            bumpPinnedVersion()
+        } finally {
+            setPinning(false)
+        }
+    }
 
     const handleSendToChat = () => {
         setChatPanelOpen(true)
@@ -75,6 +93,17 @@ function VaultFileView() {
                     >
                         Copy path
                     </button>
+                    {isMd && (
+                        <button
+                            onClick={handleTogglePin}
+                            disabled={pinning}
+                            className="px-2 py-1 rounded text-[10px] font-mono transition-colors hover:bg-white/10 flex items-center gap-1"
+                            style={{ color: isPinned ? 'var(--accent-amber)' : 'var(--text-dim)' }}
+                            title={isPinned ? 'Unpin note' : 'Pin note'}
+                        >
+                            📌 {isPinned ? 'Pinned' : 'Pin'}
+                        </button>
+                    )}
                     <button
                         onClick={handleSendToChat}
                         className="px-3 py-1.5 rounded-full text-xs font-mono font-bold flex items-center gap-1.5 transition-colors"

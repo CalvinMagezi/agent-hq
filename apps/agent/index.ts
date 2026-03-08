@@ -18,7 +18,6 @@ import { shouldFlushMemory, executeMemoryFlush, createFlushState, DEFAULT_FLUSH_
 import { logger } from "./lib/logger.js";
 import { ChatSessionManager } from "./lib/chatSession.js";
 import { buildModelConfig, getContextWindow } from "./lib/modelConfig.js";
-import { recordTaskUsage } from "./lib/cfoRouter.js";
 import { AgentWsServer } from "./lib/wsServer.js";
 import { PtyManager } from "./lib/ptyManager.js";
 import { Orchestrator } from "./lib/orchestrator.js";
@@ -405,56 +404,6 @@ async function setupAgent() {
             logger.warn("Heartbeat failed", { error: err.message });
         }
     }, 10000); // 10 seconds
-
-    // 3b. Start COO Response Poller (only relevant if orchestration_mode is external)
-    setInterval(async () => {
-        try {
-            const context = await adapter.client.getAgentContext();
-            const config = context.config || {};
-            const mode = config["orchestration_mode"];
-            if (mode !== "external") return;
-
-            const intentIds = await adapter.client.listCooResponses();
-            for (const intentId of intentIds) {
-                const responsePath = path.join(VAULT_PATH, "_delegation/coo_outbox", `${intentId}.json`);
-                if (!fs.existsSync(responsePath)) continue;
-
-                try {
-                    const data = JSON.parse(fs.readFileSync(responsePath, "utf-8"));
-                    const response = data.response || "[Done]";
-                    const metadata = data.metadata || {};
-
-                    console.log(`📬 COO Response received for ${intentId}`);
-
-                    // 1. Deliver to Discord
-                    if (metadata.discordChannelId) {
-                        await discordBot?.sendChatMessage(metadata.discordChannelId, response);
-                    }
-
-                    // 2. Deliver to WebSocket (broadcast)
-                    if (wsServer) {
-                        wsServer.broadcast({
-                            type: "event",
-                            event: "coo.response",
-                            payload: { intentId, response, metadata }
-                        });
-                    }
-
-                    // Cleanup - delete the file after processing
-                    try {
-                        fs.unlinkSync(responsePath);
-                    } catch (err) {
-                        console.warn(`Failed to delete processed COO response: ${responsePath}`);
-                    }
-                } catch (e: any) {
-                    console.error(`Error processing COO response ${intentId}:`, e.message);
-                }
-            }
-        } catch (err: any) {
-            // Failure in poller loop should not crash the agent
-            logger.warn("COO response poller failed", { error: err.message });
-        }
-    }, 5000); // Poll every 5 seconds
 
     // 4. Initialize Chat Session (shared brain for all clients: Discord, WebSocket, etc.)
     if (OPENROUTER_API_KEY || GEMINI_API_KEY) {
@@ -1428,17 +1377,6 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
 
         if (job.type !== "interactive") console.log("\n✓ Task completed");
         logger.info("Job completed", { jobId: job._id, type: job.type, stats: jobStats });
-
-        // Report actual token usage to CFO for tracking
-        if (jobStats?.tokens) {
-            void recordTaskUsage(
-                adapter.client,
-                job._id,
-                MODEL_ID,
-                jobStats.tokens.input ?? 0,
-                jobStats.tokens.output ?? 0,
-            );
-        }
 
         // Notify Discord of job completion
         if (discordBot) {

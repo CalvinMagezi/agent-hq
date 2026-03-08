@@ -103,9 +103,9 @@ function listThreads() {
 
 // ─── Vault context cache ──────────────────────────────────────────────────────
 
-interface VaultCtx { soul: string; memory: string; preferences: string; builtAt: number }
+interface VaultCtx { soul: string; memory: string; preferences: string; heartbeat: string; pinnedNotes: string; builtAt: number }
 let ctxCache: VaultCtx | null = null
-const CTX_TTL = 3 * 60 * 1000
+const CTX_TTL = 30 * 1000 // 30s — stays fresh for pinned notes and news pulse
 
 function readSystemFile(name: string): string {
   try {
@@ -115,14 +115,30 @@ function readSystemFile(name: string): string {
   } catch { return '' }
 }
 
+function readNewsPulse(): string {
+  try {
+    const p = path.join(VAULT_PATH, '_system/HEARTBEAT.md')
+    if (!fs.existsSync(p)) return ''
+    const raw = fs.readFileSync(p, 'utf-8')
+    const match = raw.match(/<!-- agent-hq-news-pulse -->([\s\S]*)$/)
+    return match ? match[1].trim() : ''
+  } catch { return '' }
+}
+
 async function getVaultCtx(): Promise<VaultCtx> {
   if (ctxCache && Date.now() - ctxCache.builtAt < CTX_TTL) return ctxCache
   try {
     const agentCtx = await vaultClient.getAgentContext()
+    const pinnedArr = agentCtx.pinnedNotes ?? []
+    const pinnedNotes = pinnedArr.length > 0
+      ? pinnedArr.slice(0, 5).map((n: { title: string; content: string }) => `- [${n.title}]: ${n.content.slice(0, 300)}`).join('\n')
+      : ''
     ctxCache = {
       soul: agentCtx.soul ?? readSystemFile('SOUL'),
       memory: agentCtx.memory ?? readSystemFile('MEMORY'),
       preferences: agentCtx.preferences ?? readSystemFile('PREFERENCES'),
+      heartbeat: readNewsPulse(),
+      pinnedNotes,
       builtAt: Date.now(),
     }
   } catch {
@@ -130,6 +146,8 @@ async function getVaultCtx(): Promise<VaultCtx> {
       soul: readSystemFile('SOUL'),
       memory: readSystemFile('MEMORY'),
       preferences: readSystemFile('PREFERENCES'),
+      heartbeat: readNewsPulse(),
+      pinnedNotes: '',
       builtAt: Date.now(),
     }
   }
@@ -142,6 +160,8 @@ function buildSystemContext(ctx: VaultCtx): string {
   if (ctx.soul) parts.push(`## Identity\n${ctx.soul}`)
   if (ctx.memory) parts.push(`## Persistent Memory\n${ctx.memory}`)
   if (ctx.preferences) parts.push(`## User Preferences\n${ctx.preferences}`)
+  if (ctx.pinnedNotes) parts.push(`## Pinned Notes\n${ctx.pinnedNotes}`)
+  if (ctx.heartbeat) parts.push(`## Current World Context\n${ctx.heartbeat}`)
   parts.push(`## Vault\nThe vault (.vault/) is the shared brain for all agents. Key locations:\n- _system/: SOUL.md, MEMORY.md, PREFERENCES.md\n- _jobs/: job queue\n- Notebooks/Projects/: Kolaborate, SiteSeer, Chamuka, YMF\n- _threads/: conversation history`)
   return parts.join('\n\n')
 }

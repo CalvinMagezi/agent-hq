@@ -7,8 +7,6 @@
 import { Type } from "@sinclair/typebox";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { logger } from "./logger.js";
-import { routeUserMessage } from "./cooRouter.js";
-import { consultCfo, shouldWarnUser, formatEstimate } from "./cfoRouter.js";
 
 /** Callback fired when a job is dispatched, so the Discord bot can track it */
 export type OnJobDispatched = (jobId: string) => void;
@@ -37,29 +35,21 @@ export function createDispatchJobTool(config: {
         execute: async (toolCallId, args) => {
             logger.info("dispatch_job CALLED", { instruction: args.instruction.substring(0, 100), baseUrl: config.baseUrl ?? "vault" });
             try {
-                // Vault mode: use cooRouter
+                // Vault mode: create job directly
                 if (config.vaultClient) {
-                    // Non-blocking CFO cost estimate (3s timeout)
-                    let costPrefix = "";
-                    try {
-                        const estimate = await consultCfo(config.vaultClient, args.instruction);
-                        if (estimate && shouldWarnUser(estimate)) {
-                            costPrefix = formatEstimate(estimate);
-                        }
-                    } catch { /* CFO unavailable — proceed without estimate */ }
-
-                    const { jobId, intentId, message } = await routeUserMessage(
-                        config.vaultClient,
-                        args.instruction,
-                        args.priority ?? 50,
-                        args.securityProfile ?? "guarded"
-                    );
+                    const jobId = await config.vaultClient.createJob({
+                        instruction: args.instruction,
+                        type: "background",
+                        priority: args.priority ?? 50,
+                        securityProfile: (args.securityProfile ?? "guarded") as any,
+                    });
 
                     if (jobId) config.onJobDispatched?.(jobId);
 
+                    const message = `Job dispatched (ID: ${jobId}). The task is now running in the background.`;
                     return {
-                        content: [{ type: "text", text: costPrefix + message }],
-                        details: { jobId, intentId },
+                        content: [{ type: "text", text: message }],
+                        details: { jobId },
                     };
                 }
 

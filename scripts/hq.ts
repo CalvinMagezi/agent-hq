@@ -1212,98 +1212,6 @@ ${c.bold}OUTPUT${c.reset}
   }
 }
 
-// hq coo
-async function cmdCoo(subcommand?: string, arg?: string): Promise<void> {
-  const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
-
-  function setCooMode(vaultPath: string, mode: string, cooName?: string) {
-    const configPath = path.join(vaultPath, "_system/CONFIG.md");
-    if (!fs.existsSync(configPath)) {
-      fail("CONFIG.md not found in _system");
-      return;
-    }
-    let content = fs.readFileSync(configPath, "utf-8");
-    content = content.replace(
-      /\| orchestration_mode\s*\|\s*[a-zA-Z0-9_\-]*\s*\|/,
-      `| orchestration_mode | ${mode} |`
-    );
-    if (cooName !== undefined) {
-      content = content.replace(
-        /\| active_coo\s*\|\s*[a-zA-Z0-9_\-]*\s*\|/,
-        `| active_coo | ${cooName} |`
-      );
-    }
-    fs.writeFileSync(configPath, content, "utf-8");
-  }
-
-  const sysOrchestrators = path.join(VAULT_PATH, "_system/orchestrators");
-  const extMemories = path.join(VAULT_PATH, "_external");
-
-  if (subcommand === "install" && arg) {
-    fs.mkdirSync(sysOrchestrators, { recursive: true });
-    const name = path.basename(arg, '.git');
-    const targetDir = path.join(sysOrchestrators, name);
-    if (fs.existsSync(targetDir)) {
-      fail(`COO ${name} is already installed`);
-      return;
-    }
-    console.log(`Installing COO: ${name}...`);
-    try {
-      spawnSync("git", ["clone", arg, targetDir], { stdio: "inherit" });
-      execSync(`bun install`, { cwd: targetDir, stdio: "inherit" });
-      const memoryDir = path.join(extMemories, name);
-      fs.mkdirSync(memoryDir, { recursive: true });
-      ok(`Installed ${name}`);
-    } catch (e: any) {
-      fail(`Installation failed: ${e.message}`);
-    }
-  } else if (subcommand === "uninstall" && arg) {
-    const targetDir = path.join(sysOrchestrators, arg);
-    if (!fs.existsSync(targetDir)) {
-      fail(`COO ${arg} not found`);
-      return;
-    }
-    fs.rmSync(targetDir, { recursive: true, force: true });
-    ok(`Uninstalled sandbox for ${arg} (memory preserved)`);
-  } else if (subcommand === "activate" && arg) {
-    setCooMode(VAULT_PATH, "external", arg);
-    ok(`Activated COO: ${arg}`);
-  } else if (subcommand === "deactivate") {
-    setCooMode(VAULT_PATH, "internal");
-    ok("Deactivated COO (internal orchestration engaged)");
-  } else if (subcommand === "status") {
-    const configPath = path.join(VAULT_PATH, "_system/CONFIG.md");
-    let mode = "internal";
-    let active = "none";
-    if (fs.existsSync(configPath)) {
-      const content = fs.readFileSync(configPath, "utf-8");
-      const modeMatch = content.match(/\| orchestration_mode\s*\|\s*([a-zA-Z0-9_\-]+)\s*\|/);
-      if (modeMatch) mode = modeMatch[1];
-      const activeMatch = content.match(/\| active_coo\s*\|\s*([a-zA-Z0-9_\-]+)\s*\|/);
-      if (activeMatch) active = activeMatch[1];
-    }
-    section("COO Status");
-    console.log(`Mode:       ${c.bold}${mode}${c.reset}`);
-    console.log(`Active COO: ${c.bold}${active}${c.reset}\n`);
-    console.log("Installed Orchestrators:");
-    if (fs.existsSync(sysOrchestrators)) {
-      let count = 0;
-      for (const entry of fs.readdirSync(sysOrchestrators, { withFileTypes: true })) {
-        if (entry.isDirectory() && !entry.name.startsWith(".")) {
-          console.log(`  - ${entry.name}`);
-          count++;
-        }
-      }
-      if (count === 0) console.log("  (none)");
-    } else {
-      console.log("  (none)");
-    }
-    console.log();
-  } else {
-    fail(`Unknown coo subcommand: ${subcommand}`);
-  }
-}
-
 // hq tools [--non-interactive]
 // Check, install, and authenticate: Claude CLI, Gemini CLI, OpenCode
 async function cmdTools(nonInteractive = false): Promise<void> {
@@ -1479,10 +1387,10 @@ async function cmdSetup(): Promise<void> {
   console.log(`\nSetting up vault at: ${VAULT_PATH}\n`);
 
   const dirs = [
-    "_system", "_system/orchestrators",
+    "_system",
     "_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed",
     "_delegation/pending", "_delegation/claimed", "_delegation/completed",
-    "_delegation/relay-health", "_delegation/coo_inbox", "_delegation/coo_outbox",
+    "_delegation/relay-health",
     "_threads/active", "_threads/archived",
     "_approvals/pending", "_approvals/resolved",
     "_logs", "_usage/daily", "_embeddings", "_agent-sessions", "_moc", "_templates",
@@ -1863,9 +1771,6 @@ switch (cmd) {
 
   case "install-cli":
     await cmdInstallCli(); break;
-
-  case "coo":
-    await cmdCoo(arg1, arg2); break;
 
   case "tools": case "t":
     await cmdTools(process.argv.includes("--non-interactive")); break;

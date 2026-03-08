@@ -1,7 +1,18 @@
 import { readFile } from "fs/promises";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { ConvexAPI } from "./vaultApi.js";
 import type { RelayConfig } from "./types.js";
+
+function readNewsPulse(vaultPath: string): string {
+  try {
+    const p = join(vaultPath, "_system/HEARTBEAT.md");
+    if (!existsSync(p)) return "";
+    const raw = readFileSync(p, "utf-8");
+    const match = raw.match(/<!-- agent-hq-news-pulse -->([\s\S]*)$/);
+    return match ? match[1].trim() : "";
+  } catch { return ""; }
+}
 
 export class ContextEnricher {
   private convex: ConvexAPI;
@@ -151,6 +162,12 @@ export class ContextEnricher {
       for (const note of pinnedNotes.slice(0, 5)) {
         parts.push(`- [${note.title}]: ${note.content.substring(0, 300)}`);
       }
+    }
+
+    // Current world news pulse (refreshed every 15 min by daemon)
+    const newsPulse = this.config.vaultPath ? readNewsPulse(this.config.vaultPath) : "";
+    if (newsPulse) {
+      parts.push(`\nCURRENT WORLD CONTEXT:\n${newsPulse}`);
     }
 
     // Memory facts and goals

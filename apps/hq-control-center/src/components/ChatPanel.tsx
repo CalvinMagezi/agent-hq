@@ -83,6 +83,57 @@ function relTime(iso: string) {
     return `${Math.floor(h / 24)}d`
 }
 
+// Stable message key: timestamp + role + first 8 chars of content
+function msgKey(msg: ThreadMessage, idx: number) {
+    return `${msg.timestamp}-${msg.role}-${msg.content.slice(0, 8)}-${idx}`
+}
+
+// ─── Message skeleton (loading placeholder) ───────────────────────────────────
+
+function MessageSkeleton() {
+    return (
+        <div className="flex flex-col gap-4 px-4 py-4 max-w-3xl mx-auto w-full">
+            {/* Assistant skeleton */}
+            <div className="flex gap-3 items-start">
+                <div className="w-6 h-6 rounded-full flex-shrink-0 animate-pulse" style={{ background: 'var(--bg-elevated)' }} />
+                <div className="flex-1 space-y-2 pt-0.5">
+                    <div className="h-2 rounded animate-pulse w-16" style={{ background: 'var(--bg-elevated)' }} />
+                    <div className="h-3 rounded animate-pulse w-3/4" style={{ background: 'var(--bg-elevated)' }} />
+                    <div className="h-3 rounded animate-pulse w-1/2" style={{ background: 'var(--bg-elevated)' }} />
+                </div>
+            </div>
+            {/* User skeleton */}
+            <div className="flex justify-end">
+                <div className="h-8 rounded-2xl animate-pulse w-1/3" style={{ background: 'var(--bg-elevated)' }} />
+            </div>
+            {/* Assistant skeleton */}
+            <div className="flex gap-3 items-start">
+                <div className="w-6 h-6 rounded-full flex-shrink-0 animate-pulse" style={{ background: 'var(--bg-elevated)' }} />
+                <div className="flex-1 space-y-2 pt-0.5">
+                    <div className="h-2 rounded animate-pulse w-16" style={{ background: 'var(--bg-elevated)' }} />
+                    <div className="h-3 rounded animate-pulse w-full" style={{ background: 'var(--bg-elevated)' }} />
+                    <div className="h-3 rounded animate-pulse w-5/6" style={{ background: 'var(--bg-elevated)' }} />
+                    <div className="h-3 rounded animate-pulse w-2/3" style={{ background: 'var(--bg-elevated)' }} />
+                </div>
+            </div>
+        </div>
+    )
+}
+
+// ─── Reconnecting overlay ─────────────────────────────────────────────────────
+
+function ReconnectingBanner() {
+    return (
+        <div
+            className="mb-2 px-3 py-1.5 rounded-lg text-[10px] font-mono flex items-center gap-2"
+            style={{ background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.2)', color: 'rgba(255,170,0,0.8)' }}
+        >
+            <span className="w-1.5 h-1.5 rounded-full animate-pulse inline-block" style={{ background: 'rgba(255,170,0,0.8)' }} />
+            Reconnecting…
+        </div>
+    )
+}
+
 // ─── Harness picker ───────────────────────────────────────────────────────────
 
 function HarnessPicker({ value, onChange }: { value: string; onChange: (id: string) => void }) {
@@ -237,13 +288,21 @@ function ThreadItem({ meta, active, onClick, onDelete }: {
 // ─── Main Panel ───────────────────────────────────────────────────────────────
 
 const LAST_THREAD_KEY = 'hq:chat:lastThreadId'
+const RECONNECT_BASE_MS = 1000
+const RECONNECT_MAX_MS = 15000
+const OFFLINE_GRACE_MS = 1500  // delay before showing offline UI
 
 export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void; fullPage?: boolean }) {
     const wsRef = useRef<WebSocket | null>(null)
     const [wsReady, setWsReady] = useState(false)
+    // Grace-period state: don't snap offline UI in immediately
+    const [showOffline, setShowOffline] = useState(false)
+    const offlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
     const [threads, setThreads] = useState<ThreadMeta[]>([])
     const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
     const [messages, setMessages] = useState<ThreadMessage[]>([])
+    const [isLoadingThread, setIsLoadingThread] = useState(false)
     const [streamingContent, setStreamingContent] = useState('')
     const [isStreaming, setIsStreaming] = useState(false)
     const [toolActivity, setToolActivity] = useState<string | null>(null)
@@ -254,6 +313,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     const messagesContainerRef = useRef<HTMLDivElement>(null)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
     const activeThreadRef = useRef<string | null>(null)
+    const prevMsgCountRef = useRef(0)
     const [isAtBottom, setIsAtBottom] = useState(true)
     activeThreadRef.current = activeThreadId
 
@@ -269,7 +329,6 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                 setInput(`[Referencing selection from: [[${chatContext.path}]]]${previewText}`)
             }
             setChatContext(null)
-            // Auto-focus after a short delay
             setTimeout(() => textareaRef.current?.focus(), 50)
         }
     }, [chatContext, setChatContext])
@@ -293,9 +352,12 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         return () => container.removeEventListener('scroll', handleScroll)
     }, [])
 
-    // Auto-scroll to bottom when near bottom
+    // Only auto-scroll when new messages arrive (count grew) or streaming progresses —
+    // never when messages are cleared (which would jump to top of empty list).
     useLayoutEffect(() => {
-        if (isAtBottom) {
+        const grew = messages.length > prevMsgCountRef.current
+        prevMsgCountRef.current = messages.length
+        if ((grew || streamingContent) && isAtBottom) {
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
         }
     }, [messages, streamingContent, isAtBottom])
@@ -313,25 +375,40 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         el.style.height = Math.min(el.scrollHeight, 200) + 'px'
     }, [input])
 
-    // Connect WS
+    // Connect WS with exponential backoff
     useEffect(() => {
         const wsUrl = `ws://${window.location.hostname}:4748/ws`
         let socket: WebSocket
         let retryTimer: ReturnType<typeof setTimeout>
+        let attempt = 0
 
         const connect = () => {
             socket = new WebSocket(wsUrl)
 
             socket.onopen = () => {
                 wsRef.current = socket
+                attempt = 0
                 setWsReady(true)
+                setShowOffline(false)
+                if (offlineTimerRef.current) {
+                    clearTimeout(offlineTimerRef.current)
+                    offlineTimerRef.current = null
+                }
                 socket.send(JSON.stringify({ type: 'chat:list' }))
             }
 
             socket.onclose = () => {
                 wsRef.current = null
                 setWsReady(false)
-                retryTimer = setTimeout(connect, 3000)
+                // Grace period before showing offline UI so brief glitches don't snap the UI
+                offlineTimerRef.current = setTimeout(() => {
+                    setShowOffline(true)
+                }, OFFLINE_GRACE_MS)
+
+                // Exponential backoff capped at RECONNECT_MAX_MS
+                const delay = Math.min(RECONNECT_BASE_MS * Math.pow(1.5, attempt), RECONNECT_MAX_MS)
+                attempt++
+                retryTimer = setTimeout(connect, delay)
             }
 
             socket.onmessage = (e) => {
@@ -349,12 +426,16 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                                 : msg.threads[0].threadId
                             activeThreadRef.current = toRestore
                             setActiveThreadId(toRestore)
+                            setIsLoadingThread(true)
                             socket.send(JSON.stringify({ type: 'chat:load', threadId: toRestore }))
                         }
                     } else if (msg.type === 'chat:history') {
                         if (msg.thread) {
-                            setMessages(msg.thread.messages)
+                            // Atomic swap: replace messages and clear loading in a single batch
+                            setMessages(msg.thread.messages ?? [])
                             setHarness(msg.thread.harness)
+                            prevMsgCountRef.current = 0 // reset so scroll fires correctly on load
+                            setIsLoadingThread(false)
                         }
                     } else if (msg.type === 'chat:status') {
                         if (msg.threadId === tid) {
@@ -370,7 +451,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                             setIsStreaming(false)
                             setStreamingContent('')
                             setToolActivity(null)
-                            // Reload the thread to get the saved message
+                            setIsLoadingThread(true)
                             socket.send(JSON.stringify({ type: 'chat:load', threadId: tid }))
                             socket.send(JSON.stringify({ type: 'chat:list' }))
                         }
@@ -379,6 +460,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                             setIsStreaming(false)
                             setStreamingContent('')
                             setToolActivity(null)
+                            setIsLoadingThread(false)
                             setMessages(prev => [...prev, {
                                 role: 'system',
                                 content: `[Error: ${msg.error}]`,
@@ -394,12 +476,14 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         return () => {
             socket?.close()
             clearTimeout(retryTimer)
+            if (offlineTimerRef.current) clearTimeout(offlineTimerRef.current)
         }
     }, [])
 
     const openThread = useCallback((threadId: string) => {
         setActiveThreadIdPersisted(threadId)
-        setMessages([])
+        // Don't clear messages immediately — show skeleton overlay instead to avoid blank flash
+        setIsLoadingThread(true)
         setStreamingContent('')
         setIsStreaming(false)
         setDropdownOpen(false)
@@ -410,6 +494,8 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         const threadId = newThreadId()
         setActiveThreadIdPersisted(threadId)
         setMessages([])
+        setIsLoadingThread(false)
+        prevMsgCountRef.current = 0
         setStreamingContent('')
         setIsStreaming(false)
         setInput('')
@@ -421,6 +507,8 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         if (activeThreadId === threadId) {
             setActiveThreadIdPersisted(null)
             setMessages([])
+            setIsLoadingThread(false)
+            prevMsgCountRef.current = 0
         }
     }, [activeThreadId, setActiveThreadIdPersisted])
 
@@ -458,6 +546,8 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     } : null
 
     const activeTitle = activeThreadId ? (threads.find(t => t.threadId === activeThreadId)?.title ?? 'New conversation') : 'Select or start'
+
+    const visibleMessages = messages.filter(m => !(m.role === 'assistant' && !m.content))
 
     return (
         <div className={`h-full flex flex-col bg-transparent ${fullPage ? 'w-full' : ''}`}>
@@ -509,8 +599,23 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                 </div>
 
                 <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1.5 mr-1" title={wsReady ? 'Connected' : 'Offline'}>
-                        <div className="w-1.5 h-1.5 rounded-full" style={{ background: wsReady ? 'var(--accent-green)' : 'var(--accent-red)' }} />
+                    {/* Connection dot — amber pulsing while reconnecting, green when live */}
+                    <div
+                        className="flex items-center gap-1.5 mr-1"
+                        title={wsReady ? 'Connected' : showOffline ? 'Offline' : 'Reconnecting…'}
+                    >
+                        <div
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{
+                                background: wsReady
+                                    ? 'var(--accent-green)'
+                                    : showOffline
+                                        ? 'var(--accent-red)'
+                                        : 'rgba(255,170,0,0.8)',
+                                transition: 'background 0.4s ease',
+                                animation: !wsReady && !showOffline ? 'pulse 1s infinite' : 'none',
+                            }}
+                        />
                     </div>
                     {onClose && (
                         <button onClick={onClose} className="p-1 rounded opacity-60 hover:opacity-100 hover:bg-white/10" style={{ color: 'var(--text-primary)' }}>
@@ -522,8 +627,15 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
 
             {/* Messages View */}
             <div className="relative flex-1 min-h-0 bg-transparent flex flex-col">
-                <div ref={messagesContainerRef} className="flex-1 overflow-y-auto pt-4 pb-8 px-2" style={{ background: 'rgba(0,0,0,0.1)' }}>
-                    {!activeThreadId && messages.length === 0 ? (
+                <div
+                    ref={messagesContainerRef}
+                    className="flex-1 overflow-y-auto pt-4 pb-8 px-2"
+                    style={{ background: 'rgba(0,0,0,0.1)' }}
+                >
+                    {/* Loading skeleton — shown while thread history is in flight */}
+                    {isLoadingThread ? (
+                        <MessageSkeleton />
+                    ) : !activeThreadId && messages.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center gap-4 px-4">
                             <div className="text-3xl opacity-20">◎</div>
                             <p className="text-[11px] font-mono text-center" style={{ color: 'var(--text-dim)' }}>
@@ -532,11 +644,9 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                         </div>
                     ) : (
                         <div className="max-w-3xl mx-auto space-y-1">
-                            {messages
-                                .filter(m => !(m.role === 'assistant' && !m.content))
-                                .map((msg, i) => (
-                                    <MessageBubble key={i} msg={msg} />
-                                ))}
+                            {visibleMessages.map((msg, i) => (
+                                <MessageBubble key={msgKey(msg, i)} msg={msg} />
+                            ))}
                             {streamMsg && <MessageBubble msg={streamMsg} isStreaming />}
                             <div ref={messagesEndRef} />
                         </div>
@@ -550,11 +660,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
 
             {/* Composer */}
             <div className="flex-shrink-0 p-3 pt-2 overflow-visible relative z-[60]" style={{ background: 'var(--bg-surface)', borderTop: '1px solid var(--border)' }}>
-                {!wsReady && (
-                    <div className="mb-2 px-2 py-1 rounded text-[10px] font-mono text-center" style={{ background: 'rgba(255,68,68,0.1)', color: 'var(--accent-red)' }}>
-                        ws-server offline
-                    </div>
-                )}
+                {!wsReady && showOffline && <ReconnectingBanner />}
                 <div className="max-w-3xl mx-auto">
                     <div className="flex flex-col rounded-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
                         <textarea
@@ -562,11 +668,16 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                             value={input}
                             onChange={e => setInput(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            placeholder={wsReady ? 'Message...' : 'Connecting...'}
-                            disabled={!wsReady || isStreaming}
+                            placeholder={wsReady ? 'Message…' : 'Reconnecting…'}
+                            disabled={isStreaming}
                             rows={1}
-                            className="w-full px-3 py-2.5 font-mono text-xs bg-transparent outline-none resize-none"
-                            style={{ color: 'var(--text-primary)', minHeight: '36px', maxHeight: '200px' }}
+                            className="w-full px-3 py-2.5 font-mono bg-transparent outline-none resize-none"
+                            style={{
+                                color: 'var(--text-primary)',
+                                minHeight: '36px',
+                                maxHeight: '200px',
+                                fontSize: '16px',  // prevents iOS Safari zoom
+                            }}
                         />
 
                         <div className="flex items-center justify-between px-2 pb-2 mt-0.5">

@@ -1,7 +1,11 @@
 # Agent-HQ
 
+<p align="center">
+  <img src="docs/screenshots/hero.jpg" alt="Agent-HQ PWA running on iPhone" width="360" />
+</p>
+
 > **📚 Full docs and deep-dives:**
-> [DeepWiki →](https://deepwiki.com/CalvinMagezi/agent-hq) · [NotebookLM →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f) · [Video Overview →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f?artifactId=a19ec78e-59a7-4078-aec4-def62656b22d)
+> [DeepWiki →](https://deepwiki.com/CalvinMagezi/agent-hq) · [NotebookLM →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f) · [Video Overview →](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f?artifactId=fae2ad27-8c60-4051-b204-1abf3d529afa)
 
 ---
 

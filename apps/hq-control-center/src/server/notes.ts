@@ -273,6 +273,28 @@ export const getNote = createServerFn({ method: 'GET' })
     }
   })
 
+interface TogglePinParams {
+  path: string
+  pinned: boolean
+}
+
+export const togglePinNote = createServerFn({ method: 'POST' })
+  .inputValidator((d: TogglePinParams) => d)
+  .handler(async ({ data }): Promise<{ success: boolean }> => {
+    const fullPath = path.resolve(VAULT_PATH, data.path)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if (!fullPath.startsWith(resolvedVault + path.sep)) return { success: false }
+    if (!fs.existsSync(fullPath) || !fullPath.endsWith('.md')) return { success: false }
+
+    const raw = fs.readFileSync(fullPath, 'utf-8')
+    const parsed = matter(raw)
+    parsed.data.pinned = data.pinned
+    if (!parsed.data.updatedAt) parsed.data.updatedAt = new Date().toISOString()
+    const updated = matter.stringify(parsed.content, parsed.data)
+    fs.writeFileSync(fullPath, updated, 'utf-8')
+    return { success: true }
+  })
+
 interface CreateNoteParams {
   title: string
   content: string

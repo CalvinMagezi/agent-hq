@@ -20,7 +20,6 @@ console.log(`\nSetting up vault at: ${vaultPath}\n`);
 
 const dirs = [
   "_system",
-  "_system/orchestrators",
   "_jobs/pending",
   "_jobs/running",
   "_jobs/done",
@@ -29,8 +28,6 @@ const dirs = [
   "_delegation/claimed",
   "_delegation/completed",
   "_delegation/relay-health",
-  "_delegation/coo_inbox",
-  "_delegation/coo_outbox",
   "_threads/active",
   "_threads/archived",
   "_approvals/pending",
@@ -62,34 +59,6 @@ for (const dir of dirs) {
 if (createdDirs === 0) {
   console.log("  All directories already exist.");
 }
-
-// ── 1.5. Initialize fbmq queues ──────────────────────────────────────
-
-import { spawnSync } from "child_process";
-
-const fbmqQueues = [
-  { dir: "_fbmq/jobs", priority: true },
-  { dir: "_fbmq/delegation", priority: true },
-  { dir: "_fbmq/staged", priority: false },
-];
-
-for (const q of fbmqQueues) {
-  const full = path.join(vaultPath, q.dir);
-  if (!fs.existsSync(full)) {
-    fs.mkdirSync(full, { recursive: true });
-  }
-  const args = ["init", full];
-  if (q.priority) args.push("--priority");
-
-  const res = spawnSync("fbmq", args);
-  if (res.status === 0) {
-    console.log(`  Initialized fbmq: ${q.dir}/`);
-  } else {
-    // Only warn if it's not simply an "already initialized" error, though fbmq init is idempotent
-    console.log(`  fbmq init ${q.dir} returned ${res.status}`);
-  }
-}
-
 
 // ── 2. Seed system files (skip if they already exist) ───────────────
 
@@ -222,8 +191,6 @@ const gitkeepDirs = [
   "_delegation/claimed",
   "_delegation/completed",
   "_delegation/relay-health",
-  "_delegation/coo_inbox",
-  "_delegation/coo_outbox",
   "_threads/active",
   "_threads/archived",
   "_logs",

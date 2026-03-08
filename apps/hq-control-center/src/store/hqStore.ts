@@ -4,6 +4,7 @@ import type { Job } from '~/server/jobs'
 import type { RelayAgent, WorkerAgent } from '~/server/agents'
 import type { DaemonTask } from '~/server/daemon'
 import type { UsageResult } from '~/server/usage'
+import type { PinnedNote } from '~/server/notes'
 
 export interface VaultEvent {
   type: string
@@ -41,6 +42,11 @@ interface HQState {
   setChatPanelOpen: (v: boolean) => void
   chatContext: { type: 'file' | 'selection'; path: string; content?: string } | null
   setChatContext: (ctx: { type: 'file' | 'selection'; path: string; content?: string } | null) => void
+
+  pinnedNotes: PinnedNote[]
+  setPinnedNotes: (notes: PinnedNote[]) => void
+  pinnedVersion: number
+  bumpPinnedVersion: () => void
 }
 
 export const useHQStore = create<HQState>()(
@@ -77,6 +83,11 @@ export const useHQStore = create<HQState>()(
       setChatPanelOpen: (v) => set({ chatPanelOpen: v }),
       chatContext: null,
       setChatContext: (ctx) => set({ chatContext: ctx }),
+
+      pinnedNotes: [],
+      setPinnedNotes: (notes) => set({ pinnedNotes: notes }),
+      pinnedVersion: 0,
+      bumpPinnedVersion: () => set((s) => ({ pinnedVersion: s.pinnedVersion + 1 })),
     }), {
     name: 'hq-store',
     partialize: (state) => ({ chatPanelOpen: state.chatPanelOpen }),

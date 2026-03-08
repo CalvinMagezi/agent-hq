@@ -1,6 +1,6 @@
 import { createFileRoute, Outlet, useLocation, Link } from '@tanstack/react-router'
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
-import { getPinnedNotes, getNoteTree } from '~/server/notes'
+import { getPinnedNotes, getNoteTree, togglePinNote } from '~/server/notes'
 import type { NoteTreeNode, PinnedNote } from '~/server/notes'
 import { useHQStore } from '~/store/hqStore'
 import { ChatPanel } from '~/components/ChatPanel'
@@ -88,43 +88,48 @@ function TreeNode({
     )
 }
 
-// ─── Pinned card ─────────────────────────────────────────────────────────────
+// ─── Pinned chip (horizontal) ────────────────────────────────────────────────
 
-export function PinnedCard({ note, isSelected, onClick }: { note: PinnedNote; isSelected: boolean; onClick?: () => void }) {
+export function PinnedCard({ note, isSelected, onClick, onUnpin }: { note: PinnedNote; isSelected: boolean; onClick?: () => void; onUnpin?: (path: string) => void }) {
     return (
-        <Link
-            to="/vault/$"
-            params={{ _splat: note.path }}
-            onClick={onClick}
-            className="w-full text-left px-3 py-2.5 rounded-lg transition-colors flex flex-col gap-1 block"
-            style={{
-                background: isSelected ? 'rgba(255,179,0,0.1)' : 'var(--bg-elevated)',
-                border: `1px solid ${isSelected ? 'rgba(255,179,0,0.3)' : 'var(--border)'}`,
-            }}
-        >
-            <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] font-mono font-bold truncate" style={{ color: isSelected ? 'var(--accent-amber)' : 'var(--text-primary)' }}>
+        <div className="relative group flex-shrink-0" style={{ width: '112px' }}>
+            <Link
+                to="/vault/$"
+                params={{ _splat: note.path }}
+                onClick={onClick}
+                className="inline-flex flex-col gap-0.5 px-2.5 py-1.5 rounded-lg transition-colors w-full"
+                style={{
+                    background: isSelected ? 'rgba(255,179,0,0.12)' : 'var(--bg-elevated)',
+                    border: `1px solid ${isSelected ? 'rgba(255,179,0,0.35)' : 'var(--border)'}`,
+                }}
+            >
+                <span
+                    className="text-[11px] font-mono font-bold leading-tight"
+                    style={{
+                        color: isSelected ? 'var(--accent-amber)' : 'var(--text-primary)',
+                        display: '-webkit-box',
+                        WebkitLineClamp: 2,
+                        WebkitBoxOrient: 'vertical',
+                        overflow: 'hidden',
+                    }}
+                >
                     {note.title}
                 </span>
-                <span className="text-[9px] flex-shrink-0 font-mono" style={{ color: 'var(--text-dim)' }}>
+                <span className="text-[9px] font-mono" style={{ color: 'var(--text-dim)' }}>
                     {relTime(note.updatedAt)}
                 </span>
-            </div>
-            {note.preview && (
-                <p className="text-[10px] font-mono line-clamp-2 leading-relaxed" style={{ color: 'var(--text-dim)' }}>
-                    {note.preview}
-                </p>
+            </Link>
+            {onUnpin && (
+                <button
+                    onClick={(e) => { e.stopPropagation(); onUnpin(note.path) }}
+                    title="Unpin"
+                    className="absolute -top-1.5 -right-1.5 opacity-0 group-hover:opacity-100 transition-opacity w-4 h-4 flex items-center justify-center rounded-full text-[9px] font-bold"
+                    style={{ background: 'var(--bg-surface)', color: 'var(--text-dim)', border: '1px solid var(--border)' }}
+                >
+                    ✕
+                </button>
             )}
-            {note.tags.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-0.5">
-                    {note.tags.slice(0, 3).map((t) => (
-                        <span key={t} className="text-[9px] px-1 py-0.5 rounded font-mono" style={{ background: 'rgba(255,179,0,0.1)', color: 'var(--accent-amber)' }}>
-                            #{t}
-                        </span>
-                    ))}
-                </div>
-            )}
-        </Link>
+        </div>
     )
 }
 
@@ -139,7 +144,6 @@ function VaultLayout() {
     const isVaultRoot = location.pathname === '/vault' || location.pathname === '/vault/'
     const activePath = isVaultRoot ? null : decodeURIComponent(location.pathname.replace(/^\/vault\//, ''))
 
-    const [pinned, setPinned] = useState<PinnedNote[]>([])
     const [tree, setTree] = useState<NoteTreeNode | null>(null)
 
     // Auto-derive section from activePath
@@ -155,7 +159,7 @@ function VaultLayout() {
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
 
-    const { chatPanelOpen, setChatPanelOpen } = useHQStore()
+    const { chatPanelOpen, setChatPanelOpen, pinnedNotes: pinned, setPinnedNotes, pinnedVersion, bumpPinnedVersion } = useHQStore()
 
     // Close sidebar on navigation (mobile)
     const closeSidebar = useCallback(() => {
@@ -169,10 +173,15 @@ function VaultLayout() {
         }
     }, [derivedSection, activePath])
 
-    // Load pinned notes once
+    // Load pinned notes on mount and whenever a pin/unpin happens
     useEffect(() => {
-        getPinnedNotes().then((res) => setPinned(res.notes))
-    }, [])
+        getPinnedNotes().then((res) => setPinnedNotes(res.notes))
+    }, [pinnedVersion])
+
+    const handleUnpin = useCallback(async (notePath: string) => {
+        await togglePinNote({ data: { path: notePath, pinned: false } })
+        bumpPinnedVersion()
+    }, [bumpPinnedVersion])
 
     // Load tree when section changes
     useEffect(() => {
@@ -256,15 +265,18 @@ function VaultLayout() {
                 />
             </div>
 
-            {/* Pinned notes — collapsible */}
+            {/* Pinned notes — horizontal scroll strip, fixed height */}
             {pinned.length > 0 && !query && (
-                <div className="flex-shrink-0 px-3 pb-3">
-                    <div className="text-[9px] font-mono tracking-widest uppercase mb-2 flex items-center justify-between" style={{ color: 'var(--accent-amber)' }}>
-                        <span className="flex items-center gap-1.5"><span>📌</span> Pinned</span>
+                <div className="flex-shrink-0 pb-2">
+                    <div className="text-[9px] font-mono tracking-widest uppercase mb-1.5 px-3 flex items-center gap-1.5" style={{ color: 'var(--accent-amber)' }}>
+                        <span>📌</span> Pinned
                     </div>
-                    <div className="flex flex-col gap-1.5">
+                    <div
+                        className="flex flex-row gap-2 px-3 pb-1 overflow-x-auto"
+                        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                    >
                         {pinned.map((n) => (
-                            <PinnedCard key={n.path} note={n} isSelected={activePath === n.path} onClick={closeSidebar} />
+                            <PinnedCard key={n.path} note={n} isSelected={activePath === n.path} onClick={closeSidebar} onUnpin={handleUnpin} />
                         ))}
                     </div>
                 </div>

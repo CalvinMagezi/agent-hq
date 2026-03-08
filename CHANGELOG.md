@@ -67,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WhatsApp chat timeout**: Bumped from 2min to 10min to accommodate longer LLM responses; added `GROQ_API_KEY` to launchd plist for voice transcription.
 
 ### Removed
+- **External Orchestrators & Finance Agents**: Removed `COO` and `CFO` background processes, `hq coo` CLI commands, and related watchdog/daemon integrations.
+- **OpenClaw Bridge**: Removed `initBridge` and `stopBridge` logic from the daemon.
+- **Queue/fbmq Setup**: Removed `fbmq` queue initialization from `scripts/setup.ts` and dropped related directories (`_fbmq/*`, `_delegation/coo_*`, `_system/orchestrators`) from vault defaults.
+- **Control Center Share Route**: Removed the `/share` PWA route and sidebar link from `apps/hq-control-center`.
 - **`scripts/agent-hq-status.ts`**: Superseded by `hq status` / `hq health`.
 - **`scripts/migrate-queues.ts`**: One-time migration utility no longer needed.
 - **`scripts/setup-gemini-plugins.sh`**: Superseded by `hq tools`.

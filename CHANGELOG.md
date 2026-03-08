@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Codex CLI Harness** (`apps/discord-relay/src/harnesses/codex.ts`): Added Codex CLI harness (`codex exec --json`) with session resumption and standard orchestration context injection.
+- **Claude Scheduled Tasks** (`scripts/agent-hq-daemon.ts`): New cron engine that automatically loads `SKILL.md` files from `~/.claude/scheduled-tasks/` and executes them via `claude -p` at scheduled intervals without session persistence.
+- **Codex Web/WebSocket Support** (`apps/hq-control-center/`, `ws-server.ts`): Built-in Codex session and streaming support in HQ Control Center, along with a new chat scroll-to-bottom UI control.
+- **Codex Telegram/WhatsApp Relay** (`apps/relay-adapter-telegram/`, `apps/relay-adapter-whatsapp/`): Integrated Codex local harness into Telegram and WhatsApp relay adapters, selectable via `!harness codex`.
 - **HQ Web PWA** (`apps/hq-control-center/`): Migrated control center from Electron to a modern PWA served by Bun and Vite. Features new React frontend, WebSocket server, and backend API routes for managing agents and jobs.
 - **Vault Sync Server** (`packages/vault-sync-server/`): Added vault sync and iCloud bridge daemons to the native agent tooling. Registered in macOS launchd via `hq start vault-sync` and `hq start icloud-bridge`.
 - **Vault Memory Context** (`packages/vault-memory/`): Added memory consolidation workflow with native Ollama client integration.

@@ -4,6 +4,7 @@ import { buildConfig, BotInstance } from "./src/bot.js";
 import { ClaudeHarness } from "./src/claude.js";
 import { OpenCodeHarness } from "./src/harnesses/opencode.js";
 import { GeminiHarness } from "./src/harnesses/gemini.js";
+import { CodexHarness } from "./src/harnesses/codex.js";
 
 dotenv.config({ path: ".env.local" });
 
@@ -115,6 +116,26 @@ if (process.env.DISCORD_BOT_TOKEN_GEMINI) {
   console.log("[Gemini CLI] Bot enabled — token configured.");
 }
 
+// ── Codex CLI Bot (optional — set DISCORD_BOT_TOKEN_CODEX to enable) ──
+if (process.env.DISCORD_BOT_TOKEN_CODEX) {
+  const codexRelayDir = process.env.RELAY_DIR_CODEX || ".discord-relay-codex";
+  const codexConfig = {
+    ...sharedConfig,
+    discordBotToken: process.env.DISCORD_BOT_TOKEN_CODEX,
+    discordBotId: process.env.DISCORD_BOT_ID_CODEX,
+    relayDir: codexRelayDir,
+    uploadsDir: `${codexRelayDir}/uploads`,
+  };
+  const codexHarness = new CodexHarness({
+    codexPath: process.env.CODEX_PATH || "codex",
+    projectDir: process.env.PROJECT_DIR || process.cwd(),
+    relayDir: codexRelayDir,
+    defaultModel: process.env.CODEX_DEFAULT_MODEL,
+  });
+  bots.push(new BotInstance(codexConfig, codexHarness, sharedSync));
+  console.log("[Codex CLI] Bot enabled — token configured.");
+}
+
 // Graceful shutdown
 const shutdown = async () => {
   console.log("\nShutting down all bots...");
@@ -131,6 +152,7 @@ const enabledBots: string[] = [];
 if (process.env.DISCORD_BOT_TOKEN) enabledBots.push("Claude Code");
 if (process.env.DISCORD_BOT_TOKEN_OPENCODE) enabledBots.push("OpenCode");
 if (process.env.DISCORD_BOT_TOKEN_GEMINI) enabledBots.push("Gemini");
+if (process.env.DISCORD_BOT_TOKEN_CODEX) enabledBots.push("Codex");
 
 console.log(`
 +----------------------------------------------+

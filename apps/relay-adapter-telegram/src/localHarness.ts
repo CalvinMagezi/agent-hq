@@ -9,7 +9,7 @@
 import { spawn } from "bun";
 import { readFileSync, writeFileSync } from "fs";
 
-export type LocalHarnessType = "claude-code" | "opencode" | "gemini-cli";
+export type LocalHarnessType = "claude-code" | "opencode" | "gemini-cli" | "codex-cli";
 
 interface SessionEntry {
   sessionId: string | null;
@@ -29,6 +29,7 @@ export class LocalHarness {
     "claude-code": { ...BLANK_SESSION },
     "opencode": { ...BLANK_SESSION },
     "gemini-cli": { ...BLANK_SESSION },
+    "codex-cli": { ...BLANK_SESSION },
   };
   private stateFile: string;
   private running = false;
@@ -87,6 +88,7 @@ export class LocalHarness {
         case "claude-code": return await this.runClaude(prompt);
         case "opencode": return await this.runOpenCode(prompt);
         case "gemini-cli": return await this.runGemini(prompt);
+        case "codex-cli": return await this.runCodex(prompt);
       }
     } finally {
       this.running = false;
@@ -168,6 +170,80 @@ export class LocalHarness {
     const cmd = ["gemini", "--yolo", "-p", prompt];
     const { stdout, stderr } = await this.exec(cmd);
     return stdout.trim() || stderr.trim() || "No response from Gemini.";
+  }
+
+  private async runCodex(prompt: string): Promise<string> {
+    const session = this.sessions["codex-cli"];
+    const age = session.lastActivity
+      ? Date.now() - new Date(session.lastActivity).getTime()
+      : Infinity;
+    const threadId = session.sessionId && age < SESSION_TTL_MS ? session.sessionId : null;
+
+    // New:    codex exec --json --dangerously-bypass-approvals-and-sandbox -
+    // Resume: codex exec resume <thread_id> --json --dangerously-bypass-approvals-and-sandbox -
+    // '-' = read prompt from stdin (avoids arg-length limits and escaping issues)
+    const cmd = ["codex", "exec"];
+    if (threadId) cmd.push("resume", threadId);
+    cmd.push("--json", "--dangerously-bypass-approvals-and-sandbox", "-");
+
+    // Use direct spawn with stdin: "pipe" (exec() helper uses stdin: "ignore")
+    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const proc = spawn({
+        cmd,
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env },
+      });
+
+      this.activeKill = () => proc.kill();
+
+      proc.stdin.write(prompt);
+      proc.stdin.end();
+
+      const timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error(`Codex timed out after ${TIMEOUT_MS / 60000} minutes`));
+      }, TIMEOUT_MS);
+
+      Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ])
+        .then(([stdout, stderr]) => {
+          clearTimeout(timer);
+          resolve({ stdout, stderr });
+        })
+        .catch((err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+    });
+
+    // Parse JSONL — extract text from item.completed agent_message events
+    const textParts: string[] = [];
+    let newThreadId: string | null = null;
+    for (const line of result.stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const data = JSON.parse(trimmed);
+        if (data.type === "thread.started" && data.thread_id) {
+          newThreadId = data.thread_id;
+        }
+        if (data.type === "item.completed" && data.item?.type === "agent_message" && data.item?.text) {
+          textParts.push(data.item.text);
+        }
+      } catch { /* non-JSON line — ignore */ }
+    }
+
+    if (newThreadId) {
+      this.sessions["codex-cli"] = { sessionId: newThreadId, lastActivity: new Date().toISOString() };
+      this.save();
+    }
+
+    return textParts.join("\n").trim() || result.stderr.trim() || "No response from Codex.";
   }
 
   private exec(cmd: string[]): Promise<{ stdout: string; stderr: string }> {

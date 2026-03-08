@@ -459,6 +459,8 @@ export class BotInstance extends DiscordBotBase {
         return ["code", "multi-model", "file-ops", "generation"];
       case "gemini-cli":
         return ["google-workspace", "google-docs", "google-sheets", "google-drive", "gmail", "google-calendar", "research", "analysis", "large-context", "summarization"];
+      case "codex-cli":
+        return ["code", "file-ops", "agentic-coding", "refactor", "debug", "test"];
       default:
         return ["general"];
     }

@@ -163,15 +163,34 @@ async function writeCronSchedule(): Promise<void> {
     { interval: "Daily 8pm",  task: "daily-brief",             description: "Send end-of-day summary to Telegram with all task activity" },
   ];
 
-  // ── Claude Code scheduled tasks ──
-  const claudeRows = [
-    { schedule: "Every 2hr (0 */2 * * *)",  task: "vault-stale-jobs",     model: "Haiku", description: "Summarise stuck jobs into HEARTBEAT.md" },
-    { schedule: "Every 6hr (0 */6 * * *)",  task: "vault-dead-links",     model: "Haiku", description: "Scan vault for broken [[wikilinks]], write LINK-HEALTH.md" },
-    { schedule: "Daily 2am  (0 2 * * *)",   task: "vault-orphan-notes",   model: "Haiku", description: "Find Notebooks/ notes with no incoming links, write ORPHAN-NOTES.md" },
-    { schedule: "Daily 6am  (0 6 * * *)",   task: "vault-memory-digest",  model: "Sonnet",description: "Prune MEMORY.md duplicates, archive stale entries" },
-    { schedule: "Daily 7am  (0 7 * * *)",   task: "project-status-pulse", model: "Haiku", description: "Quick health snapshot per project, write PROJECT-PULSE.md" },
-    { schedule: "Mon 9am    (0 9 * * 1)",   task: "vault-soul-check",     model: "Sonnet",description: "Weekly SOUL.md alignment audit, write SOUL-HEALTH.md" },
-  ];
+  // ── Claude Code scheduled tasks — load from SKILL.md files ──
+  const claudeTasksDir = path.join(
+    process.env.HOME ?? "/Users/" + (process.env.USER ?? ""),
+    ".claude/scheduled-tasks"
+  );
+  const claudeRows: { schedule: string; task: string; model: string; description: string; status: string }[] = [];
+  if (fs.existsSync(claudeTasksDir)) {
+    for (const entry of fs.readdirSync(claudeTasksDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+      const skillPath = path.join(claudeTasksDir, entry.name, "SKILL.md");
+      if (!fs.existsSync(skillPath)) continue;
+      const raw = fs.readFileSync(skillPath, "utf-8");
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) continue;
+      const fm: Record<string, string> = {};
+      for (const line of fmMatch[1].split("\n")) {
+        const [key, ...rest] = line.split(":");
+        if (key && rest.length) fm[key.trim()] = rest.join(":").trim().replace(/^"|"$/g, "");
+      }
+      claudeRows.push({
+        task: fm.name ?? entry.name,
+        schedule: fm.schedule ?? "?",
+        model: fm.model ?? "?",
+        description: fm.description ?? "",
+        status: "✅ loaded",
+      });
+    }
+  }
 
   const now = localTimestamp();
   const lines: string[] = [
@@ -193,9 +212,11 @@ async function writeCronSchedule(): Promise<void> {
     ``,
     `## Claude Code Scheduled Tasks (AI reasoning, via \`~/.claude/scheduled-tasks/\`)`,
     ``,
-    `| Schedule | Task | Model | What it does |`,
-    `|---|---|---|---|`,
-    ...claudeRows.map(r => `| ${r.schedule} | \`${r.task}\` | ${r.model} | ${r.description} |`),
+    claudeRows.length === 0 ? `_No tasks found in ${claudeTasksDir}_` : `_${claudeRows.length} task(s) registered and running via daemon_`,
+    ``,
+    `| Schedule | Task | Model | Status | What it does |`,
+    `|---|---|---|---|---|`,
+    ...(claudeRows.length > 0 ? claudeRows.map(r => `| \`${r.schedule}\` | \`${r.task}\` | ${r.model} | ${r.status} | ${r.description} |`) : [`| — | — | — | ❌ none loaded | —`]),
     ``,
     `## Notification Channels`,
     ``,
@@ -249,6 +270,36 @@ async function writeDaemonStatus(): Promise<void> {
       const lastSuccess = s.lastSuccess ?? "never";
       const lastError = s.lastError ? s.lastError.substring(0, 50) : "-";
       lines.push(`| ${taskName} | ${lastRun} | ${lastSuccess} | ${s.runCount} | ${s.errorCount} | ${lastError} |`);
+    }
+
+    // ── Claude Code scheduled task status (from log file) ──
+    lines.push("");
+    lines.push("## Claude Code Scheduled Tasks");
+    lines.push("");
+    const scheduledLogPath = path.join(VAULT_PATH, "_logs/scheduled-tasks.log");
+    const claudeTasksDir2 = path.join(process.env.HOME ?? "", ".claude/scheduled-tasks");
+    const claudeTaskNames: string[] = [];
+    if (fs.existsSync(claudeTasksDir2)) {
+      for (const entry of fs.readdirSync(claudeTasksDir2, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.name.startsWith("_")) claudeTaskNames.push(entry.name);
+      }
+    }
+    if (claudeTaskNames.length === 0) {
+      lines.push("_No Claude Code scheduled tasks found in ~/.claude/scheduled-tasks/_");
+    } else {
+      // Read last run for each task from the log
+      const lastRunMap: Record<string, string> = {};
+      if (fs.existsSync(scheduledLogPath)) {
+        for (const line of fs.readFileSync(scheduledLogPath, "utf-8").split("\n").filter(Boolean)) {
+          const m = line.match(/^\[(.+?)\]\s+([\w-]+):\s+(.+)$/);
+          if (m) lastRunMap[m[2]] = `${m[1]} — ${m[3]}`;
+        }
+      }
+      lines.push("| Task | Last Run |");
+      lines.push("|---|---|");
+      for (const name of claudeTaskNames) {
+        lines.push(`| \`${name}\` | ${lastRunMap[name] ?? "never"} |`);
+      }
     }
 
     fs.writeFileSync(STATUS_FILE, matter.stringify(lines.join("\n"), frontmatter), "utf-8");
@@ -1676,6 +1727,158 @@ async function promoteDelegationReady(): Promise<void> {
   }
 }
 
+// ─── Claude Code Scheduled Tasks ─────────────────────────────────────
+
+const CLAUDE_SCHEDULED_TASKS_DIR = path.join(
+  process.env.HOME ?? "/Users/" + (process.env.USER ?? ""),
+  ".claude/scheduled-tasks"
+);
+
+interface ClaudeScheduledTask {
+  name: string;
+  description: string;
+  schedule: string; // cron expression
+  model: string;
+  prompt: string;
+  lastFiredMinute: number; // epoch minutes, to prevent double-fire
+}
+
+/** Parse a SKILL.md file into a ClaudeScheduledTask */
+function parseClaudeSkill(skillPath: string): ClaudeScheduledTask | null {
+  try {
+    const raw = fs.readFileSync(skillPath, "utf-8");
+    // Extract YAML frontmatter
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+    if (!fmMatch) return null;
+    const fm: Record<string, string> = {};
+    for (const line of fmMatch[1].split("\n")) {
+      const [key, ...rest] = line.split(":");
+      if (key && rest.length) fm[key.trim()] = rest.join(":").trim().replace(/^"|"$/g, "");
+    }
+    if (!fm.name || !fm.schedule || !fm.model) return null;
+    return {
+      name: fm.name,
+      description: fm.description ?? "",
+      schedule: fm.schedule,
+      model: fm.model,
+      prompt: fmMatch[2].trim(),
+      lastFiredMinute: 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Match a 5-field cron expression against a Date (min hour dom month dow) */
+function matchesCron(expr: string, date: Date): boolean {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  const [minF, hourF, domF, monthF, dowF] = fields;
+  const val = [date.getMinutes(), date.getHours(), date.getDate(), date.getMonth() + 1, date.getDay()];
+  return fields.every((f, i) => {
+    if (f === "*") return true;
+    if (f.startsWith("*/")) return val[i] % parseInt(f.slice(2)) === 0;
+    return parseInt(f) === val[i];
+  });
+}
+
+/** Load all SKILL.md tasks from ~/.claude/scheduled-tasks/ */
+function loadClaudeScheduledTasks(): ClaudeScheduledTask[] {
+  if (!fs.existsSync(CLAUDE_SCHEDULED_TASKS_DIR)) return [];
+  const tasks: ClaudeScheduledTask[] = [];
+  for (const entry of fs.readdirSync(CLAUDE_SCHEDULED_TASKS_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+    const skillPath = path.join(CLAUDE_SCHEDULED_TASKS_DIR, entry.name, "SKILL.md");
+    if (!fs.existsSync(skillPath)) continue;
+    const task = parseClaudeSkill(skillPath);
+    if (task) {
+      tasks.push(task);
+      console.log(`[claude-cron] Loaded: ${task.name} (${task.schedule})`);
+    }
+  }
+  return tasks;
+}
+
+/** Tracks tasks currently executing — prevents concurrent duplicate runs */
+const claudeRunning = new Set<string>();
+
+/** Run a Claude Code scheduled task via `claude -p` non-interactively.
+ *  Lock-file + in-memory Set guarantee no two instances of the same task run at once. */
+async function runClaudeScheduledTask(task: ClaudeScheduledTask): Promise<void> {
+  // ── In-memory guard (same process) ──
+  if (claudeRunning.has(task.name)) {
+    console.log(`[claude-cron] ${task.name} already running — skipping`);
+    return;
+  }
+
+  // ── Lock file guard (survives daemon restart mid-run) ──
+  const lockDir = path.join(VAULT_PATH, "_logs/.claude-cron-locks");
+  if (!fs.existsSync(lockDir)) fs.mkdirSync(lockDir, { recursive: true });
+  const lockFile = path.join(lockDir, `${task.name}.lock`);
+
+  if (fs.existsSync(lockFile)) {
+    const lockContent = fs.readFileSync(lockFile, "utf-8").trim();
+    const [pidStr, startedStr] = lockContent.split("\n");
+    const lockedPid = parseInt(pidStr);
+    const lockedAt = parseInt(startedStr);
+    const ageMs = Date.now() - lockedAt;
+    // Stale lock: older than 20 minutes or PID no longer exists
+    const pidAlive = !isNaN(lockedPid) && (() => {
+      try { process.kill(lockedPid, 0); return true; } catch { return false; }
+    })();
+    if (pidAlive && ageMs < 20 * 60 * 1000) {
+      console.log(`[claude-cron] ${task.name} locked by PID ${lockedPid} (${Math.floor(ageMs / 1000)}s ago) — skipping`);
+      return;
+    }
+    // Stale lock — remove it
+    fs.unlinkSync(lockFile);
+    console.warn(`[claude-cron] ${task.name} stale lock removed (was PID ${lockedPid})`);
+  }
+
+  // Acquire
+  fs.writeFileSync(lockFile, `${process.pid}\n${Date.now()}`, "utf-8");
+  claudeRunning.add(task.name);
+
+  const logPath = path.join(VAULT_PATH, "_logs/scheduled-tasks.log");
+  if (!fs.existsSync(path.dirname(logPath))) fs.mkdirSync(path.dirname(logPath), { recursive: true });
+
+  console.log(`[claude-cron] Running: ${task.name}`);
+  return new Promise((resolve) => {
+    const proc = spawn(
+      "claude",
+      ["-p", task.prompt, "--model", task.model, "--dangerously-skip-permissions", "--no-session-persistence"],
+      { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env } }
+    );
+
+    let stderr = "";
+    proc.stderr?.on("data", (d: Buffer) => { stderr += d.toString(); });
+
+    const timeoutHandle = setTimeout(() => {
+      if (!proc.killed) {
+        proc.kill("SIGTERM");
+        console.warn(`[claude-cron] ${task.name} timed out after 15min — killed`);
+      }
+    }, 15 * 60 * 1000);
+
+    proc.on("close", (code) => {
+      clearTimeout(timeoutHandle);
+      // Release
+      claudeRunning.delete(task.name);
+      try { fs.unlinkSync(lockFile); } catch { /* already gone */ }
+
+      const ts = new Date().toISOString();
+      const status = code === 0 ? "ok" : `exit ${code}`;
+      fs.appendFileSync(logPath, `[${ts}] ${task.name}: completed (${status})\n`, "utf-8");
+      if (code !== 0) {
+        console.error(`[claude-cron] ${task.name} failed (exit ${code}):\n${stderr.slice(0, 500)}`);
+      } else {
+        console.log(`[claude-cron] ${task.name} done`);
+      }
+      resolve();
+    });
+  });
+}
+
 // ─── Scheduler ───────────────────────────────────────────────────────
 
 const tasks: {
@@ -1932,6 +2135,24 @@ async function runScheduler(): Promise<void> {
       await writeDaemonStatus();
     }
   }, 30_000);
+
+  // ── Claude Code cron tasks (wall-clock schedule, checked every 60s) ──
+  const claudeCronTasks = loadClaudeScheduledTasks();
+  console.log(`[claude-cron] ${claudeCronTasks.length} task(s) registered`);
+
+  setInterval(async () => {
+    const now = new Date();
+    const currentMinute = Math.floor(Date.now() / 60_000);
+    for (const task of claudeCronTasks) {
+      if (task.lastFiredMinute === currentMinute) continue; // already fired this minute
+      if (matchesCron(task.schedule, now)) {
+        task.lastFiredMinute = currentMinute;
+        runClaudeScheduledTask(task).catch((err) => {
+          console.error(`[claude-cron] ${task.name} error:`, err);
+        });
+      }
+    }
+  }, 60_000);
 }
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────

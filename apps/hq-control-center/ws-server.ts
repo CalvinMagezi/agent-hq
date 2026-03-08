@@ -157,11 +157,12 @@ function buildHistoryTranscript(messages: ThreadMessage[]): string {
     .join('\n\n')
 }
 
-// ─── Claude session store (per thread) ───────────────────────────────────────
+// ─── Session stores (per thread) ─────────────────────────────────────────────
+
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000
 
 interface ClaudeSession { sessionId: string; lastActivity: string }
 const CLAUDE_SESSIONS_FILE = path.join(VAULT_PATH, '_threads/web-claude-sessions.json')
-const SESSION_TTL_MS = 4 * 60 * 60 * 1000
 
 function loadClaudeSessions(): Record<string, ClaudeSession> {
   try {
@@ -295,23 +296,132 @@ async function runClaude(
 }
 
 /**
+ * Run Codex CLI with session resumption and stdin-based prompt delivery.
+ *
+ * Codex outputs JSONL — we parse item.completed agent_message events for text.
+ * Sessions are stored per-thread so subsequent messages resume without re-injecting
+ * the full system context.
+ *
+ * CLI:
+ *   New:    codex exec --json --dangerously-bypass-approvals-and-sandbox -
+ *   Resume: codex exec resume <thread_id> --json --dangerously-bypass-approvals-and-sandbox -
+ *   ('-' means read prompt from stdin — avoids arg-length limits and shell escaping)
+ */
+interface CodexSession { threadId: string; lastActivity: string }
+const CODEX_SESSIONS_FILE = path.join(VAULT_PATH, '_threads/web-codex-sessions.json')
+
+function loadCodexSessions(): Record<string, CodexSession> {
+  try {
+    if (fs.existsSync(CODEX_SESSIONS_FILE)) return JSON.parse(fs.readFileSync(CODEX_SESSIONS_FILE, 'utf-8'))
+  } catch { /* ignore */ }
+  return {}
+}
+function saveCodexSessions(sessions: Record<string, CodexSession>) {
+  fs.mkdirSync(path.dirname(CODEX_SESSIONS_FILE), { recursive: true })
+  fs.writeFileSync(CODEX_SESSIONS_FILE, JSON.stringify(sessions, null, 2))
+}
+
+async function runCodex(
+  ws: ServerWebSocket<unknown>,
+  threadId: string,
+  prompt: string,
+): Promise<string> {
+  const sessions = loadCodexSessions()
+  const session = sessions[threadId]
+  const age = session ? Date.now() - new Date(session.lastActivity).getTime() : Infinity
+  const resumeId = session && age < SESSION_TTL_MS ? session.threadId : null
+
+  const cmd: string[] = [process.env.CODEX_PATH ?? 'codex', 'exec']
+  if (resumeId) cmd.push('resume', resumeId)
+  cmd.push('--json', '--dangerously-bypass-approvals-and-sandbox', '-')
+
+  const env = { ...process.env }
+  if (!env.HOME) env.HOME = '/Users/calvinmagezi'
+
+  console.log(`[hq-ws] [codex] spawning: ${cmd.slice(0, 4).join(' ')} ... (thread: ${threadId}, resume: ${resumeId ?? 'none'}, prompt: ${prompt.length} chars)`)
+
+  const proc = spawn({ cmd, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', env })
+
+  // Write prompt via stdin — avoids arg-length limits and shell escaping issues
+  proc.stdin.write(prompt)
+  proc.stdin.end()
+
+  let fullText = ''
+  let newCodexId: string | null = null
+
+  const timer = setTimeout(() => { console.log('[hq-ws] [codex] timeout, killing'); proc.kill() }, HARNESS_TIMEOUT_MS)
+
+  try {
+    const stderrChunks: string[] = []
+    const stderrDone = new Response(proc.stderr).text().then(s => { if (s.trim()) stderrChunks.push(s.trim()) })
+
+    // Stream stdout line-by-line and parse JSONL events as they arrive
+    const reader = proc.stdout.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+        try {
+          const evt = JSON.parse(trimmed)
+          if (evt.type === 'thread.started' && evt.thread_id) {
+            newCodexId = evt.thread_id
+          }
+          if (evt.type === 'item.completed' && evt.item?.type === 'agent_message' && evt.item?.text) {
+            fullText += evt.item.text
+            // Stream tokens to PWA as they arrive (each item.completed is a full response segment)
+            const words = evt.item.text.split(/(\s+)/)
+            for (const word of words) {
+              if (word) {
+                try { ws.send(JSON.stringify({ type: 'chat:token', threadId, token: word })) } catch { /* ws closed */ }
+                await Bun.sleep(6)
+              }
+            }
+          }
+        } catch { /* non-JSON line — ignore */ }
+      }
+    }
+
+    const exitCode = await proc.exited
+    await stderrDone
+    console.log(`[hq-ws] [codex] exit: ${exitCode}, text: ${fullText.length} chars`)
+    if (stderrChunks.length) console.error(`[hq-ws] [codex] stderr: ${stderrChunks.join('\n').slice(0, 300)}`)
+  } finally {
+    clearTimeout(timer)
+  }
+
+  if (newCodexId) {
+    sessions[threadId] = { threadId: newCodexId, lastActivity: new Date().toISOString() }
+    saveCodexSessions(sessions)
+  }
+
+  return fullText.trim() || 'No response from Codex.'
+}
+
+/**
  * Run a stateless harness (Gemini CLI or OpenCode).
  * Waits for full output then streams it back in chunks.
  */
 async function runStateless(
   ws: ServerWebSocket<unknown>,
   threadId: string,
-  harness: 'gemini-cli' | 'opencode' | 'codex-cli',
+  harness: 'gemini-cli' | 'opencode',
   prompt: string,
 ): Promise<string> {
   let cmd: string[]
   if (harness === 'gemini-cli') {
     cmd = [process.env.GEMINI_PATH ?? 'gemini', '--yolo', '-p', prompt]
-  } else if (harness === 'opencode') {
-    cmd = [process.env.OPENCODE_PATH ?? 'opencode', 'run', '-m', 'openrouter/moonshotai/kimi-k2', prompt]
   } else {
-    // codex-cli
-    cmd = [process.env.CODEX_PATH ?? 'codex', '-p', prompt]
+    cmd = [process.env.OPENCODE_PATH ?? 'opencode', 'run', '-m', 'openrouter/moonshotai/kimi-k2', prompt]
   }
 
   const env = { ...process.env }
@@ -458,7 +568,30 @@ async function handleChatSend(ws: ServerWebSocket<unknown>, payload: {
       // Session resumption handles all subsequent history automatically.
       response = await runClaude(ws, threadId, content, systemContext)
 
-    } else if (harness === 'gemini-cli' || harness === 'opencode' || harness === 'codex-cli') {
+    } else if (harness === 'codex-cli') {
+      // Codex: session-aware (resumes via thread_id). Inject history only on first turn;
+      // subsequent turns in the same session just pass the user message.
+      const codexSessions = loadCodexSessions()
+      const hasSession = codexSessions[threadId] &&
+        Date.now() - new Date(codexSessions[threadId].lastActivity).getTime() < SESSION_TTL_MS
+
+      let codexPrompt: string
+      if (hasSession) {
+        // Session active — just send the new user message
+        codexPrompt = content
+      } else {
+        // New session — inject system context + recent history so codex has context
+        const history = buildHistoryTranscript(
+          thread.messages.filter(m => m.role !== 'system').slice(0, -1)
+        )
+        codexPrompt = systemContext
+        if (history) codexPrompt += `\n\n## Conversation History\n${history}`
+        codexPrompt += `\n\n## Current Message\nUser: ${content}`
+      }
+
+      response = await runCodex(ws, threadId, codexPrompt)
+
+    } else if (harness === 'gemini-cli' || harness === 'opencode') {
       // Stateless harnesses: inject full conversation history into the prompt
       const history = buildHistoryTranscript(
         thread.messages.filter(m => m.role !== 'system').slice(0, -1) // exclude current user msg
@@ -468,7 +601,7 @@ async function handleChatSend(ws: ServerWebSocket<unknown>, payload: {
       if (history) fullPrompt += `## Conversation History\n${history}\n\n`
       fullPrompt += `## Current Message\nUser: ${content}`
 
-      response = await runStateless(ws, threadId, harness as 'gemini-cli' | 'opencode' | 'codex-cli', fullPrompt)
+      response = await runStateless(ws, threadId, harness as 'gemini-cli' | 'opencode', fullPrompt)
 
     } else if (harness === 'hq-agent') {
       // HQ Agent: submit job to vault queue

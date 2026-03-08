@@ -2,6 +2,29 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react'
 import { MarkdownViewer } from '~/components/MarkdownViewer'
 
+// ─── Scroll-to-bottom button ──────────────────────────────────────────────────
+
+function ScrollToBottomButton({ visible, onClick }: { visible: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="absolute bottom-4 right-4 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-mono transition-all duration-300 shadow-lg"
+      style={{
+        background: 'var(--bg-elevated)',
+        border: '1px solid var(--border)',
+        color: 'var(--text-dim)',
+        opacity: visible ? 1 : 0,
+        pointerEvents: visible ? 'auto' : 'none',
+        transform: visible ? 'translateY(0)' : 'translateY(8px)',
+      }}
+      aria-hidden={!visible}
+    >
+      <span style={{ fontSize: 10 }}>↓</span>
+      scroll to bottom
+    </button>
+  )
+}
+
 export const Route = createFileRoute('/chat')({
   component: ChatPage,
 })
@@ -231,12 +254,14 @@ function ChatPage() {
   const [streamingContent, setStreamingContent] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
   const [toolActivity, setToolActivity] = useState<string | null>(null)
-  const [harness, setHarness] = useState(DEFAULT_HARNESS)
+  const [harness, setHarness] = useState<string>(DEFAULT_HARNESS)
   const [input, setInput] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const activeThreadRef = useRef<string | null>(null)
+  const [isAtBottom, setIsAtBottom] = useState(true)
   activeThreadRef.current = activeThreadId
 
   // Persist active thread across reconnects and page loads
@@ -246,10 +271,29 @@ function ChatPage() {
     else localStorage.removeItem(LAST_THREAD_KEY)
   }, [])
 
-  // Auto-scroll to bottom
+  // Track whether user is near the bottom of the scroll container
+  useEffect(() => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const handleScroll = () => {
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+      setIsAtBottom(distanceFromBottom < 80)
+    }
+    container.addEventListener('scroll', handleScroll, { passive: true })
+    return () => container.removeEventListener('scroll', handleScroll)
+  }, [])
+
+  // Auto-scroll to bottom when near bottom
   useLayoutEffect(() => {
+    if (isAtBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [messages, streamingContent, isAtBottom])
+
+  const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamingContent])
+    setIsAtBottom(true)
+  }, [])
 
   // Auto-resize textarea
   useEffect(() => {
@@ -387,6 +431,7 @@ function ChatPage() {
     setIsStreaming(true)
     setStreamingContent('')
     setToolActivity(null)
+    setIsAtBottom(true)
 
     wsRef.current.send(JSON.stringify({ type: 'chat:send', threadId, content, harness }))
   }, [input, isStreaming, activeThreadId, harness, setActiveThreadIdPersisted])
@@ -508,7 +553,8 @@ function ChatPage() {
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto py-4" style={{ background: 'var(--bg-base)' }}>
+        <div className="relative flex-1 min-h-0">
+        <div ref={messagesContainerRef} className="h-full overflow-y-auto py-4" style={{ background: 'var(--bg-base)' }}>
           {!activeThreadId && messages.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center gap-4 px-6">
               <div className="text-4xl opacity-20">◎</div>
@@ -539,6 +585,11 @@ function ChatPage() {
               <div ref={messagesEndRef} />
             </div>
           )}
+        </div>
+        <ScrollToBottomButton
+          visible={!isAtBottom && (messages.length > 0 || isStreaming)}
+          onClick={scrollToBottom}
+        />
         </div>
 
         {/* Composer */}

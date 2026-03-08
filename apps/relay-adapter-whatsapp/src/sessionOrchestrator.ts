@@ -54,6 +54,7 @@ function harnessLabel(h: LocalHarnessType): string {
     case "claude-code": return "Claude Code";
     case "opencode": return "OpenCode";
     case "gemini-cli": return "Gemini CLI";
+    case "codex-cli": return "Codex CLI";
   }
 }
 

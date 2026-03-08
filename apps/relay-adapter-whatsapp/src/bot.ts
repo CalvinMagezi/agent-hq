@@ -26,7 +26,7 @@ import { detectIntent } from "./orchestrator.js";
 import { formatForWhatsApp } from "./formatter.js";
 import { SessionOrchestrator } from "./sessionOrchestrator.js";
 
-type ActiveHarness = "auto" | "claude-code" | "opencode" | "gemini-cli";
+type ActiveHarness = "auto" | "claude-code" | "opencode" | "gemini-cli" | "codex-cli";
 
 /** Max chars per WhatsApp message for readability. */
 const MAX_CHUNK_SIZE = 4000;
@@ -690,6 +690,8 @@ export class RelayWhatsAppBot {
           oc: "opencode",
           gemini: "gemini-cli",
           "gemini-cli": "gemini-cli",
+          codex: "codex-cli",
+          "codex-cli": "codex-cli",
           auto: "auto",
         };
         if (!argStr) {
@@ -698,6 +700,7 @@ export class RelayWhatsAppBot {
               `!harness claude — pin to Claude Code\n` +
               `!harness opencode — pin to OpenCode\n` +
               `!harness gemini — pin to Gemini CLI\n` +
+              `!harness codex — pin to Codex CLI\n` +
               `!harness auto — restore intent-based routing`,
           );
           return;
@@ -705,7 +708,7 @@ export class RelayWhatsAppBot {
         const target = HARNESS_ALIASES[argStr.toLowerCase()];
         if (!target) {
           await this.bridge.sendMessage(
-            `Unknown harness: "${argStr}"\n\nAvailable: claude, opencode, gemini, auto`,
+            `Unknown harness: "${argStr}"\n\nAvailable: claude, opencode, gemini, codex, auto`,
           );
           return;
         }
@@ -931,7 +934,7 @@ export class RelayWhatsAppBot {
 
   private async handleLocalHarness(
     content: string,
-    harness: "claude-code" | "opencode" | "gemini-cli",
+    harness: "claude-code" | "opencode" | "gemini-cli" | "codex-cli",
   ): Promise<void> {
     this.processing = true;
     const label = this.harnessLabel(harness);
@@ -984,7 +987,7 @@ export class RelayWhatsAppBot {
     try {
       const raw = readFileSync(this.stateFile, "utf8");
       const data = JSON.parse(raw) as { activeHarness?: string };
-      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli"];
+      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli", "codex-cli"];
       if (data.activeHarness && valid.includes(data.activeHarness as ActiveHarness)) {
         this.activeHarness = data.activeHarness as ActiveHarness;
         console.log(`[relay-whatsapp] Loaded persisted harness: ${this.activeHarness}`);
@@ -1011,6 +1014,7 @@ export class RelayWhatsAppBot {
       case "claude-code": return "Claude Code";
       case "opencode": return "OpenCode";
       case "gemini-cli": return "Gemini CLI";
+      case "codex-cli": return "Codex CLI";
       case "auto": return "Auto (intent-based)";
     }
   }

@@ -26,7 +26,7 @@ import { detectIntent } from "./orchestrator.js";
 import { formatForTelegram, stripHtml } from "./formatter.js";
 import { SessionOrchestrator } from "./sessionOrchestrator.js";
 
-type ActiveHarness = "auto" | "claude-code" | "opencode" | "gemini-cli";
+type ActiveHarness = "auto" | "claude-code" | "opencode" | "gemini-cli" | "codex-cli";
 
 /** Max chars per Telegram message (API limit is 4096). */
 const MAX_CHUNK_SIZE = 4000;
@@ -344,7 +344,7 @@ export class RelayTelegramBot {
   private async handleCallbackQuery(queryId: string, data: string): Promise<void> {
     if (data.startsWith("harness:")) {
       const harness = data.replace("harness:", "") as ActiveHarness;
-      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli"];
+      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli", "codex-cli"];
       if (!valid.includes(harness)) {
         await this.bridge.answerCallbackQuery(queryId, "Unknown harness");
         return;
@@ -566,6 +566,8 @@ export class RelayTelegramBot {
           oc: "opencode",
           gemini: "gemini-cli",
           "gemini-cli": "gemini-cli",
+          codex: "codex-cli",
+          "codex-cli": "codex-cli",
           auto: "auto",
         };
         if (!argStr) {
@@ -575,6 +577,8 @@ export class RelayTelegramBot {
             .text("OpenCode", "harness:opencode")
             .row()
             .text("Gemini CLI", "harness:gemini-cli")
+            .text("Codex CLI", "harness:codex-cli")
+            .row()
             .text("Auto", "harness:auto");
 
           await this.bridge.sendMessageWithKeyboard(
@@ -788,7 +792,7 @@ export class RelayTelegramBot {
 
   private async handleLocalHarness(
     content: string,
-    harness: "claude-code" | "opencode" | "gemini-cli",
+    harness: "claude-code" | "opencode" | "gemini-cli" | "codex-cli",
     sourceMsg?: TelegramMessage,
   ): Promise<void> {
     this.processing = true;
@@ -849,7 +853,7 @@ export class RelayTelegramBot {
     try {
       const raw = readFileSync(this.stateFile, "utf8");
       const data = JSON.parse(raw) as { activeHarness?: string };
-      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli"];
+      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli", "codex-cli"];
       if (data.activeHarness && valid.includes(data.activeHarness as ActiveHarness)) {
         this.activeHarness = data.activeHarness as ActiveHarness;
         console.log(`[relay-telegram] Loaded persisted harness: ${this.activeHarness}`);
@@ -876,6 +880,7 @@ export class RelayTelegramBot {
       case "claude-code": return "Claude Code";
       case "opencode": return "OpenCode";
       case "gemini-cli": return "Gemini CLI";
+      case "codex-cli": return "Codex CLI";
       case "auto": return "Auto (intent-based)";
     }
   }

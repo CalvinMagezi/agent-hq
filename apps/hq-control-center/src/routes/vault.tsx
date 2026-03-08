@@ -356,7 +356,7 @@ function VaultLayout() {
 
                 {/* Content Outlet */}
                 <main
-                    className="flex-1 overflow-y-auto min-w-0 flex flex-col relative"
+                    className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 flex flex-col relative"
                     style={{ background: 'var(--bg-base)' }}
                 >
                     <Outlet />

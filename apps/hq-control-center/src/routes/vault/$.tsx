@@ -90,8 +90,8 @@ function VaultFileView() {
             </div>
 
             {/* Content Area */}
-            <div className="flex-1 min-h-0 overflow-y-auto w-full">
-                <div className="max-w-[860px] mx-auto p-4 sm:p-6 pb-24 h-full">
+            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden w-full">
+                <div className="max-w-[860px] mx-auto p-4 sm:p-6 pb-24 h-full overflow-x-hidden">
                     {viewer}
                 </div>
             </div>

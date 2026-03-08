@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
 import type { Job } from '~/server/jobs'
 import type { RelayAgent, WorkerAgent } from '~/server/agents'
 import type { DaemonTask } from '~/server/daemon'
@@ -35,33 +36,48 @@ interface HQState {
 
   selectedJobId: string | null
   setSelectedJobId: (id: string | null) => void
+
+  chatPanelOpen: boolean
+  setChatPanelOpen: (v: boolean) => void
+  chatContext: { type: 'file' | 'selection'; path: string; content?: string } | null
+  setChatContext: (ctx: { type: 'file' | 'selection'; path: string; content?: string } | null) => void
 }
 
-export const useHQStore = create<HQState>((set) => ({
-  wsConnected: false,
-  setWsConnected: (wsConnected) => set({ wsConnected }),
+export const useHQStore = create<HQState>()(
+  persist(
+    (set) => ({
+      wsConnected: false,
+      setWsConnected: (wsConnected) => set({ wsConnected }),
 
-  jobs: [],
-  setJobs: (jobs) => set({ jobs }),
+      jobs: [],
+      setJobs: (jobs) => set({ jobs }),
 
-  relays: [],
-  setRelays: (relays) => set({ relays }),
+      relays: [],
+      setRelays: (relays) => set({ relays }),
 
-  workers: [],
-  setWorkers: (workers) => set({ workers }),
+      workers: [],
+      setWorkers: (workers) => set({ workers }),
 
-  daemonTasks: [],
-  setDaemonTasks: (daemonTasks) => set({ daemonTasks }),
+      daemonTasks: [],
+      setDaemonTasks: (daemonTasks) => set({ daemonTasks }),
 
-  usage: { today: 0, month: 0, budget: 50, dailyTrend: [], byModel: [] },
-  setUsage: (usage) => set({ usage }),
+      usage: { today: 0, month: 0, budget: 50, dailyTrend: [], byModel: [] },
+      setUsage: (usage) => set({ usage }),
 
-  eventLog: [],
-  addEvent: (event) => set((state) => {
-    const newLog = [event, ...state.eventLog].slice(0, 50)
-    return { eventLog: newLog }
-  }),
+      eventLog: [],
+      addEvent: (event) => set((state) => {
+        const newLog = [event, ...state.eventLog].slice(0, 50)
+        return { eventLog: newLog }
+      }),
 
-  selectedJobId: null,
-  setSelectedJobId: (id) => set({ selectedJobId: id }),
-}))
+      selectedJobId: null,
+      setSelectedJobId: (id) => set({ selectedJobId: id }),
+
+      chatPanelOpen: false,
+      setChatPanelOpen: (v) => set({ chatPanelOpen: v }),
+      chatContext: null,
+      setChatContext: (ctx) => set({ chatContext: ctx }),
+    }), {
+    name: 'hq-store',
+    partialize: (state) => ({ chatPanelOpen: state.chatPanelOpen }),
+  }))

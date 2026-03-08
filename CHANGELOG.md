@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **HQ Control Center Vault Redesign** (`apps/hq-control-center/`): Moved `notes` and `chat` routes into a unified `/vault` UI with a slide-out Chat Panel. Added `SelectionToolbar` for sending text selections directly to the chat context.
+- **Synaptic Homeostasis in Vault Memory** (`packages/vault-memory/`): Implemented memory decay and pruning mechanisms (`forgetter.ts`, `db.ts`) to actively remove old, low-importance, unconsolidated memories while protecting frequently-accessed ones.
+- **Memory Ingestion Salience Detection** (`packages/vault-memory/src/ingester.ts`): Added `applySalienceBoost` to recognize important milestones and risks to boost their retention priority, mirroring biological synaptic tagging.
+- **Topic Clustering Consolidation** (`packages/vault-memory/src/consolidator.ts`): Groups unconsolidated memories by topic for focused meta-synthesis insights.
+- **Daily RSS News Pulse** (`scripts/agent-hq-daemon.ts`): Added `refreshNewsPulse` task that fetches headlines from selected tech feeds to organically update `HEARTBEAT.md` without API dependencies.
 - **Codex CLI Harness** (`apps/discord-relay/src/harnesses/codex.ts`): Added Codex CLI harness (`codex exec --json`) with session resumption and standard orchestration context injection.
 - **Claude Scheduled Tasks** (`scripts/agent-hq-daemon.ts`): New cron engine that automatically loads `SKILL.md` files from `~/.claude/scheduled-tasks/` and executes them via `claude -p` at scheduled intervals without session persistence.
 - **Codex Web/WebSocket Support** (`apps/hq-control-center/`, `ws-server.ts`): Built-in Codex session and streaming support in HQ Control Center, along with a new chat scroll-to-bottom UI control.
@@ -45,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`homebrew/hq.rb`**: Homebrew formula ready to publish as `brew install calvinmagezi/agent-hq/hq`.
 
 ### Changed
+- **Web Digest Rewrite** (`scripts/workflows/web-digest.ts`): Switched from Brave Search to a local RSS feed aggregation model via `DIGEST-FEEDS.md`, using local Ollama if available for free synthesis.
+- **Vault WebSockets Context Injection** (`apps/hq-control-center/ws-server.ts`): Server now accepts UI context (file or text selection) for chat messages, passing it to the AI.
+- **Novelty Deduplication in Queries** (`packages/vault-memory/src/querier.ts`): Prevents repetitive context flooding by filtering redundant memories.
 - **`hq-cli` renamed** to `@calvin.magezi/agent-hq` (npm squatting conflict with existing `agent-hq` package).
 - **`hq` CLI targets**: Updated `start`, `stop`, `restart`, `logs`, `errors`, `fg`, `status`, and `health` commands to natively support `whatsapp` and `relay-server`.
 - **`install-launchd.sh`**: Added `com.agent-hq.relay-server` and `com.agent-hq.whatsapp` to macOS launchd services installation.

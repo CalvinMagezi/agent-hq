@@ -53,11 +53,20 @@ export class MemoryConsolidator {
   }
 
   /**
-   * Run one consolidation cycle.
-   * Returns the insight generated, or null if nothing to consolidate.
+   * Run one consolidation cycle using topic clustering.
+   *
+   * Inspired by hippocampal sharp-wave ripple replay: the brain doesn't replay
+   * all memories at once — it replays related memories in clusters, strengthening
+   * connections within each cluster before doing cross-cluster integration.
+   *
+   * Here: we group unconsolidated memories by their most common topic, process
+   * the densest cluster first (most related memories), then do a cross-cluster
+   * synthesis if multiple clusters were consolidated.
+   *
+   * Returns the final insight generated, or null if nothing to consolidate.
    */
   async runCycle(): Promise<string | null> {
-    const memories = getUnconsolidatedMemories(this.db, 15);
+    const memories = getUnconsolidatedMemories(this.db, 30);
 
     if (memories.length < 3) {
       console.log(`[vault-memory] Consolidation skipped — only ${memories.length} unconsolidated memories (need 3+)`);
@@ -70,39 +79,104 @@ export class MemoryConsolidator {
       return null;
     }
 
-    console.log(`[vault-memory] Consolidating ${memories.length} memories...`);
+    // ── Cluster memories by topic (hippocampal replay grouping) ──────────
+    const clusters = this.clusterByTopic(memories);
+    const sortedClusters = [...clusters.entries()]
+      .sort((a, b) => b[1].length - a[1].length); // largest cluster first
 
-    const memorySummary = memories
-      .map((m) => `[Memory #${m.id}] (${m.source}/${m.harness}) ${m.summary}`)
+    const clusterInsights: string[] = [];
+    let lastInsight: string | null = null;
+
+    for (const [topic, cluster] of sortedClusters) {
+      if (cluster.length < 2) continue; // skip singletons
+      const insight = await this.consolidateCluster(cluster, topic);
+      if (insight) {
+        clusterInsights.push(insight);
+        lastInsight = insight;
+      }
+    }
+
+    // ── Cross-cluster synthesis (schema integration) ──────────────────────
+    // If multiple clusters produced insights, synthesize a meta-insight.
+    if (clusterInsights.length >= 2) {
+      const metaInsight = await this.synthesizeClusters(clusterInsights);
+      if (metaInsight) lastInsight = metaInsight;
+    }
+
+    // Fallback: if no clusters with 2+ memories, consolidate all together
+    if (clusterInsights.length === 0 && memories.length >= 3) {
+      lastInsight = await this.consolidateCluster(memories.slice(0, 15), "general");
+    }
+
+    return lastInsight;
+  }
+
+  // ── Private: Clustering ───────────────────────────────────────────────
+
+  /** Group memories by their most frequent topic across the batch. */
+  private clusterByTopic(memories: Memory[]): Map<string, Memory[]> {
+    const clusters = new Map<string, Memory[]>();
+
+    for (const memory of memories) {
+      // Assign to the first topic (highest priority tag from ingester)
+      const primaryTopic = memory.topics[0] ?? "general";
+      const existing = clusters.get(primaryTopic) ?? [];
+      existing.push(memory);
+      clusters.set(primaryTopic, existing);
+    }
+
+    return clusters;
+  }
+
+  /** Consolidate one topic cluster. Returns the insight or null. */
+  private async consolidateCluster(cluster: Memory[], topic: string): Promise<string | null> {
+    // Cap cluster size to prevent oversized Ollama payloads
+    const capped = cluster.slice(0, 12);
+    console.log(`[vault-memory] Consolidating cluster "${topic}" (${capped.length}/${cluster.length} memories)...`);
+
+    const memorySummary = capped
+      .map((m) => `[Memory #${m.id}] (${m.source}/${m.harness}) ${m.summary.slice(0, 200)}`)
       .join("\n");
 
     try {
       const result = await ollamaJSON<ConsolidationResult>(
         CONSOLIDATE_SYSTEM,
-        `Consolidate these memories:\n\n${memorySummary}`
+        `Consolidate these memories (topic cluster: "${topic}"):\n\n${memorySummary}`
       );
 
-      if (!result.insight) {
-        console.warn("[vault-memory] Consolidation returned no insight");
-        return null;
-      }
+      if (!result.insight) return null;
 
-      // Validate connection IDs refer to real memory IDs
-      const validIds = new Set(memories.map((m) => m.id));
+      const validIds = new Set(capped.map((m) => m.id));
       const validConnections = (result.connections ?? []).filter(
         (c) => validIds.has(c.from_id) && validIds.has(c.to_id)
       );
 
-      const sourceIds = memories.map((m) => m.id);
-      storeConsolidation(this.db, sourceIds, result.insight, validConnections);
+      storeConsolidation(this.db, capped.map((m) => m.id), result.insight, validConnections);
+      await this.writeInsightNote(capped, result);
 
-      // Write back to vault as a markdown note
-      await this.writeInsightNote(memories, result);
-
-      console.log(`[vault-memory] Consolidation complete: ${result.insight.slice(0, 100)}`);
+      console.log(`[vault-memory] Cluster "${topic}" insight: ${result.insight.slice(0, 100)}`);
       return result.insight;
     } catch (err) {
-      console.error("[vault-memory] Consolidation failed:", err);
+      console.error(`[vault-memory] Cluster "${topic}" consolidation failed:`, err);
+      return null;
+    }
+  }
+
+  /** Cross-cluster meta-synthesis: find patterns spanning multiple topic clusters. */
+  private async synthesizeClusters(insights: string[]): Promise<string | null> {
+    const META_SYSTEM = `You are a meta-synthesis agent. Given a list of insights from different topic clusters,
+identify the single most important cross-cutting pattern or connection that spans them all.
+Return JSON: { "insight": "one concise cross-cluster insight", "connections": [] }`;
+
+    try {
+      const result = await ollamaJSON<ConsolidationResult>(
+        META_SYSTEM,
+        `Find the cross-cluster pattern in these insights:\n\n${insights.map((i, n) => `${n + 1}. ${i}`).join("\n")}`
+      );
+      if (!result.insight) return null;
+      console.log(`[vault-memory] Cross-cluster insight: ${result.insight.slice(0, 100)}`);
+      return result.insight;
+    } catch {
       return null;
     }
   }
@@ -129,9 +203,10 @@ export class MemoryConsolidator {
 
     let updated: string;
     if (existing.includes(SECTION)) {
-      // Replace the section
+      // Replace the section — escape SECTION so metacharacters in the string don't break the regex
+      const escapedSection = SECTION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       updated = existing.replace(
-        new RegExp(`${SECTION}[\\s\\S]*?(?=\n## |$)`, "m"),
+        new RegExp(`${escapedSection}[\\s\\S]*?(?=\n## |$)`, "m"),
         section
       );
     } else {

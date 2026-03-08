@@ -67,10 +67,6 @@ function validatePrerequisites(): void {
   if (!OPENROUTER_API_KEY) {
     warnings.push("OPENROUTER_API_KEY is not set — embeddings will be skipped");
   }
-  if (!process.env.BRAVE_API_KEY) {
-    warnings.push("BRAVE_API_KEY is not set — web digest search will be unavailable");
-  }
-
   const requiredFiles = ["SOUL.md", "MEMORY.md", "PREFERENCES.md", "HEARTBEAT.md"];
   for (const file of requiredFiles) {
     if (!fs.existsSync(path.join(VAULT_PATH, "_system", file))) {
@@ -738,6 +734,124 @@ async function processEmbeddings(): Promise<void> {
       });
       console.error(`[embeddings] Failed: ${note.title}:`, err);
     }
+  }
+}
+
+// ─── Task: Memory Forgetting Cycle (every 24 hr) ─────────────────────
+// Implements "Synaptic Homeostasis": decay low-importance old memories,
+// prune those that have fallen below the relevance threshold.
+// This prevents noise accumulation and keeps signal/noise ratio high.
+
+async function forgetWeakMemories(): Promise<void> {
+  try {
+    const result = memorySystem.forgetter.runCycle();
+    if (result.decayed > 0 || result.pruned > 0) {
+      console.log(`[memory-decay] Decayed ${result.decayed}, pruned ${result.pruned} memories. DB now: ${result.statsAfter.total} total`);
+    }
+  } catch (err) {
+    console.error("[daemon] Memory forgetting cycle failed:", err);
+  }
+}
+
+// ─── Task: News Pulse (every 1 hr) ───────────────────────────────────
+// Fetches the top 2-3 items from a few key RSS feeds and writes a compact
+// "Current News Pulse" section to _system/HEARTBEAT.md so all agents
+// have ambient awareness of current events without burning context.
+
+const NEWS_PULSE_FEEDS = [
+  { url: "https://news.ycombinator.com/rss", label: "HN" },
+  { url: "https://simonwillison.net/atom/everything/", label: "Simon Willison" },
+  { url: "https://techcabal.com/feed/", label: "TechCabal" },
+];
+
+/**
+ * Strip characters that could be used for prompt injection or markdown manipulation.
+ * RSS titles from untrusted feeds are written into HEARTBEAT.md which all agents read.
+ */
+function sanitizePulseText(raw: string): string {
+  return raw
+    .replace(/\r?\n|\r/g, " ")           // no newlines — would break markdown structure
+    .replace(/#{1,6}\s/g, "")            // no markdown headings
+    .replace(/`{1,3}[^`]*`{1,3}/g, "")  // no code blocks/inline code
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // collapse existing links to label only
+    .replace(/[*_~|\\]/g, "")           // no emphasis, strikethrough, table, escape chars
+    .replace(/\s{2,}/g, " ")            // collapse whitespace
+    .trim()
+    .slice(0, 100);
+}
+
+/** Validate a URL is a safe https link before embedding in markdown. */
+function isSafeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+async function refreshNewsPulse(): Promise<void> {
+  const heartbeatPath = path.join(VAULT_PATH, "_system/HEARTBEAT.md");
+  if (!fs.existsSync(heartbeatPath)) return;
+
+  const PULSE_MARKER = "<!-- agent-hq-news-pulse -->";
+  const now = new Date().toUTCString();
+
+  // Fetch all feeds concurrently (parallel, not sequential)
+  const feedResults = await Promise.allSettled(
+    NEWS_PULSE_FEEDS.map(async (feed) => {
+      const res = await fetch(feed.url, {
+        headers: { "User-Agent": "AgentHQ-Pulse/1.0" },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) return { label: feed.label, items: [] as string[] };
+      const xml = await res.text();
+      const isAtom = /<feed[\s>]/.test(xml);
+      const blockTag = isAtom ? "entry" : "item";
+      const blockRegex = new RegExp(`<${blockTag}>[\\s\\S]*?<\\/${blockTag}>`, "gi");
+
+      const items: string[] = [];
+      for (const match of xml.matchAll(blockRegex)) {
+        if (items.length >= 2) break;
+        const block = match[0];
+        const rawTitle = block.match(/<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i)?.[1]
+          ?.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">") || "";
+        const rawLink = isAtom
+          ? (block.match(/\shref=["']([^"']+)["']/i)?.[1] || "")
+          : (block.match(/<link[^>]*>([^<]+)<\/link>/i)?.[1]?.trim() || "");
+
+        const title = sanitizePulseText(rawTitle);
+        if (!title || !rawLink || !isSafeUrl(rawLink)) continue;
+        const link = rawLink.slice(0, 300);
+        items.push(`- **[${feed.label}]** [${title}](${link})`);
+      }
+      return { label: feed.label, items };
+    })
+  );
+
+  const lines: string[] = feedResults
+    .filter((r): r is PromiseFulfilledResult<{ label: string; items: string[] }> => r.status === "fulfilled")
+    .flatMap((r) => r.value.items);
+
+  if (lines.length === 0) return;
+
+  const pulseSection = `${PULSE_MARKER}\n## Current News Pulse\n_Updated: ${now}_\n\n${lines.join("\n")}\n`;
+
+  try {
+    const existing = fs.readFileSync(heartbeatPath, "utf-8");
+    let updated: string;
+    if (existing.includes(PULSE_MARKER)) {
+      updated = existing.replace(
+        new RegExp(`${PULSE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\n## |$)`, "m"),
+        pulseSection
+      );
+    } else {
+      updated = existing.trimEnd() + "\n\n" + pulseSection;
+    }
+    fs.writeFileSync(heartbeatPath, updated, "utf-8");
+    console.log(`[news-pulse] Updated HEARTBEAT.md with ${lines.length} headline(s)`);
+  } catch (err) {
+    console.error("[news-pulse] Failed to update HEARTBEAT.md:", err);
   }
 }
 
@@ -1918,9 +2032,21 @@ const tasks: {
       lastRun: 0,
     },
     {
+      name: "news-pulse",
+      intervalMs: 60 * 60 * 1000, // every 1 hour
+      fn: refreshNewsPulse,
+      lastRun: 0,
+    },
+    {
       name: "memory-consolidation",
       intervalMs: 30 * 60 * 1000,
       fn: consolidateMemory,
+      lastRun: 0,
+    },
+    {
+      name: "memory-forgetting",
+      intervalMs: 24 * 60 * 60 * 1000, // every 24 hours
+      fn: forgetWeakMemories,
       lastRun: 0,
     },
     {

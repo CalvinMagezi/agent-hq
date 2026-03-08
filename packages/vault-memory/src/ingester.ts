@@ -33,6 +33,23 @@ importance scale:
 - 0.3-0.4: low-value background info
 `;
 
+/**
+ * Salience detector — implements "Synaptic Tagging" from neuroscience.
+ *
+ * When important events occur (decisions, failures, milestones), the brain
+ * tags those synapses for priority consolidation. We do the same: scan for
+ * salience markers in raw text and boost the importance score immediately
+ * at encoding time, before the memory enters the consolidation queue.
+ */
+const SALIENCE_PATTERN = /\b(deadline|urgent|critical|blocker|blocked|decision|breakthrough|failed|failure|error|crash|security|vulnerability|breach|approved|rejected|milestone|launch|shipped|signed|cancelled|crisis|risk|escalat|budget|contract|deal|acquisition|pivot|layoff|hire|resign|fund(ing|ed)?|raise|partnership)\b/i;
+
+function applySalienceBoost(text: string, importance: number, topics: string[]): { importance: number; topics: string[] } {
+  if (!SALIENCE_PATTERN.test(text)) return { importance, topics };
+  const boosted = Math.min(importance * 1.5, 1.0);
+  const updatedTopics = topics.includes("high-salience") ? topics : [...topics, "high-salience"];
+  return { importance: boosted, topics: updatedTopics };
+}
+
 interface ExtractedMemory {
   summary: string;
   entities: string[];
@@ -43,6 +60,8 @@ interface ExtractedMemory {
 export class MemoryIngester {
   private db: Database;
   private available: boolean | null = null;
+  private lastAvailabilityCheck = 0;
+  private static readonly RETRY_AFTER_MS = 5 * 60_000; // re-check Ollama every 5 min on failure
 
   constructor(db: Database) {
     this.db = db;
@@ -62,12 +81,16 @@ export class MemoryIngester {
     // Skip very short or empty content
     if (text.trim().length < 30) return null;
 
-    // Check Ollama availability on first call
-    if (this.available === null) {
+    // Check Ollama availability — re-check after RETRY_AFTER_MS so the daemon
+    // self-heals if Ollama restarts without needing a process restart.
+    const now = Date.now();
+    if (this.available === null || (!this.available && now - this.lastAvailabilityCheck > MemoryIngester.RETRY_AFTER_MS)) {
+      this.lastAvailabilityCheck = now;
       this.available = await checkOllamaAvailable();
+      if (this.available) console.log("[vault-memory] Ollama connection restored");
     }
     if (!this.available) {
-      console.warn("[vault-memory] Ollama not available — skipping ingestion");
+      console.warn("[vault-memory] Ollama not available — skipping ingestion (will retry in 5m)");
       return null;
     }
 
@@ -83,14 +106,23 @@ export class MemoryIngester {
         return null;
       }
 
+      // Apply salience boost (synaptic tagging) — important events get flagged
+      // immediately at encoding time so they survive the consolidation queue.
+      const baseImportance = Math.max(0, Math.min(1, extracted.importance ?? 0.5));
+      const { importance, topics } = applySalienceBoost(
+        text,
+        baseImportance,
+        extracted.topics.slice(0, 5)
+      );
+
       const id = storeMemory(this.db, {
         source,
         harness,
         raw_text: text.slice(0, 4000),
         summary: extracted.summary,
         entities: extracted.entities.slice(0, 10),
-        topics: extracted.topics.slice(0, 5),
-        importance: Math.max(0, Math.min(1, extracted.importance ?? 0.5)),
+        topics,
+        importance,
       });
 
       console.log(`[vault-memory] Ingested memory #${id} from ${source}: ${extracted.summary.slice(0, 80)}`);

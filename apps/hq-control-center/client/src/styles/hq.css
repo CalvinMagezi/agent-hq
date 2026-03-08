@@ -62,6 +62,11 @@
   color: var(--color-text-dim);
 }
 
+/* Prevent iOS Safari auto-zoom on input focus (requires font-size >= 16px) */
+input, textarea, select {
+  font-size: 16px !important;
+}
+
 /* Status Indicator */
 .status-dot {
   width: 8px;

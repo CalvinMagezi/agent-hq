@@ -191,22 +191,20 @@ function Shell() {
           </div>
           <nav className="flex items-center gap-1">
             <Link
-              to="/"
-              activeOptions={{ exact: true }}
+              to="/vault"
               className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
               activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
               inactiveProps={{ style: { color: 'var(--text-dim)' } }}
             >
               Vault
             </Link>
-            <Link
-              to="/chat"
+            <button
+              onClick={() => useHQStore.getState().setChatPanelOpen(!useHQStore.getState().chatPanelOpen)}
               className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
-              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
-              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
+              style={{ color: 'var(--text-dim)' }}
             >
               Chat
-            </Link>
+            </button>
           </nav>
         </div>
         <div className="flex items-center gap-2 sm:gap-3">

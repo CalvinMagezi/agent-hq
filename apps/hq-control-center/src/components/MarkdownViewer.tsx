@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { marked } from 'marked'
 import { createHighlighter } from 'shiki'
+import { SelectionToolbar } from './SelectionToolbar'
+import { useHQStore } from '~/store/hqStore'
 
 // Initialize shiki cache outside component
 let highlighterPromise: Promise<any> | null = null
@@ -19,6 +21,17 @@ export function MarkdownViewer({ content, activePath }: { content: string; activ
     const [html, setHtml] = useState<string>('')
     const [frontmatter, setFrontmatter] = useState<Record<string, any>>({})
     const [metaOpen, setMetaOpen] = useState(false)
+    const containerRef = useRef<HTMLDivElement>(null)
+    const { setChatPanelOpen, setChatContext } = useHQStore()
+
+    const handleSendSelection = (text: string) => {
+        setChatPanelOpen(true)
+        setChatContext({
+            type: 'selection',
+            path: activePath || 'Vault Text',
+            content: text
+        })
+    }
 
     useEffect(() => {
         let active = true
@@ -81,7 +94,8 @@ export function MarkdownViewer({ content, activePath }: { content: string; activ
     }, [content])
 
     return (
-        <div className="markdown-viewer" key={activePath}>
+        <div className="markdown-viewer relative" key={activePath} ref={containerRef}>
+            <SelectionToolbar containerRef={containerRef} onSendAction={handleSendSelection} />
             {Object.keys(frontmatter).length > 0 && (
                 <div className="mb-6 rounded" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>
                     <button

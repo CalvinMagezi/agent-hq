@@ -9,20 +9,21 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as VaultRouteImport } from './routes/vault'
 import { Route as ShareRouteImport } from './routes/share'
-import { Route as NotesRouteImport } from './routes/notes'
 import { Route as JobsRouteImport } from './routes/jobs'
-import { Route as ChatRouteImport } from './routes/chat'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as VaultIndexRouteImport } from './routes/vault/index'
+import { Route as VaultSplatRouteImport } from './routes/vault/$'
 
+const VaultRoute = VaultRouteImport.update({
+  id: '/vault',
+  path: '/vault',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ShareRoute = ShareRouteImport.update({
   id: '/share',
   path: '/share',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const NotesRoute = NotesRouteImport.update({
-  id: '/notes',
-  path: '/notes',
   getParentRoute: () => rootRouteImport,
 } as any)
 const JobsRoute = JobsRouteImport.update({
@@ -30,69 +31,75 @@ const JobsRoute = JobsRouteImport.update({
   path: '/jobs',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ChatRoute = ChatRouteImport.update({
-  id: '/chat',
-  path: '/chat',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const VaultIndexRoute = VaultIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => VaultRoute,
+} as any)
+const VaultSplatRoute = VaultSplatRouteImport.update({
+  id: '/$',
+  path: '/$',
+  getParentRoute: () => VaultRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/chat': typeof ChatRoute
   '/jobs': typeof JobsRoute
-  '/notes': typeof NotesRoute
   '/share': typeof ShareRoute
+  '/vault': typeof VaultRouteWithChildren
+  '/vault/$': typeof VaultSplatRoute
+  '/vault/': typeof VaultIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/chat': typeof ChatRoute
   '/jobs': typeof JobsRoute
-  '/notes': typeof NotesRoute
   '/share': typeof ShareRoute
+  '/vault/$': typeof VaultSplatRoute
+  '/vault': typeof VaultIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/chat': typeof ChatRoute
   '/jobs': typeof JobsRoute
-  '/notes': typeof NotesRoute
   '/share': typeof ShareRoute
+  '/vault': typeof VaultRouteWithChildren
+  '/vault/$': typeof VaultSplatRoute
+  '/vault/': typeof VaultIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/chat' | '/jobs' | '/notes' | '/share'
+  fullPaths: '/' | '/jobs' | '/share' | '/vault' | '/vault/$' | '/vault/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/chat' | '/jobs' | '/notes' | '/share'
-  id: '__root__' | '/' | '/chat' | '/jobs' | '/notes' | '/share'
+  to: '/' | '/jobs' | '/share' | '/vault/$' | '/vault'
+  id: '__root__' | '/' | '/jobs' | '/share' | '/vault' | '/vault/$' | '/vault/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  ChatRoute: typeof ChatRoute
   JobsRoute: typeof JobsRoute
-  NotesRoute: typeof NotesRoute
   ShareRoute: typeof ShareRoute
+  VaultRoute: typeof VaultRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/vault': {
+      id: '/vault'
+      path: '/vault'
+      fullPath: '/vault'
+      preLoaderRoute: typeof VaultRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/share': {
       id: '/share'
       path: '/share'
       fullPath: '/share'
       preLoaderRoute: typeof ShareRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/notes': {
-      id: '/notes'
-      path: '/notes'
-      fullPath: '/notes'
-      preLoaderRoute: typeof NotesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/jobs': {
@@ -102,13 +109,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof JobsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/chat': {
-      id: '/chat'
-      path: '/chat'
-      fullPath: '/chat'
-      preLoaderRoute: typeof ChatRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/': {
       id: '/'
       path: '/'
@@ -116,15 +116,40 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/vault/': {
+      id: '/vault/'
+      path: '/'
+      fullPath: '/vault/'
+      preLoaderRoute: typeof VaultIndexRouteImport
+      parentRoute: typeof VaultRoute
+    }
+    '/vault/$': {
+      id: '/vault/$'
+      path: '/$'
+      fullPath: '/vault/$'
+      preLoaderRoute: typeof VaultSplatRouteImport
+      parentRoute: typeof VaultRoute
+    }
   }
 }
 
+interface VaultRouteChildren {
+  VaultSplatRoute: typeof VaultSplatRoute
+  VaultIndexRoute: typeof VaultIndexRoute
+}
+
+const VaultRouteChildren: VaultRouteChildren = {
+  VaultSplatRoute: VaultSplatRoute,
+  VaultIndexRoute: VaultIndexRoute,
+}
+
+const VaultRouteWithChildren = VaultRoute._addFileChildren(VaultRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  ChatRoute: ChatRoute,
   JobsRoute: JobsRoute,
-  NotesRoute: NotesRoute,
   ShareRoute: ShareRoute,
+  VaultRoute: VaultRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

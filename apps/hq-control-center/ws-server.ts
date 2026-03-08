@@ -524,9 +524,9 @@ async function runHQAgent(
 // ─── Main chat handler ────────────────────────────────────────────────────────
 
 async function handleChatSend(ws: ServerWebSocket<unknown>, payload: {
-  threadId: string; content: string; harness: string
+  threadId: string; content: string; harness: string; context?: { type: string; path: string; content: string }
 }) {
-  const { threadId, content, harness } = payload as { threadId: string; content: string; harness: HarnessType }
+  const { threadId, content, harness, context } = payload as { threadId: string; content: string; harness: HarnessType; context?: { type: string; path: string; content: string } }
   const now = new Date().toISOString()
 
   // Load or create thread
@@ -557,7 +557,31 @@ async function handleChatSend(ws: ServerWebSocket<unknown>, payload: {
 
   // Build vault context (shared across all harnesses)
   const vaultCtx = await getVaultCtx()
-  const systemContext = buildSystemContext(vaultCtx)
+  let systemContext = buildSystemContext(vaultCtx)
+
+  // Scan for file references in message and UI context
+  let additionalContext = ""
+
+  if (context && (context.type === 'file' || context.type === 'selection')) {
+    additionalContext += `\n\n## Context Provided by User: ${context.path}\n${context.content}\n\n`
+  }
+
+  const fileRefs = Array.from(content.matchAll(/\[\[([^\]]+)\]\]/g)).map(m => m[1])
+  const resolvedVault = path.resolve(VAULT_PATH)
+  for (const ref of fileRefs) {
+    try {
+      const refPath = path.resolve(VAULT_PATH, ref)
+      if (!refPath.startsWith(resolvedVault + path.sep) && refPath !== resolvedVault) continue
+      if (fs.existsSync(refPath)) {
+        const text = fs.readFileSync(refPath, 'utf-8').slice(0, 10000) // limit size
+        additionalContext += `\n\n## Referenced File: ${ref}\n${text}\n\n`
+      }
+    } catch { }
+  }
+
+  if (additionalContext) {
+    systemContext += '\n\n' + additionalContext
+  }
 
   let response = ''
 
@@ -760,7 +784,7 @@ const server = Bun.serve({
             saveClaudeSessions(sessions)
           }
           ws.send(JSON.stringify({ type: 'chat:reset_ok', threadId: msg.threadId }))
-        } else if (msg.type === 'chat:send') {
+        } else if (msg.type === 'chat:send' || msg.type === 'chat:send-with-context') {
           handleChatSend(ws, msg).catch(e =>
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
           )

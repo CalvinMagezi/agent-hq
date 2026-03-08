@@ -63,6 +63,10 @@ export function openMemoryDB(vaultPath: string): Database {
     CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
   `);
 
+  // Schema migrations — safe to run on existing DBs
+  try { db.exec("ALTER TABLE memories ADD COLUMN last_accessed_at TEXT;"); } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;"); } catch { /* already exists */ }
+
   return db;
 }
 
@@ -158,6 +162,45 @@ export function storeConsolidation(
     const placeholders = sourceIds.map(() => "?").join(",");
     db.prepare(`UPDATE memories SET consolidated = 1 WHERE id IN (${placeholders})`).run(...sourceIds);
   }
+}
+
+// ── Decay & Pruning helpers (Synaptic Homeostasis) ────────────────────
+
+/**
+ * Decay importance of unconsolidated memories older than minAgeDays.
+ * Each call reduces importance by decayRate (e.g. 0.015 = 1.5%/day).
+ * Returns the number of memories updated.
+ */
+export function decayOldMemories(db: Database, decayRate = 0.015, minAgeDays = 7): number {
+  const cutoff = new Date(Date.now() - minAgeDays * 86400_000).toISOString();
+  const result = db.prepare(`
+    UPDATE memories
+    SET importance = MAX(0.01, importance - ?)
+    WHERE consolidated = 0 AND created_at < ?
+  `).run(decayRate, cutoff);
+  return result.changes as number;
+}
+
+/**
+ * Delete memories that have decayed below the importance threshold and are old enough.
+ * Returns the number of memories pruned.
+ */
+export function pruneWeakMemories(db: Database, threshold = 0.05, minAgeDays = 60): number {
+  const cutoff = new Date(Date.now() - minAgeDays * 86400_000).toISOString();
+  const result = db.prepare(`
+    DELETE FROM memories WHERE importance <= ? AND created_at < ?
+  `).run(threshold, cutoff);
+  return result.changes as number;
+}
+
+/**
+ * Bump access count for a memory (called when it's served to an agent).
+ * High-access memories resist decay more.
+ */
+export function touchMemory(db: Database, id: number): void {
+  db.prepare(`
+    UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?
+  `).run(new Date().toISOString(), id);
 }
 
 // ── Private ───────────────────────────────────────────────────────────

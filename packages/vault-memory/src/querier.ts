@@ -13,6 +13,7 @@ import {
   getRecentMemories,
   getConsolidationHistory,
   getMemoryStats,
+  touchMemory,
   type Memory,
   type Consolidation,
 } from "./db.js";
@@ -52,7 +53,15 @@ export class MemoryQuerier {
       );
     }
 
-    memories = memories.slice(0, limit);
+    // Novelty deduplication: suppress redundant memories, promote novel ones.
+    // Inspired by schema-based consolidation — info already encoded in existing
+    // patterns gets lower injection priority; genuinely new topics surface first.
+    memories = this.deduplicateByNovelty(memories, limit);
+
+    // Touch accessed memories so the forgetter knows they're still relevant
+    for (const m of memories) {
+      touchMemory(this.db, m.id);
+    }
 
     const insights = getConsolidationHistory(this.db, 3).map((c) => c.insight);
     const stats = getMemoryStats(this.db);
@@ -90,6 +99,47 @@ export class MemoryQuerier {
     }
 
     return parts.join("\n");
+  }
+
+  /**
+   * Novelty deduplication — keeps the injection set diverse.
+   *
+   * If two memories share 3+ topic tags, they are "redundant" (same schema).
+   * In that case, keep only the higher-importance one. This prevents a single
+   * topic (e.g. "security") from flooding the context window and crowding out
+   * other important signals.
+   *
+   * High-salience memories always survive deduplication regardless.
+   */
+  private deduplicateByNovelty(memories: Memory[], limit: number): Memory[] {
+    const seen: Memory[] = [];
+
+    for (const candidate of memories) {
+      const isHighSalience = candidate.topics.includes("high-salience");
+
+      // Always include high-salience memories, but still respect the limit.
+      // Without this, a system generating many salience matches floods the context window.
+      if (isHighSalience) {
+        seen.push(candidate);
+        if (seen.length >= limit) break;
+        continue;
+      }
+
+      // Check overlap with already-selected memories
+      let redundant = false;
+      for (const existing of seen) {
+        const overlap = candidate.topics.filter((t) => existing.topics.includes(t)).length;
+        if (overlap >= 3) {
+          redundant = true;
+          break;
+        }
+      }
+
+      if (!redundant) seen.push(candidate);
+      if (seen.length >= limit) break;
+    }
+
+    return seen;
   }
 
   private relativeAge(isoDate: string): string {

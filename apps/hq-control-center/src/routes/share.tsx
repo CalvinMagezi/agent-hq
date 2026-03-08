@@ -29,7 +29,7 @@ function SharePage() {
       .then((res) => {
         setNotePath(res.path)
         setStatus('done')
-        setTimeout(() => { window.location.href = '/notes' }, 2000)
+        setTimeout(() => { window.location.href = '/vault' }, 2000)
       })
       .catch(() => setStatus('error'))
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -53,7 +53,7 @@ function SharePage() {
             <p className="font-bold mb-1">Saved to Vault</p>
             <p className="text-xs font-mono" style={{ color: 'var(--text-dim)' }}>{notePath}</p>
           </div>
-          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>Redirecting to notes…</p>
+          <p className="text-xs" style={{ color: 'var(--text-dim)' }}>Redirecting to vault…</p>
         </>
       )}
 
@@ -62,7 +62,7 @@ function SharePage() {
           <div className="text-4xl">❌</div>
           <p className="font-bold">Failed to save</p>
           <button
-            onClick={() => { window.location.href = '/' }}
+            onClick={() => { window.location.href = '/vault' }}
             className="px-4 py-2 rounded-lg text-sm font-mono"
             style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}
           >

@@ -60,6 +60,61 @@ export const getPinnedNotes = createServerFn({ method: 'GET' }).handler(
   }
 )
 
+export interface RecentFile {
+  path: string
+  title: string
+  preview: string
+  tags: string[]
+  mtime: string
+  size: number
+}
+
+export const getRecentFiles = createServerFn({ method: 'GET' })
+  .handler(async (): Promise<{ files: RecentFile[] }> => {
+    const files: RecentFile[] = []
+    const ROOTS = ['Notebooks', '_system', '_logs']
+
+    const walk = (dir: string) => {
+      if (files.length >= 2000) return // Cap scan at 2000 files
+      let entries: fs.Dirent[]
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === '_embeddings') continue
+
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          walk(fullPath)
+        } else if (entry.name.endsWith('.md')) {
+          try {
+            const stat = fs.statSync(fullPath)
+            const raw = fs.readFileSync(fullPath, 'utf-8')
+            const { data, content } = matter(raw)
+
+            const preview = content.replace(/^#+\s+.*/gm, '').replace(/\[\[.*?\]\]/g, '').trim().slice(0, 150)
+
+            files.push({
+              path: path.relative(VAULT_PATH, fullPath),
+              title: data.title ?? entry.name.replace(/\.md$/, ''),
+              preview,
+              tags: Array.isArray(data.tags) ? data.tags : [],
+              mtime: stat.mtime.toISOString(),
+              size: stat.size
+            })
+          } catch { /* skip unreadable files */ }
+        }
+      }
+    }
+
+    for (const root of ROOTS) {
+      const rootDir = path.join(VAULT_PATH, root)
+      if (fs.existsSync(rootDir)) walk(rootDir)
+    }
+
+    files.sort((a, b) => b.mtime.localeCompare(a.mtime))
+    return { files: files.slice(0, 20) }
+  })
+
 export interface SearchHit {
   notePath: string
   title: string
@@ -189,8 +244,9 @@ export const getNoteTree = createServerFn({ method: 'GET' })
 export const getNote = createServerFn({ method: 'GET' })
   .inputValidator((notePath: string) => notePath)
   .handler(async ({ data: notePath }): Promise<{ content: string }> => {
-    const fullPath = path.join(VAULT_PATH, notePath)
-    if (!fullPath.startsWith(VAULT_PATH) || !fs.existsSync(fullPath)) return { content: '' }
+    const fullPath = path.resolve(VAULT_PATH, notePath)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if ((!fullPath.startsWith(resolvedVault + path.sep) && fullPath !== resolvedVault) || !fs.existsSync(fullPath)) return { content: '' }
 
     // Try reading as text if file is small enough
     const stat = fs.statSync(fullPath)

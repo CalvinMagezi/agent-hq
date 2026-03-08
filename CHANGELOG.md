@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **HQ Web PWA** (`apps/hq-control-center/`): Migrated control center from Electron to a modern PWA served by Bun and Vite. Features new React frontend, WebSocket server, and backend API routes for managing agents and jobs.
+- **Vault Sync Server** (`packages/vault-sync-server/`): Added vault sync and iCloud bridge daemons to the native agent tooling. Registered in macOS launchd via `hq start vault-sync` and `hq start icloud-bridge`.
+- **Vault Memory Context** (`packages/vault-memory/`): Added memory consolidation workflow with native Ollama client integration.
+- **Google Workspace Skill** (`packages/hq-tools/skills/google-workspace/`): Added agent skills and tools for integrating with Google Workspace APIs.
 - **Context Engine** (`packages/context-engine/`): New unified, token-aware, and budget-driven context management layer. Replaces fragmented context assembly with a centralized engine that builds `ContextFrame`s. Features include token budgeting with cascaded surplus, layered assembly (system, memory, thread, injections), compaction strategies (thread summarization, chunk truncation), and an in-memory chunk index for notes. Wired into Discord relay and Agent Relay Server.
 - **Vault Workers** (`scripts/vault-workers/`): Six lightweight AI background agents that proactively improve the Obsidian vault. Runs within the existing daemon scheduler when `VAULT_WORKERS_ENABLED=true`. Workers are write-light — they only create new notes (tagged `source: vault-worker`) and never modify existing ones, making them fully reversible. LLM cascade: Ollama (free, local) → Gemini Flash Lite → Gemini Flash, so workers never reach expensive frontier models.
   - **`gap-detector`** (6hr): Finds notes < 200 words and creates an analysis noting what content is likely missing.

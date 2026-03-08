@@ -12,6 +12,7 @@ import type {
   SyncChangeEntry,
   DeltaPushMessage,
   IndexResponseMessage,
+  FileRequestMessage,
   FileResponseMessage,
   DeviceListMessage,
   HelloAckMessage,
@@ -39,6 +40,7 @@ export class SyncEngine {
     string,
     { resolve: (content: string) => void; timer: ReturnType<typeof setTimeout> }
   >();
+  private hasPeers = false;
 
   constructor(
     private app: App,
@@ -185,17 +187,28 @@ export class SyncEngine {
       case "index-response":
         await this.handleIndexResponse(msg as IndexResponseMessage);
         break;
+      case "file-request":
+        await this.handleFileRequest(msg as FileRequestMessage);
+        break;
       case "file-response":
         this.handleFileResponse(msg as FileResponseMessage);
         break;
       case "device-list":
         this.handleDeviceList(msg as DeviceListMessage);
         break;
-      case "error":
+      case "error": {
+        const errMsg = msg as any;
         if (this.settings.debug) {
-          console.error("[vault-sync] Server error:", msg);
+          console.error("[vault-sync] Server error:", errMsg);
+        }
+        // Stale device token — clear it so next reconnect authenticates fresh
+        if (errMsg.code === "AUTH_FAILED" && this.settings.deviceToken) {
+          this.settings.deviceToken = undefined;
+          this.transport.disconnect();
+          setTimeout(() => this.transport.connect(), 1000);
         }
         break;
+      }
     }
   }
 
@@ -221,6 +234,12 @@ export class SyncEngine {
       this.settings.lastSyncChangeId ?? 0,
     );
 
+    // Peers already online when we connected — push all local files
+    if (this.connectedDevices.length > 0 && !this.hasPeers) {
+      this.hasPeers = true;
+      setTimeout(() => this.pushAllFiles(), 1000);
+    }
+
     this.setStatus("synced");
   }
 
@@ -241,12 +260,19 @@ export class SyncEngine {
 
     this.setStatus("syncing");
 
-    for (const change of msg.changes) {
-      // Skip own device
-      if (change.deviceId === this.settings.deviceId) continue;
-      if (this.shouldIgnore(change.path)) continue;
+    const toApply = msg.changes.filter(
+      (c) => c.deviceId !== this.settings.deviceId && !this.shouldIgnore(c.path),
+    );
 
-      await this.applyRemoteChange(change);
+    // Process in chunks to avoid blocking the mobile event loop
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < toApply.length; i += CHUNK_SIZE) {
+      const chunk = toApply.slice(i, i + CHUNK_SIZE);
+      for (const change of chunk) {
+        await this.applyRemoteChange(change);
+      }
+      // Yield to event loop between chunks
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
 
     // Update cursor
@@ -254,9 +280,7 @@ export class SyncEngine {
 
     // Request more if available
     if (msg.hasMore) {
-      await this.transport.requestIndex(
-        msg.latestChangeId,
-      );
+      await this.transport.requestIndex(msg.latestChangeId);
     } else {
       this.setStatus("synced");
     }
@@ -267,15 +291,132 @@ export class SyncEngine {
     const pending = this.pendingFileRequests.get(key);
     if (pending) {
       clearTimeout(pending.timer);
-      pending.resolve(atob(msg.content));
+      // Decode base64 → UTF-8 bytes → string
+      const binary = atob(msg.content);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      pending.resolve(new TextDecoder().decode(bytes));
       this.pendingFileRequests.delete(key);
     }
   }
 
   private handleDeviceList(msg: DeviceListMessage): void {
+    const wasEmpty = this.connectedDevices.length === 0;
     this.connectedDevices = msg.devices
       .filter((d) => d.status === "online" && d.deviceId !== this.settings.deviceId)
       .map((d) => d.deviceId);
+
+    // First peer joined — push all local files so they can request content
+    if (wasEmpty && this.connectedDevices.length > 0 && !this.hasPeers) {
+      this.hasPeers = true;
+      setTimeout(() => this.pushAllFiles(), 500);
+    }
+  }
+
+  // ─── File Request Handling (serve content to peers) ───────
+
+  private async handleFileRequest(msg: FileRequestMessage): Promise<void> {
+    // Only respond if this device is the target
+    if (msg.targetDeviceId !== this.settings.deviceId) return;
+
+    const content = await this.fileAdapter.readFile(msg.path);
+    if (content === null) {
+      if (this.settings.debug) {
+        console.warn(`[vault-sync] file-request: cannot read ${msg.path}`);
+      }
+      return;
+    }
+
+    // Verify hash matches what was requested
+    const actualHash = await hashContent(content);
+    if (actualHash !== msg.contentHash) {
+      if (this.settings.debug) {
+        console.warn(
+          `[vault-sync] file-request: hash mismatch for ${msg.path} ` +
+            `(want ${msg.contentHash}, have ${actualHash})`,
+        );
+      }
+      return;
+    }
+
+    // Encode UTF-8 string → bytes → base64
+    const bytes = new TextEncoder().encode(content);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+
+    await this.transport.send({
+      type: "file-response",
+      path: msg.path,
+      contentHash: msg.contentHash,
+      content: base64,
+      size: bytes.length,
+      mtime: Date.now(),
+      fromDeviceId: this.settings.deviceId!,
+    });
+  }
+
+  // ─── Initial Sync Push ────────────────────────────────────
+
+  private async pushAllFiles(): Promise<void> {
+    if (!this.transport.isConnected) return;
+
+    const files = this.app.vault
+      .getMarkdownFiles()
+      .filter((f) => !this.shouldIgnore(f.path));
+
+    if (this.settings.debug) {
+      console.log(`[vault-sync] Pushing index for ${files.length} files to new peer`);
+    }
+
+    this.setStatus("syncing");
+    let changeId = Date.now();
+
+    // Process in chunks to avoid blocking the mobile event loop
+    const CHUNK_SIZE = 10;
+    for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+      if (!this.transport.isConnected) break;
+
+      const chunk = files.slice(i, i + CHUNK_SIZE);
+      for (const file of chunk) {
+        try {
+          const content = await this.fileAdapter.readFile(file.path);
+          if (content === null) continue;
+
+          const contentHash = await hashContent(content);
+
+          // Skip files the peer already knows about (same hash)
+          if (this.fileHashes.get(file.path) === contentHash) continue;
+
+          const change: SyncChangeEntry = {
+            changeId: changeId++,
+            path: file.path,
+            changeType: "create",
+            contentHash,
+            size: new TextEncoder().encode(content).length,
+            mtime: file.stat?.mtime ?? Date.now(),
+            detectedAt: Date.now(),
+            deviceId: this.settings.deviceId!,
+          };
+
+          this.fileHashes.set(file.path, contentHash);
+          await this.transport.pushChange(change);
+        } catch (err) {
+          if (this.settings.debug) {
+            console.error(`[vault-sync] pushAllFiles: error on ${file.path}`, err);
+          }
+        }
+      }
+
+      // Yield to event loop between chunks
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+
+    this.setStatus("synced");
   }
 
   // ─── Remote Change Application ────────────────────────────

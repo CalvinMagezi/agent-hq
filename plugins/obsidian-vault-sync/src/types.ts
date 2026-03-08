@@ -14,7 +14,7 @@ export interface VaultSyncSettings {
   /** Fallback poll interval (ms) */
   syncIntervalMs: number;
   /** Conflict resolution strategy */
-  conflictStrategy: "newer-wins" | "merge-frontmatter" | "manual";
+  conflictStrategy: "newer-wins" | "merge-frontmatter" | "manual" | "remote-wins";
   /** Enable E2E encryption */
   enableE2E: boolean;
   /** Debug logging to console */

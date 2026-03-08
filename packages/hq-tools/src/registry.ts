@@ -15,6 +15,7 @@ export interface HQContext {
   vaultPath: string;
   openrouterApiKey?: string;
   geminiApiKey?: string;
+  googleWorkspaceCredentialsFile?: string;
   /** Caller's security profile — gates write-access tools */
   securityProfile?: "minimal" | "standard" | "guarded" | "admin";
 }

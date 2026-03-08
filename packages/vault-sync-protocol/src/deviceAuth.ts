@@ -92,16 +92,22 @@ export async function verifyDeviceToken(
   const payloadB64 = token.slice(0, colonIdx);
   const hmacHex = token.slice(colonIdx + 1);
 
-  // Verify HMAC
+  // Decode submitted HMAC hex → bytes
+  if (hmacHex.length % 2 !== 0) return null;
+  const submittedBytes = new Uint8Array(hmacHex.length / 2);
+  for (let i = 0; i < hmacHex.length; i += 2) {
+    submittedBytes[i / 2] = parseInt(hmacHex.slice(i, i + 2), 16);
+  }
+
+  // subtle.verify is constant-time by spec — prevents timing attacks
   const key = await importHmacKey(serverSecret);
-  const expectedSig = await subtle.sign(
+  const isValid = await subtle.verify(
     "HMAC",
     key,
+    submittedBytes,
     stringToBuffer(payloadB64),
   );
-  const expectedHex = bufferToHex(expectedSig);
-
-  if (hmacHex !== expectedHex) return null;
+  if (!isValid) return null;
 
   // Decode payload
   try {

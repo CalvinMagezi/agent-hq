@@ -71,3 +71,6 @@ yarn-error.log*
 **/.media-temp/
 
 logs
+# Vault sync server — generated secrets and database (contain sensitive keys)
+sync-server.secret
+sync-server.db

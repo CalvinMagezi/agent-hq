@@ -54,6 +54,17 @@ import {
   DrawItAnalyzeTool,
   CreateDiagramTool,
 } from "./tools/drawit.js";
+import {
+  GoogleWorkspaceSchemaTool,
+  GoogleWorkspaceReadTool,
+  GoogleWorkspaceWriteTool
+} from "./tools/googleWorkspace.js";
+
+export {
+  GoogleWorkspaceSchemaTool,
+  GoogleWorkspaceReadTool,
+  GoogleWorkspaceWriteTool
+};
 
 /**
  * Create the default registry with all built-in HQ tools pre-registered.
@@ -74,5 +85,9 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(DrawItAnalyzeTool);
   // High-level diagram creation (structured input, no NDJSON knowledge needed)
   registry.register(CreateDiagramTool);
+  // Google Workspace tools
+  registry.register(GoogleWorkspaceSchemaTool);
+  registry.register(GoogleWorkspaceReadTool);
+  registry.register(GoogleWorkspaceWriteTool);
   return registry;
 }

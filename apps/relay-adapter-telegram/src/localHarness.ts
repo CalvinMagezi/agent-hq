@@ -159,7 +159,7 @@ export class LocalHarness {
   }
 
   private async runOpenCode(prompt: string): Promise<string> {
-    const cmd = ["opencode", "run", "-m", "anthropic/claude-sonnet-4-6", "-p", prompt];
+    const cmd = ["opencode", "run", "-m", "anthropic/claude-sonnet-4-6", prompt];
     const { stdout, stderr } = await this.exec(cmd);
     return stdout.trim() || stderr.trim() || "No response from OpenCode.";
   }

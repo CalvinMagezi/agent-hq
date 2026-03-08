@@ -30,7 +30,12 @@
     "telegram": "bun --cwd apps/relay-adapter-telegram start",
     "plugin:build": "cd plugins/obsidian-vault-sync && bun run build",
     "plugin:install": "bash scripts/install-obsidian-plugin.sh",
-    "hq": "bun run scripts/hq.ts"
+    "icloud-bridge": "bun run scripts/vault-icloud-bridge.ts",
+    "hq": "bun run scripts/hq.ts",
+    "tasks:monitor": "bun run scripts/monitor-scheduled-tasks.ts",
+    "tasks:follow": "bun run scripts/monitor-scheduled-tasks.ts --follow",
+    "vault-pwa": "bun --cwd apps/hq-control-center run dev",
+    "vault-pwa:ws": "bun --cwd apps/hq-control-center run ws"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

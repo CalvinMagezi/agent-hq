@@ -140,9 +140,14 @@ export class ChangeRouter {
     if (deviceToken) {
       const payload = await verifyDeviceToken(deviceToken, this.config.serverSecret);
       if (!payload || payload.deviceId !== deviceId || payload.vaultId !== vaultId) {
+        console.warn(`[sync-server] AUTH_FAILED device=${deviceId} name=${deviceName} tokenVaultId=${payload?.vaultId} helloVaultId=${vaultId}`);
         this.sendError(ws, "AUTH_FAILED", "Invalid device token");
         return;
       }
+    }
+
+    if (this.config.debug) {
+      console.log(`[sync-server] Hello from device=${deviceId} (${deviceName}) vaultId=${vaultId} hasToken=${!!deviceToken}`);
     }
 
     // Check device limit

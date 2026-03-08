@@ -264,7 +264,10 @@ RELAY_SERVER_ENV="    <key>AGENT_WS_PORT</key>
     <string>0</string>"
 install_service_plist "relay-server" "$PROJECT_DIR/packages/agent-relay-server" "src/index.ts" "$RELAY_SERVER_ENV"
 
-# 5. WhatsApp Adapter — self-chat relay via Baileys
+# 5. Vault Sync Server — cross-device vault sync relay
+install_service_plist "vault-sync" "$PROJECT_DIR/packages/vault-sync-server" "src/index.ts"
+
+# 6. WhatsApp Adapter — self-chat relay via Baileys
 # Source WhatsApp env for WHATSAPP_OWNER_JID
 source_env_file "$PROJECT_DIR/apps/relay-adapter-whatsapp/.env.local"
 

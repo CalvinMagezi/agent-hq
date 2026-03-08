@@ -37,6 +37,7 @@ export interface SystemStatus {
     tasksCompleted: number;
     tasksFailed: number;
   }>;
+  cronSchedule: string | null;
 }
 
 export class VaultAPI {
@@ -408,6 +409,15 @@ export class VaultAPI {
       }
     } catch { /* skip */ }
 
+    // Read CRON-SCHEDULE.md — injected into every agent's context so they can answer scheduling questions
+    let cronSchedule: string | null = null;
+    try {
+      const cronPath = path.join(vaultPath, "_system/CRON-SCHEDULE.md");
+      if (fs.existsSync(cronPath)) {
+        cronSchedule = fs.readFileSync(cronPath, "utf-8");
+      }
+    } catch { /* skip */ }
+
     // Read worker sessions
     const workers: SystemStatus["workers"] = [];
     try {
@@ -441,6 +451,6 @@ export class VaultAPI {
       }
     } catch { /* skip */ }
 
-    return { daemon, workflows, heartbeat, workers, relays };
+    return { daemon, workflows, heartbeat, workers, relays, cronSchedule };
   }
 }

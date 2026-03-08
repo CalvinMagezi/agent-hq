@@ -1,31 +1,31 @@
 import { defineConfig } from 'vite'
-import path from 'node:path'
-import electron from 'vite-plugin-electron/simple'
-import react from '@vitejs/plugin-react'
+import tsConfigPaths from 'vite-tsconfig-paths'
+import { tanstackStart } from '@tanstack/react-start/plugin/vite'
+import viteReact from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+import { VitePWA } from 'vite-plugin-pwa'
 
-// https://vitejs.dev/config/
 export default defineConfig({
-  // Fix asset paths for file:// protocol in packaged Electron builds
-  base: './',
+  server: {
+    port: 4747,
+    host: '0.0.0.0',
+  },
   plugins: [
-    react(),
-    electron({
-      main: {
-        // Shortcut of `build.lib.entry`.
-        entry: 'electron/main.ts',
+    tsConfigPaths(),
+    tanstackStart(),
+    viteReact(),
+    tailwindcss(),
+    VitePWA({
+      strategies: 'injectManifest',
+      srcDir: 'src',
+      filename: 'sw.ts',
+      registerType: 'autoUpdate',
+      injectRegister: 'auto',
+      manifest: false, // Using public/manifest.json
+      injectManifest: {
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+        globIgnores: ['_archived-electron/**', 'electron/**'],
       },
-      preload: {
-        // Shortcut of `build.rollupOptions.input`.
-        // Preload scripts may contain Web assets, so use the `build.rollupOptions.input` instead `build.lib.entry`.
-        input: path.join(__dirname, 'electron/preload.ts'),
-      },
-      // Polyfill the Electron and Node.js API for Renderer process.
-      // If you want use Node.js in Renderer process, the `nodeIntegration` needs to be enabled in the Main process.
-      // See 👉 https://github.com/electron-vite/vite-plugin-electron-renderer
-      renderer: process.env.NODE_ENV === 'test'
-        // https://github.com/electron-vite/vite-plugin-electron-renderer/issues/78#issuecomment-2053600808
-        ? undefined
-        : {},
     }),
   ],
 })

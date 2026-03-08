@@ -54,6 +54,7 @@ const API_KEY = process.env.AGENTHQ_API_KEY || "local-master-key";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GOOGLE_WORKSPACE_CREDENTIALS_FILE = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
 
 if (!OPENROUTER_API_KEY && !GEMINI_API_KEY) {
     console.warn("Warning: Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set. LLM calls will fail.");
@@ -111,6 +112,7 @@ const hqGatewayContext = {
     vaultPath: VAULT_PATH,
     openrouterApiKey: OPENROUTER_API_KEY,
     geminiApiKey: GEMINI_API_KEY,
+    googleWorkspaceCredentialsFile: GOOGLE_WORKSPACE_CREDENTIALS_FILE,
 };
 
 // ── Task Classification ─────────────────────────────────────────────
@@ -1355,7 +1357,7 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
                 const { session: fallbackSession } = await createAgentSession({ ...sessionOptions, model: fallbackModel });
                 currentSession = fallbackSession;
                 if (profileToolNames !== "*") {
-                    try { fallbackSession.setActiveToolsByName(profileToolNames); } catch (_) {}
+                    try { fallbackSession.setActiveToolsByName(profileToolNames); } catch (_) { }
                 }
                 fallbackSession.subscribe(onSessionEvent);
                 await fallbackSession.prompt(promptText);

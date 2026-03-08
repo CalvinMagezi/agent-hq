@@ -107,11 +107,21 @@ export class FbmqCli {
         //   Tags:           tag1,tag2
         //   Body:           NNN bytes
         const headers: ParsedHeaders = { custom: {}, raw: new Map() };
+        const lines = stdout.split('\n');
+        let inCustom = false;
 
-        for (const line of stdout.split('\n')) {
-            if (!line.trim()) continue;
+        for (const line of lines) {
+            if (!line.trim()) { inCustom = false; continue; }
 
-            const match = line.match(/^([^:]+):\s+(.*)$/);
+            // Custom: block sub-entries (indented with spaces)
+            if (inCustom && line.startsWith('  ')) {
+                const sub = line.trim().match(/^([^:]+):\s*(.*)$/);
+                if (sub) headers.custom![sub[1].trim()] = sub[2].trim();
+                continue;
+            }
+            inCustom = false;
+
+            const match = line.match(/^([^:]+):\s*(.*)$/);
             if (match) {
                 const key = match[1].toLowerCase().trim();
                 const val = match[2].trim();
@@ -123,6 +133,7 @@ export class FbmqCli {
                     case 'ttl': headers.ttl = parseInt(val, 10); break;
                     case 'created by': headers.createdBy = val; break;
                     case 'tags': headers.tags = val.split(',').map(s => s.trim()); break;
+                    case 'custom': inCustom = true; break;
                 }
             }
         }

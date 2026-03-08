@@ -68,6 +68,9 @@ export class ConflictHandler {
     change: SyncChangeEntry,
   ): Promise<{ isConflict: boolean; shouldApply: boolean }> {
     switch (this.settings.conflictStrategy) {
+      case "remote-wins":
+        // Always apply remote — never create backup files (good for viewer devices)
+        return { isConflict: false, shouldApply: true };
       case "newer-wins":
         return this.resolveNewerWins(conflict, change);
       case "merge-frontmatter":

@@ -16,6 +16,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   downloadMediaMessage,
   getAggregateVotesInPollMessage,
+  Browsers,
   proto,
   type WASocket,
   type BaileysEventMap,
@@ -161,6 +162,8 @@ export class WhatsAppBridge {
       logger: this.logger,
       printQRInTerminal: false, // We handle QR ourselves
       generateHighQualityLinkPreview: this.linkPreviews,
+      browser: Browsers.macOS("Desktop"),
+      syncFullHistory: false,
       // Do NOT use shouldIgnoreJid — it filters Baileys' internal protocol
       // messages and prevents message delivery. Security filtering is done
       // in handleMessagesUpsert via the WhatsAppGuard check.

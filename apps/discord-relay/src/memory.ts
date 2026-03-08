@@ -1,4 +1,17 @@
 import type { ConvexAPI } from "./vaultApi.js";
+import { createMemorySystem } from "@repo/vault-memory";
+
+// Lazy singleton — created on first [REMEMBER:] tag encountered
+let _ingester: ReturnType<typeof createMemorySystem>["ingester"] | null = null;
+function getIngester() {
+  if (!_ingester) {
+    const vaultPath = process.env.VAULT_PATH ?? "";
+    if (vaultPath) {
+      _ingester = createMemorySystem(vaultPath).ingester;
+    }
+  }
+  return _ingester;
+}
 
 /**
  * Parse Claude's response for memory intent tags.
@@ -16,6 +29,7 @@ import type { ConvexAPI } from "./vaultApi.js";
 export async function processMemoryIntents(
   convex: ConvexAPI,
   response: string,
+  meta?: { harness?: string; source?: string },
 ): Promise<string> {
   let clean = response;
 
@@ -27,6 +41,12 @@ export async function processMemoryIntents(
     const fact = match[1].trim();
     if (fact && !looksLikeArtifact(fact)) {
       await convex.storeMemory("fact", fact);
+      // Also ingest into the live memory pool (Ollama-powered)
+      getIngester()?.ingest({
+        text: fact,
+        source: meta?.source ?? "discord",
+        harness: meta?.harness ?? "relay",
+      }).catch(() => {}); // fire-and-forget, non-blocking
     }
     clean = clean.replace(match[0], "");
   }

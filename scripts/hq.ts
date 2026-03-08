@@ -44,8 +44,22 @@ const TG_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.log");
 const TG_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.error.log");
 const RELAY_SERVER_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.log");
 const RELAY_SERVER_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.error.log");
+const VAULT_SYNC_DIR = path.join(REPO_ROOT, "packages/vault-sync-server");
+const VAULT_SYNC_DAEMON = "com.agent-hq.vault-sync";
+const VAULT_SYNC_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-vault-sync.log");
+const VAULT_SYNC_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-vault-sync.error.log");
+const ICLOUD_BRIDGE_DAEMON = "com.agent-hq.icloud-bridge";
+const ICLOUD_BRIDGE_LOG = path.join(os.homedir(), "Library/Logs/com.agent-hq.icloud-bridge.log");
 const DAEMON_LOG = path.join(os.homedir(), "Library/Logs/hq-daemon.log");
 const DAEMON_PID = path.join(os.homedir(), "Library/Logs/hq-daemon.pid");
+
+const PWA_DIR = path.join(REPO_ROOT, "apps/hq-control-center");
+const PWA_DAEMON = "com.agent-hq.pwa";
+const PWA_WS_DAEMON = "com.agent-hq.pwa-ws";
+const PWA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-pwa.log");
+const PWA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-pwa.error.log");
+const PWA_WS_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-pwa-ws.log");
+const PWA_WS_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-pwa-ws.error.log");
 
 const RELAY_LOCK = path.join(RELAY_DIR, ".discord-relay/bot.lock");
 
@@ -117,21 +131,29 @@ function relayPid(): string | null {
 function whatsappPid(): string | null { return daemonPid(WA_DAEMON); }
 function telegramPid(): string | null { return daemonPid(TG_DAEMON); }
 function relayServerPid(): string | null { return daemonPid(RELAY_SERVER_DAEMON); }
+function vaultSyncPid(): string | null { return daemonPid(VAULT_SYNC_DAEMON); }
+function icloudBridgePid(): string | null { return daemonPid(ICLOUD_BRIDGE_DAEMON); }
+function pwaPid(): string | null { return daemonPid(PWA_DAEMON); }
+function pwaWsPid(): string | null { return daemonPid(PWA_WS_DAEMON); }
 
 function uptime(pid: string): string {
   return sh(`ps -o etime= -p ${pid} 2>/dev/null`).trim() || "?";
 }
 
-type ServiceTarget = "agent" | "relay" | "whatsapp" | "telegram" | "relay-server";
+type ServiceTarget = "agent" | "relay" | "whatsapp" | "telegram" | "relay-server" | "vault-sync" | "icloud-bridge" | "pwa" | "pwa-ws";
 
 function resolveTargets(target?: string): ServiceTarget[] {
-  if (!target || target === "all") return ["agent", "relay", "relay-server", "whatsapp", "telegram"];
+  if (!target || target === "all") return ["agent", "relay", "relay-server", "vault-sync", "icloud-bridge", "whatsapp", "telegram", "pwa", "pwa-ws"];
   if (target === "agent") return ["agent"];
   if (target === "relay") return ["relay"];
   if (target === "whatsapp" || target === "wa") return ["whatsapp"];
   if (target === "telegram" || target === "tg") return ["telegram"];
   if (target === "relay-server") return ["relay-server"];
-  warn(`Unknown target "${target}" — expected agent, relay, whatsapp, telegram, relay-server, or all`);
+  if (target === "vault-sync" || target === "vs") return ["vault-sync"];
+  if (target === "icloud-bridge" || target === "ib") return ["icloud-bridge"];
+  if (target === "pwa") return ["pwa"];
+  if (target === "pwa-ws") return ["pwa-ws"];
+  warn(`Unknown target "${target}" — expected agent, relay, whatsapp, telegram, relay-server, vault-sync, icloud-bridge, pwa, pwa-ws or all`);
   return [];
 }
 
@@ -148,6 +170,14 @@ function serviceInfo(t: ServiceTarget) {
       return { daemon: TG_DAEMON, pid: telegramPid, label: "Telegram", dir: TG_DIR, log: TG_LOG, err: TG_ERR };
     case "relay-server":
       return { daemon: RELAY_SERVER_DAEMON, pid: relayServerPid, label: "Relay Server", dir: RELAY_SERVER_DIR, log: RELAY_SERVER_LOG, err: RELAY_SERVER_ERR };
+    case "vault-sync":
+      return { daemon: VAULT_SYNC_DAEMON, pid: vaultSyncPid, label: "Vault Sync", dir: VAULT_SYNC_DIR, log: VAULT_SYNC_LOG, err: VAULT_SYNC_ERR };
+    case "icloud-bridge":
+      return { daemon: ICLOUD_BRIDGE_DAEMON, pid: icloudBridgePid, label: "iCloud Bridge", dir: SCRIPTS_DIR, log: ICLOUD_BRIDGE_LOG, err: ICLOUD_BRIDGE_LOG };
+    case "pwa":
+      return { daemon: PWA_DAEMON, pid: pwaPid, label: "HQ Web PWA", dir: PWA_DIR, log: PWA_LOG, err: PWA_ERR };
+    case "pwa-ws":
+      return { daemon: PWA_WS_DAEMON, pid: pwaWsPid, label: "HQ PWA WS", dir: PWA_DIR, log: PWA_WS_LOG, err: PWA_WS_ERR };
   }
 }
 
@@ -268,7 +298,13 @@ async function cmdStart(target?: string): Promise<void> {
     const rsPid = relayServerPid();
     if (!rsPid) {
       info("Starting relay server (required by adapter)...");
-      sh(`launchctl start "${RELAY_SERVER_DAEMON}" 2>/dev/null`);
+      const rsRegistered = sh(`launchctl list 2>/dev/null | grep "${RELAY_SERVER_DAEMON}"`);
+      if (!rsRegistered) {
+        const plistDst = path.join(LAUNCH_AGENTS, `${RELAY_SERVER_DAEMON}.plist`);
+        if (fs.existsSync(plistDst)) sh(`launchctl load "${plistDst}" 2>/dev/null`);
+      } else {
+        sh(`launchctl start "${RELAY_SERVER_DAEMON}" 2>/dev/null`);
+      }
       await sleep(2500);
       const rsNew = relayServerPid();
       rsNew
@@ -283,7 +319,20 @@ async function cmdStart(target?: string): Promise<void> {
 
     if (pid) { warn(`${svc.label} already running (PID: ${pid})`); continue; }
 
-    sh(`launchctl start "${svc.daemon}" 2>/dev/null`);
+    // Check if the service is registered in launchd; if not, load the plist first
+    const registered = sh(`launchctl list 2>/dev/null | grep "${svc.daemon}"`);
+    if (!registered) {
+      const plistDst = path.join(LAUNCH_AGENTS, `${svc.daemon}.plist`);
+      if (fs.existsSync(plistDst)) {
+        sh(`launchctl load "${plistDst}" 2>/dev/null`);
+        await sleep(1000);
+      } else {
+        fail(`${svc.label} plist not found — run: hq install ${t}`);
+        continue;
+      }
+    } else {
+      sh(`launchctl start "${svc.daemon}" 2>/dev/null`);
+    }
     await sleep(2500);
 
     const newPid = svc.pid();
@@ -408,7 +457,7 @@ async function cmdPs(): Promise<void> {
   section("Agent HQ Processes");
   console.log();
 
-  const icons: Record<ServiceTarget, string> = { agent: "🤖", relay: "📡", "relay-server": "🔌", whatsapp: "📱", telegram: "✈️" };
+  const icons: Record<ServiceTarget, string> = { agent: "🤖", relay: "📡", "relay-server": "🔌", "vault-sync": "🔄", whatsapp: "📱", telegram: "✈️", pwa: "🌐", "pwa-ws": "⚡", "icloud-bridge": "☁️" };
   for (const t of resolveTargets("all")) {
     const svc = serviceInfo(t);
     const pid = svc.pid();
@@ -490,36 +539,33 @@ async function cmdHealth(): Promise<void> {
 // hq install [agent|relay|all]
 async function cmdInstall(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-    const srcDir = t === "agent" ? HQ_DIR : RELAY_DIR;
-    const plistSrc = path.join(srcDir, `${daemon}.plist`);
-    const plistDst = path.join(LAUNCH_AGENTS, `${daemon}.plist`);
-    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const svc = serviceInfo(t);
+    const plistSrc = path.join(svc.dir, `${svc.daemon}.plist`);
+    const plistDst = path.join(LAUNCH_AGENTS, `${svc.daemon}.plist`);
 
     if (!fs.existsSync(plistSrc)) {
-      fail(`${label} plist not found: ${plistSrc}`);
+      fail(`${svc.label} plist not found: ${plistSrc}`);
       continue;
     }
     fs.mkdirSync(LAUNCH_AGENTS, { recursive: true });
     fs.copyFileSync(plistSrc, plistDst);
     sh(`launchctl load "${plistDst}" 2>/dev/null`);
-    ok(`${label} daemon installed and started`);
+    ok(`${svc.label} daemon installed and started`);
   }
 }
 
 // hq uninstall [agent|relay|all]
 async function cmdUninstall(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
-    const daemon = t === "agent" ? AGENT_DAEMON : RELAY_DAEMON;
-    const plistDst = path.join(LAUNCH_AGENTS, `${daemon}.plist`);
-    const label = t === "agent" ? "HQ Agent" : "Relay";
+    const svc = serviceInfo(t);
+    const plistDst = path.join(LAUNCH_AGENTS, `${svc.daemon}.plist`);
 
     sh(`launchctl unload "${plistDst}" 2>/dev/null`);
     if (fs.existsSync(plistDst)) {
       fs.rmSync(plistDst);
-      ok(`${label} daemon uninstalled`);
+      ok(`${svc.label} daemon uninstalled`);
     } else {
-      warn(`${label} daemon was not installed`);
+      warn(`${svc.label} daemon was not installed`);
     }
   }
 }
@@ -1378,7 +1424,7 @@ async function cmdTools(nonInteractive = false): Promise<void> {
     const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
     let settings: Record<string, unknown> = {};
     if (fs.existsSync(settingsFile)) {
-      try { settings = JSON.parse(fs.readFileSync(settingsFile, "utf-8")); } catch {}
+      try { settings = JSON.parse(fs.readFileSync(settingsFile, "utf-8")); } catch { }
     }
     const mcpServers = (settings.mcpServers as Record<string, unknown> ?? {});
     if (!mcpServers.obsidian) {
@@ -1475,7 +1521,7 @@ async function cmdSetup(): Promise<void> {
   }
 
   // .gitkeep files
-  for (const dir of ["_jobs/pending","_jobs/running","_jobs/done","_jobs/failed","_delegation/pending","_delegation/claimed","_delegation/completed","_threads/active","_threads/archived","_logs"]) {
+  for (const dir of ["_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed", "_delegation/pending", "_delegation/claimed", "_delegation/completed", "_threads/active", "_threads/archived", "_logs"]) {
     const gk = path.join(VAULT_PATH, dir, ".gitkeep");
     if (!fs.existsSync(gk)) fs.writeFileSync(gk, "", "utf-8");
   }
@@ -1674,7 +1720,7 @@ ${c.bold}CHAT${c.reset}
 
 ${c.bold}SERVICE MANAGEMENT${c.reset}
   hq status                     Status of all services                 (alias: s)
-  hq start  [target]            Start services                         targets: agent, relay, whatsapp, telegram, relay-server, all
+  hq start  [target]            Start services                         targets: agent, relay, whatsapp, telegram, relay-server, vault-sync, all
   hq stop   [target]            Stop services
   hq restart [target]           Restart services                       (alias: r)
   hq fg     [target]            Run a service in the foreground

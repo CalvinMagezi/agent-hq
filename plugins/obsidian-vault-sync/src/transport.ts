@@ -47,26 +47,27 @@ export class SyncTransport {
    * Initialize encryption key and vault ID from passphrase.
    */
   async init(): Promise<void> {
-    if (this.settings.enableE2E && this.settings.encryptionPassphrase) {
-      const salt = "agent-hq-vault-sync-v1";
-      this.encryptionKey = await deriveVaultKey(
-        this.settings.encryptionPassphrase,
-        salt,
+    if (this.settings.encryptionPassphrase) {
+      // Derive a passphrase-specific salt via SHA-256 so different passphrases
+      // produce different salts (prevents cross-user precomputation), while all
+      // devices using the same passphrase arrive at the same key.
+      const passphraseBytes = new TextEncoder().encode(
+        this.settings.encryptionPassphrase + "agent-hq-vault-sync-v1",
       );
-      this.vaultId = await generateVaultId(this.encryptionKey);
+      const saltHashBuf = await globalThis.crypto.subtle.digest(
+        "SHA-256",
+        passphraseBytes,
+      );
+      const saltHex = Array.from(new Uint8Array(saltHashBuf))
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("");
+
+      const key = await deriveVaultKey(this.settings.encryptionPassphrase, saltHex);
+      this.vaultId = await generateVaultId(key);
+      this.encryptionKey = this.settings.enableE2E ? key : null;
     } else {
       this.encryptionKey = null;
-      // Without E2E, vault ID is derived from passphrase anyway (for grouping)
-      if (this.settings.encryptionPassphrase) {
-        const salt = "agent-hq-vault-sync-v1";
-        const tempKey = await deriveVaultKey(
-          this.settings.encryptionPassphrase,
-          salt,
-        );
-        this.vaultId = await generateVaultId(tempKey);
-      } else {
-        this.vaultId = "unencrypted-vault";
-      }
+      this.vaultId = "unencrypted-vault";
     }
   }
 

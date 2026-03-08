@@ -8,8 +8,8 @@ export const PROTOCOL_VERSION = 1 as const;
 /** Default relay server port */
 export const DEFAULT_PORT = 18800;
 
-/** Default relay server host (LAN-only) */
-export const DEFAULT_HOST = "127.0.0.1";
+/** Default relay server host (all interfaces — use Tailscale/firewall to restrict access) */
+export const DEFAULT_HOST = "0.0.0.0";
 
 /** WebSocket ping interval (ms) */
 export const PING_INTERVAL_MS = 30_000;

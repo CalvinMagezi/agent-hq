@@ -35,8 +35,9 @@ import type {
 export type { Job, Note, DelegatedTask, RelayHealth, SystemContext, SearchResult, RecentActivityEntry };
 export { calculateCost } from "./pricing";
 
-// Re-export types
 export * from "./types";
+export { SearchClient } from "./search";
+export { TraceDB } from "./traceDb";
 
 export class VaultClient {
   readonly vaultPath: string;
@@ -277,8 +278,11 @@ export class VaultClient {
     const headers = await this.jobQueue["cli"].inspect(claimedPath);
     const rawBodyStr = await this.jobQueue["cli"].cat(claimedPath);
     const { custom: jobCustom, cleanBody: jobCleanBody } = FbmqCli.parseBodyCustom(rawBodyStr);
-    headers.custom = { ...headers.custom, ...jobCustom };
+    // Merge: inspect() custom (from RFC822 headers) wins over body-prepended custom
+    headers.custom = { ...jobCustom, ...headers.custom };
     const job = jobCodec.deserialize(claimedPath, jobCleanBody, headers);
+    // Preserve the correct jobId even if the codec lost it due to format migration
+    if (job.jobId === "unknown" || !job.jobId) job.jobId = jobId;
 
     job.status = status;
     job.updatedAt = this.nowISO();
@@ -301,6 +305,36 @@ export class VaultClient {
       await this.jobQueue.complete(claimedPath);
       this.claimedJobs.delete(jobId);
     }
+  }
+
+  /**
+   * Get a job by ID from any queue state (processing or done).
+   * Returns null if not found.
+   */
+  async getJob(jobId: string): Promise<Job | null> {
+    const queueRoot = this.resolve("_fbmq", "jobs");
+    const searchDirs = ["processing", "done", "failed"];
+    for (const dir of searchDirs) {
+      const dirPath = path.join(queueRoot, dir);
+      if (!fs.existsSync(dirPath)) continue;
+      const files = fs.readdirSync(dirPath);
+      for (const file of files) {
+        if (!file.endsWith(".md")) continue;
+        const filePath = path.join(dirPath, file);
+        try {
+          const headers = await this.jobQueue["cli"].inspect(filePath);
+          if (headers.custom?.jobId === jobId) {
+            const rawBody = await this.jobQueue["cli"].cat(filePath);
+            const { custom, cleanBody } = FbmqCli.parseBodyCustom(rawBody);
+            headers.custom = { ...custom, ...headers.custom };
+            const job = jobCodec.deserialize(filePath, cleanBody, headers);
+            if (job.jobId === "unknown" || !job.jobId) job.jobId = jobId;
+            return job;
+          }
+        } catch { /* skip unreadable files */ }
+      }
+    }
+    return null;
   }
 
   /**

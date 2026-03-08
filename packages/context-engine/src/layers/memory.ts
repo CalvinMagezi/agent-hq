@@ -12,6 +12,8 @@ export interface MemoryLayerInput {
     vault: VaultClientLike;
     allocation: number;
     count: (text: string) => number;
+    /** Optional: live memory querier from @repo/vault-memory */
+    liveMemory?: { formatted: string };
 }
 
 export interface MemoryLayerOutput {
@@ -35,6 +37,11 @@ export async function assembleMemoryLayer(
 
     if (ctx.memory) parts.push(ctx.memory);
     if (ctx.preferences) parts.push(ctx.preferences);
+
+    // Live memory from vault-memory (Ollama-consolidated cross-harness insights)
+    if (input.liveMemory?.formatted) {
+        parts.push(input.liveMemory.formatted);
+    }
 
     // Add structured facts/goals if available
     if (vault.getMemoryFacts) {

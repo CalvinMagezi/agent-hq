@@ -4,17 +4,49 @@ import { createHighlighter } from 'shiki'
 import { SelectionToolbar } from './SelectionToolbar'
 import { useHQStore } from '~/store/hqStore'
 
-// Initialize shiki cache outside component
-let highlighterPromise: Promise<any> | null = null
+// Initialize shiki once at module level — trimmed to most common vault languages
+const highlighterPromise: Promise<any> = createHighlighter({
+    themes: ['vitesse-dark'],
+    langs: ['javascript', 'typescript', 'tsx', 'json', 'bash', 'yaml', 'markdown', 'python'],
+})
 
-function getHighlighter() {
-    if (!highlighterPromise) {
-        highlighterPromise = createHighlighter({
-            themes: ['vitesse-dark'],
-            langs: ['javascript', 'typescript', 'tsx', 'jsx', 'json', 'bash', 'yaml', 'markdown', 'html', 'css', 'python', 'go', 'rust', 'sh']
-        })
-    }
-    return highlighterPromise
+// Configure marked renderer once at module level (not per-component-render)
+let markedConfigured = false
+async function ensureMarkedConfigured() {
+    if (markedConfigured) return
+    markedConfigured = true
+    const highlighter = await highlighterPromise
+    marked.use({
+        renderer: {
+            code(token: any) {
+                try {
+                    return highlighter.codeToHtml(token.text, { lang: token.lang || 'text', theme: 'vitesse-dark' })
+                } catch {
+                    return `<pre><code>${token.text}</code></pre>`
+                }
+            },
+            heading(token: any) {
+                return `<h${token.depth} class="md-heading md-h${token.depth}">${token.text}</h${token.depth}>`
+            },
+            blockquote(token: any) {
+                return `<blockquote class="md-blockquote">${token.text}</blockquote>`
+            },
+            link(token: any) {
+                return `<a href="${token.href}" class="md-link" target="_blank" rel="noopener noreferrer">${token.text}</a>`
+            },
+            table(token: any) {
+                const headerCells = token.header.map((cell: any) =>
+                    `<th class="md-th">${cell.text}</th>`
+                ).join('')
+                const rows = token.rows.map((row: any, i: number) =>
+                    `<tr class="${i % 2 === 0 ? 'md-tr-even' : 'md-tr-odd'}">${
+                        row.map((cell: any) => `<td class="md-td">${cell.text}</td>`).join('')
+                    }</tr>`
+                ).join('')
+                return `<div class="md-table-wrap"><table class="md-table"><thead><tr>${headerCells}</tr></thead><tbody>${rows}</tbody></table></div>`
+            }
+        }
+    })
 }
 
 export function MarkdownViewer({ content, activePath }: { content: string; activePath?: string }) {
@@ -56,29 +88,8 @@ export function MarkdownViewer({ content, activePath }: { content: string; activ
             }
             setFrontmatter(fm)
 
-            // 2. Setup Marked
-            const highlighter = await getHighlighter()
-
-            marked.use({
-                renderer: {
-                    code(token: any) {
-                        try {
-                            return highlighter.codeToHtml(token.text, { lang: token.lang || 'text', theme: 'vitesse-dark' })
-                        } catch (e) {
-                            return `<pre><code>${token.text}</code></pre>`
-                        }
-                    },
-                    heading(token: any) {
-                        return `<h${token.depth} class="md-heading md-h${token.depth}">${token.text}</h${token.depth}>`
-                    },
-                    blockquote(token: any) {
-                        return `<blockquote class="md-blockquote">${token.text}</blockquote>`
-                    },
-                    link(token: any) {
-                        return `<a href="${token.href}" class="md-link" target="_blank" rel="noopener noreferrer">${token.text}</a>`
-                    }
-                }
-            })
+            // 2. Ensure marked renderer is configured (only runs once globally)
+            await ensureMarkedConfigured()
 
             // 3. Process Wikilinks [[...]]
             md = md.replace(/\[\[([^\]]+)\]\]/g, (match, p1) => {

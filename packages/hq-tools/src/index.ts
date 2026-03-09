@@ -59,12 +59,14 @@ import {
   GoogleWorkspaceReadTool,
   GoogleWorkspaceWriteTool
 } from "./tools/googleWorkspace.js";
+import { SpeakTool } from "./tools/tts.js";
 
 export {
   GoogleWorkspaceSchemaTool,
   GoogleWorkspaceReadTool,
   GoogleWorkspaceWriteTool
 };
+export { SpeakTool } from "./tools/tts.js";
 
 /**
  * Create the default registry with all built-in HQ tools pre-registered.
@@ -89,5 +91,7 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(GoogleWorkspaceSchemaTool);
   registry.register(GoogleWorkspaceReadTool);
   registry.register(GoogleWorkspaceWriteTool);
+  // Text-to-speech (Kokoro-82M MLX primary, F5-TTS clone, macOS say fallback)
+  registry.register(SpeakTool);
   return registry;
 }

@@ -299,6 +299,11 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     const [showOffline, setShowOffline] = useState(false)
     const offlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+    // Token accumulator — batch streaming tokens into state at ~50ms intervals
+    // instead of calling setState on every single token (prevents per-token re-renders)
+    const tokenBufferRef = useRef('')
+    const tokenFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
     const [threads, setThreads] = useState<ThreadMeta[]>([])
     const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
     const [messages, setMessages] = useState<ThreadMessage[]>([])
@@ -444,10 +449,27 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                     } else if (msg.type === 'chat:token') {
                         if (msg.threadId === tid) {
                             setToolActivity(null)
-                            setStreamingContent(prev => prev + msg.token)
+                            // Accumulate tokens; flush to state at 50ms intervals (not per-token)
+                            tokenBufferRef.current += msg.token
+                            if (!tokenFlushRef.current) {
+                                tokenFlushRef.current = setTimeout(() => {
+                                    tokenFlushRef.current = null
+                                    setStreamingContent(prev => prev + tokenBufferRef.current)
+                                    tokenBufferRef.current = ''
+                                }, 50)
+                            }
                         }
                     } else if (msg.type === 'chat:done') {
                         if (msg.threadId === tid) {
+                            // Flush any remaining buffered tokens before clearing
+                            if (tokenFlushRef.current) {
+                                clearTimeout(tokenFlushRef.current)
+                                tokenFlushRef.current = null
+                            }
+                            if (tokenBufferRef.current) {
+                                setStreamingContent(prev => prev + tokenBufferRef.current)
+                                tokenBufferRef.current = ''
+                            }
                             setIsStreaming(false)
                             setStreamingContent('')
                             setToolActivity(null)
@@ -477,6 +499,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
             socket?.close()
             clearTimeout(retryTimer)
             if (offlineTimerRef.current) clearTimeout(offlineTimerRef.current)
+            if (tokenFlushRef.current) clearTimeout(tokenFlushRef.current)
         }
     }, [])
 

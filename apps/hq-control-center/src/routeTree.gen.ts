@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as VaultRouteImport } from './routes/vault'
 import { Route as ShareRouteImport } from './routes/share'
 import { Route as JobsRouteImport } from './routes/jobs'
+import { Route as DrawitRouteImport } from './routes/drawit'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as VaultIndexRouteImport } from './routes/vault/index'
 import { Route as VaultSplatRouteImport } from './routes/vault/$'
@@ -29,6 +30,11 @@ const ShareRoute = ShareRouteImport.update({
 const JobsRoute = JobsRouteImport.update({
   id: '/jobs',
   path: '/jobs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DrawitRoute = DrawitRouteImport.update({
+  id: '/drawit',
+  path: '/drawit',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -49,6 +55,7 @@ const VaultSplatRoute = VaultSplatRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/drawit': typeof DrawitRoute
   '/jobs': typeof JobsRoute
   '/share': typeof ShareRoute
   '/vault': typeof VaultRouteWithChildren
@@ -57,6 +64,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/drawit': typeof DrawitRoute
   '/jobs': typeof JobsRoute
   '/share': typeof ShareRoute
   '/vault/$': typeof VaultSplatRoute
@@ -65,6 +73,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/drawit': typeof DrawitRoute
   '/jobs': typeof JobsRoute
   '/share': typeof ShareRoute
   '/vault': typeof VaultRouteWithChildren
@@ -73,14 +82,30 @@ export interface FileRoutesById {
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/jobs' | '/share' | '/vault' | '/vault/$' | '/vault/'
+  fullPaths:
+    | '/'
+    | '/drawit'
+    | '/jobs'
+    | '/share'
+    | '/vault'
+    | '/vault/$'
+    | '/vault/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/jobs' | '/share' | '/vault/$' | '/vault'
-  id: '__root__' | '/' | '/jobs' | '/share' | '/vault' | '/vault/$' | '/vault/'
+  to: '/' | '/drawit' | '/jobs' | '/share' | '/vault/$' | '/vault'
+  id:
+    | '__root__'
+    | '/'
+    | '/drawit'
+    | '/jobs'
+    | '/share'
+    | '/vault'
+    | '/vault/$'
+    | '/vault/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  DrawitRoute: typeof DrawitRoute
   JobsRoute: typeof JobsRoute
   ShareRoute: typeof ShareRoute
   VaultRoute: typeof VaultRouteWithChildren
@@ -107,6 +132,13 @@ declare module '@tanstack/react-router' {
       path: '/jobs'
       fullPath: '/jobs'
       preLoaderRoute: typeof JobsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/drawit': {
+      id: '/drawit'
+      path: '/drawit'
+      fullPath: '/drawit'
+      preLoaderRoute: typeof DrawitRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -147,6 +179,7 @@ const VaultRouteWithChildren = VaultRoute._addFileChildren(VaultRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  DrawitRoute: DrawitRoute,
   JobsRoute: JobsRoute,
   ShareRoute: ShareRoute,
   VaultRoute: VaultRouteWithChildren,

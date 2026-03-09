@@ -1438,110 +1438,164 @@ async function cmdSetup(): Promise<void> {
   ok(`Vault ready at ${VAULT_PATH} (${created} dirs created, ${seeded} files seeded)`);
 }
 
-// hq init [--non-interactive] [--vault <path>] [--repo-url <url>]
+// hq init [--non-interactive] [--reset] [--vault <path>] [--repo-url <url>]
 async function cmdInit(argv: string[]): Promise<void> {
-  const nonInteractive = argv.includes("--non-interactive");
+  const nonInteractive = argv.includes("--non-interactive") || argv.includes("-y") || !process.stdout.isTTY;
+  const doReset = argv.includes("--reset");
   const vaultIdx = argv.indexOf("--vault");
   const repoIdx = argv.indexOf("--repo-url");
   const customVault = vaultIdx >= 0 ? argv[vaultIdx + 1] : undefined;
   const repoUrl = repoIdx >= 0 ? argv[repoIdx + 1] : "https://github.com/CalvinMagezi/agent-hq";
 
-  console.log(`\n${c.bold}━━━ Agent HQ — First-Time Setup ━━━${c.reset}\n`);
+  // Load init state (tracks completed steps for idempotency)
+  const { InitStateManager } = await import("../packages/hq-cli/src/initState.ts");
+  const { runPreflight, ensureOllamaModels } = await import("../packages/hq-cli/src/preflight.ts");
+  const { getPlatform } = await import("../packages/hq-cli/src/platform.ts");
 
-  // 1. Prerequisite checks
-  section("Checking prerequisites");
-  const bunV = sh("bun --version 2>/dev/null");
-  const gitV = sh("git --version 2>/dev/null");
-  if (!bunV) {
-    fail("Bun not found. Install from: https://bun.sh");
-    process.exit(1);
-  }
-  ok(`Bun ${bunV}`);
-  if (!gitV) {
-    fail("Git not found. Install from: https://git-scm.com");
-    process.exit(1);
-  }
-  ok(`Git ${gitV.split(" ")[2] ?? gitV}`);
+  const state = new InitStateManager(REPO_ROOT);
+  if (doReset) { state.reset(); info("Init state reset — all steps will re-run."); }
 
-  // 2. Ensure we're in the repo (or clone it)
-  section("Repository");
+  const platform = getPlatform();
+
+  console.log(`\n${c.bold}━━━ Agent HQ — Setup ━━━${c.reset}`);
+  console.log(`${c.dim}Platform: ${platform.os} ${platform.arch} | Service manager: ${platform.serviceManager}${c.reset}\n`);
+
+  // ── Step 1: Preflight (dependency detection + auto-install) ──────────────────
+  if (!state.isDone("preflight")) {
+    const { allRequiredOk } = await runPreflight(platform.os, { nonInteractive });
+    if (!allRequiredOk) {
+      fail("Required dependencies missing — fix the above and re-run: hq init");
+      process.exit(1);
+    }
+    state.markDone("preflight");
+  } else {
+    info("Preflight already complete (run hq init --reset to re-check)");
+  }
+
+  // ── Step 2: Ensure we're in the repo ─────────────────────────────────────────
   const inRepo = fs.existsSync(path.join(REPO_ROOT, "package.json")) &&
     fs.existsSync(path.join(REPO_ROOT, "apps/agent"));
 
   if (!inRepo) {
-    const installDir = customVault
-      ? path.resolve(customVault, "..")
-      : path.join(os.homedir(), "agent-hq");
+    section("Repository");
+    const installDir = path.join(os.homedir(), "agent-hq");
     info(`Cloning agent-hq to ${installDir}...`);
-    try {
-      spawnSync("git", ["clone", repoUrl, installDir], { stdio: nonInteractive ? "pipe" : "inherit" });
-      ok("Repository cloned");
-      info(`Change to that directory and re-run: hq init`);
-      return;
-    } catch {
-      fail("Clone failed. Check your internet connection or repo URL.");
+    const cloneResult = spawnSync("git", ["clone", repoUrl, installDir], {
+      stdio: nonInteractive ? "pipe" : "inherit",
+    });
+    if (cloneResult.status !== 0) {
+      fail("Clone failed. Check your internet connection.");
       process.exit(1);
     }
+    ok("Repository cloned");
+    info(`Now run: cd ${installDir} && hq init`);
+    return;
   }
-  ok(`Repository root: ${REPO_ROOT}`);
+  ok(`Repository: ${REPO_ROOT}`);
 
-  // 3. Install dependencies
-  section("Dependencies");
-  info("Running bun install...");
-  const installResult = spawnSync(process.execPath, ["install"], {
-    cwd: REPO_ROOT, stdio: nonInteractive ? "pipe" : "inherit",
-  });
-  if (installResult.status !== 0) {
-    fail("bun install failed");
-    process.exit(1);
+  // ── Step 3: bun install ───────────────────────────────────────────────────────
+  if (!state.isDone("install")) {
+    section("Installing packages");
+    const r = spawnSync(process.execPath, ["install"], {
+      cwd: REPO_ROOT, stdio: nonInteractive ? "pipe" : "inherit",
+    });
+    if (r.status !== 0) { fail("bun install failed"); process.exit(1); }
+    ok("Packages installed");
+    state.markDone("install");
   }
-  ok("Dependencies installed");
 
-  // 4. CLI Tools (Claude, Gemini, OpenCode)
-  section("CLI Tools");
-  await cmdTools(nonInteractive);
+  // ── Step 4: CLI Tools (Claude, Gemini, OpenCode) ─────────────────────────────
+  if (!state.isDone("tools")) {
+    section("CLI Tools");
+    await cmdTools(nonInteractive);
+    state.markDone("tools");
+  }
 
-  // 5. Scaffold vault
-  section("Vault");
-  if (customVault) process.env.VAULT_PATH = customVault;
-  await cmdSetup();
+  // ── Step 5: Scaffold vault ────────────────────────────────────────────────────
+  if (!state.isDone("vault")) {
+    section("Vault");
+    if (customVault) process.env.VAULT_PATH = customVault;
+    await cmdSetup();
+    state.markDone("vault");
+  }
 
-  // 6. Print .env.local templates
-  section("Environment variables");
+  // ── Step 6: Ollama models ─────────────────────────────────────────────────────
+  if (!state.isDone("models")) {
+    section("Ollama models");
+    await ensureOllamaModels(["qwen3.5:9b", "gemma3:1b"]);
+    state.markDone("models");
+  }
+
+  // ── Step 7: Environment files (with env-var injection for agents) ─────────────
+  section("Environment");
+  const vaultPath = customVault ?? path.join(REPO_ROOT, ".vault");
   const agentEnv = path.join(REPO_ROOT, "apps/agent/.env.local");
   const relayEnv = path.join(REPO_ROOT, "apps/discord-relay/.env.local");
 
   if (!fs.existsSync(agentEnv)) {
-    const tpl = `# apps/agent/.env.local\nVAULT_PATH=${customVault ?? path.join(REPO_ROOT, ".vault")}\nOPENROUTER_API_KEY=\nGEMINI_API_KEY=\nDEFAULT_MODEL=gemini-2.5-flash\n`;
-    fs.writeFileSync(agentEnv, tpl, "utf-8");
+    // Agents can pass keys via environment variables
+    const orKey = process.env.OPENROUTER_API_KEY ?? "";
+    const gemKey = process.env.GEMINI_API_KEY ?? "";
+    const model = process.env.DEFAULT_MODEL ?? "gemini-2.5-flash";
+    fs.writeFileSync(agentEnv,
+      `# apps/agent/.env.local\nVAULT_PATH=${vaultPath}\nOPENROUTER_API_KEY=${orKey}\nGEMINI_API_KEY=${gemKey}\nDEFAULT_MODEL=${model}\n`,
+      "utf-8"
+    );
     ok(`Created ${agentEnv}`);
-    warn("Fill in OPENROUTER_API_KEY or GEMINI_API_KEY before starting the agent");
+    if (!orKey && !gemKey) warn("Set OPENROUTER_API_KEY or GEMINI_API_KEY before starting the agent");
   } else {
-    info(`${agentEnv} already exists (skipped)`);
+    info("apps/agent/.env.local exists (skipped)");
   }
 
   if (!fs.existsSync(relayEnv)) {
-    const tpl = `# apps/discord-relay/.env.local\nDISCORD_BOT_TOKEN=\nDISCORD_USER_ID=\nVAULT_PATH=${customVault ?? path.join(REPO_ROOT, ".vault")}\n`;
-    fs.writeFileSync(relayEnv, tpl, "utf-8");
+    const discordToken = process.env.DISCORD_BOT_TOKEN ?? "";
+    const discordUser  = process.env.DISCORD_USER_ID ?? "";
+    fs.writeFileSync(relayEnv,
+      `# apps/discord-relay/.env.local\nDISCORD_BOT_TOKEN=${discordToken}\nDISCORD_USER_ID=${discordUser}\nVAULT_PATH=${vaultPath}\n`,
+      "utf-8"
+    );
     ok(`Created ${relayEnv}`);
-    warn("Fill in DISCORD_BOT_TOKEN and DISCORD_USER_ID before starting the relay");
+    if (!discordToken) warn("Set DISCORD_BOT_TOKEN before starting the relay");
   } else {
-    info(`${relayEnv} already exists (skipped)`);
+    info("apps/discord-relay/.env.local exists (skipped)");
   }
 
-  // 7. Install launchd daemons (macOS only)
-  if (process.platform === "darwin") {
-    section("Daemons (macOS launchd)");
-    await cmdInstall("all");
+  if (!state.isDone("env")) state.markDone("env");
+
+  // ── Step 8: Background services ───────────────────────────────────────────────
+  if (!state.isDone("services")) {
+    section(`Services (${platform.serviceManager})`);
+    if (platform.serviceManager === "launchd") {
+      await cmdInstall("all");
+      state.markDone("services");
+    } else if (platform.serviceManager === "systemd") {
+      warn("systemd service installation is not yet automated — run services manually:");
+      info("  hq fg agent    # run agent in foreground");
+      info("  hq fg relay    # run relay in foreground");
+    } else if (platform.serviceManager === "taskscheduler") {
+      warn("Windows Task Scheduler integration coming soon — run services manually:");
+      info("  hq fg agent");
+    } else {
+      warn("No service manager detected — run services manually with: hq fg agent");
+    }
   }
 
-  // 8. Install CLI to PATH
-  section("CLI");
-  await cmdInstallCli();
+  // ── Step 9: Install CLI to PATH ───────────────────────────────────────────────
+  if (!state.isDone("cli")) {
+    section("CLI");
+    await cmdInstallCli();
+    state.markDone("cli");
+  }
 
-  // 9. Final health check
+  // ── Done ──────────────────────────────────────────────────────────────────────
   console.log();
   await cmdHealth();
+
+  const warns = state.warnings;
+  if (warns.length) {
+    console.log(`\n${c.yellow}Warnings:${c.reset}`);
+    warns.forEach(w => warn(w));
+  }
 
   console.log(`\n${c.bold}${c.green}You're ready!${c.reset} Run ${c.bold}hq${c.reset} to start chatting.\n`);
 }
@@ -1606,6 +1660,62 @@ async function cmdDaemon(sub?: string, arg?: string): Promise<void> {
   info("Usage: hq daemon [start|stop|status|logs [N]]");
 }
 
+// hq update [--check]
+async function cmdUpdate(argv: string[]): Promise<void> {
+  const checkOnly = argv.includes("--check");
+  const pkgPath = path.join(REPO_ROOT, "package.json");
+  const currentVersion: string = JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version ?? "unknown";
+
+  info(`Current version: ${currentVersion}`);
+  info("Checking for updates...");
+
+  const latest = sh(`npm view @calvin.magezi/agent-hq version 2>/dev/null`);
+  if (!latest) {
+    warn("Could not reach npm registry. Check your internet connection.");
+    return;
+  }
+
+  if (latest === currentVersion) {
+    ok(`Already up to date (${currentVersion})`);
+    return;
+  }
+
+  console.log(`  ${c.cyan}↑${c.reset}  ${currentVersion} → ${c.bold}${latest}${c.reset} available`);
+
+  if (checkOnly) {
+    info(`Run ${c.bold}hq update${c.reset} to apply.`);
+    return;
+  }
+
+  // Pull latest from git
+  info("Pulling latest changes...");
+  const pull = spawnSync("git", ["pull", "--ff-only"], { cwd: REPO_ROOT, stdio: "inherit" });
+  if (pull.status !== 0) {
+    fail("git pull failed — you may have local changes. Stash them and retry.");
+    process.exit(1);
+  }
+
+  // Re-install packages
+  info("Updating packages...");
+  const install = spawnSync(process.execPath, ["install"], { cwd: REPO_ROOT, stdio: "inherit" });
+  if (install.status !== 0) {
+    fail("bun install failed after pull");
+    process.exit(1);
+  }
+
+  ok(`Updated to ${latest}`);
+
+  // Restart running services
+  const agentRunning = agentPid();
+  const relayRunning = relayPid();
+  if (agentRunning || relayRunning) {
+    info("Restarting services...");
+    await cmdRestart("all");
+  }
+
+  console.log(`\n${c.green}${c.bold}Update complete.${c.reset} Run ${c.bold}hq health${c.reset} to verify.\n`);
+}
+
 // hq help
 function cmdHelp(): void {
   console.log(`
@@ -1668,6 +1778,11 @@ ${c.bold}PROCESSES & HEALTH${c.reset}
 ${c.bold}DAEMONS (macOS launchd auto-start)${c.reset}
   hq install   [target]         Install launchd daemons
   hq uninstall [target]         Remove launchd daemons
+
+${c.bold}UPDATES${c.reset}
+  hq update                     Pull latest and restart services
+  hq update --check             Show available update without applying
+  hq init --reset               Re-run all setup steps from scratch
 
 ${c.bold}DIAGRAMS${c.reset}
   hq diagram flow "A" "B" "C?"  Quick flowchart (? = decision diamond)
@@ -1786,6 +1901,9 @@ switch (cmd) {
 
   case "daemon": case "d":
     await cmdDaemon(arg1, arg2); break;
+
+  case "update":
+    await cmdUpdate(process.argv.slice(3)); break;
 
   case "help": case "--help": case "-h":
     cmdHelp(); break;

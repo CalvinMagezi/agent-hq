@@ -823,7 +823,10 @@ async function refreshNewsPulse(): Promise<void> {
         if (items.length >= 3) break;
         const block = match[0];
         const rawTitle = block.match(/<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i)?.[1]
-          ?.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">") || "";
+          ?.replace(/<[^>]+>/g, "")
+          .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+          .replace(/&quot;/g, '"').replace(/&#8217;/g, "'").replace(/&#8216;/g, "'")
+          .replace(/&#8220;/g, "\u201C").replace(/&#8221;/g, "\u201D").replace(/&#[0-9]+;/g, "") || "";
         const rawLink = isAtom
           ? (block.match(/\shref=["']([^"']+)["']/i)?.[1] || "")
           : (block.match(/<link[^>]*>([^<]+)<\/link>/i)?.[1]?.trim() || "");
@@ -1351,6 +1354,7 @@ async function processTopicMOCs(): Promise<void> {
 // ─── Task: Daily End-of-Day Brief (every 24hr, fires at ~8pm EAT) ────
 
 const DAILY_BRIEF_HOUR_EAT = 20; // 8 PM East Africa Time (UTC+3)
+const SBLU_RETRAIN_HOUR_EAT = 3;  // 3 AM East Africa Time — machine idle, no active users
 
 /** Track which activities happened since last brief (reset after send) */
 const dailyActivityLog: { time: string; task: string; detail: string }[] = [];
@@ -1743,6 +1747,43 @@ const tasks: {
         const nowHour = new Date().getHours();
         if (nowHour === DAILY_BRIEF_HOUR_EAT) {
           await sendDailyBrief();
+        }
+      },
+      lastRun: 0,
+    },
+    {
+      name: "sblu-retraining",
+      intervalMs: 60 * 60 * 1000, // checked every hour
+      fn: async () => {
+        // Only fire at 3 AM EAT — machine is idle, no active users, no training interference
+        const nowHour = new Date().getHours();
+        if (nowHour !== SBLU_RETRAIN_HOUR_EAT) return;
+
+        // Avoid re-running if already ran today
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const flagPath = path.join(VAULT_PATH, "_embeddings", `.sblu-retrain-${todayKey}`);
+        if (fs.existsSync(flagPath)) return;
+
+        console.log("[sblu-retraining] 3 AM slot — checking SBLU retraining eligibility...");
+
+        // Spawn retrain.ts as a subprocess — non-blocking, logs to daemon stdout
+        const proc = Bun.spawn(
+          ["bun", "scripts/sblu/retrain.ts", "--vault", VAULT_PATH],
+          {
+            cwd: path.resolve(VAULT_PATH, ".."),
+            stdout: "inherit",
+            stderr: "inherit",
+            env: { ...process.env, VAULT_PATH },
+          },
+        );
+
+        const exitCode = await proc.exited;
+        if (exitCode === 0) {
+          // Mark as done for today
+          fs.writeFileSync(flagPath, new Date().toISOString());
+          console.log("[sblu-retraining] Retraining cycle complete");
+        } else {
+          console.warn(`[sblu-retraining] Retrain script exited with code ${exitCode}`);
         }
       },
       lastRun: 0,

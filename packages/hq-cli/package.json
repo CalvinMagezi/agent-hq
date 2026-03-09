@@ -15,6 +15,7 @@
   },
   "files": [
     "bin/hq",
+    "src/",
     "README.md"
   ],
   "engines": {

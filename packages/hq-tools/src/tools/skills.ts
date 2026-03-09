@@ -22,7 +22,7 @@ const __dirname = path.dirname(__filename);
 export const SKILLS_DIR = path.resolve(__dirname, "../../skills");
 
 // Skills auto-injected into agent context without requiring explicit load_skill
-export const AUTO_LOAD_SKILLS = ["obsidian", "code-mapper", "google-workspace"];
+export const AUTO_LOAD_SKILLS = ["obsidian", "code-mapper", "google-workspace", "voice"];
 
 interface SkillMeta {
   name: string;

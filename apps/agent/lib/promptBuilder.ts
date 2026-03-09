@@ -317,6 +317,22 @@ export class PromptBuilder {
                 .map(r => `- **${r.title}** (${r.notebook}): ${truncate(r.snippet, 200)}`)
                 .join("\n");
             contextSources.push(...searchResults.map(r => r.title));
+
+            // Log query→context pairs for SBLU-4 (Weaver) training data
+            try {
+                const avgRelevance = searchResults.reduce((s, r) => s + (r.relevance ?? 0), 0) / searchResults.length;
+                const weaverLogPath = path.join(this.vaultPath, "_embeddings", "weaver-training.jsonl");
+                const entry = JSON.stringify({
+                    jobInstruction: request.rawInstruction.slice(0, 400),
+                    queryUsed: request.rawInstruction.slice(0, 200),
+                    contextSelected: searchResults.map(r => r.title),
+                    relevanceScore: Math.min(1, avgRelevance / 5),
+                    ts: new Date().toISOString(),
+                });
+                fs.appendFileSync(weaverLogPath, entry + "\n", "utf-8");
+            } catch {
+                // Non-critical — never block prompt building
+            }
         }
 
         let projectSection = "";

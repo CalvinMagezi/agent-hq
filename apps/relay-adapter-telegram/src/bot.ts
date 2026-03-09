@@ -6,7 +6,7 @@
  * Telegram HTML formatting, inline keyboards for harness selection.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
 import { basename } from "path";
 import { LocalHarness } from "./localHarness.js";
@@ -33,6 +33,23 @@ const MAX_CHUNK_SIZE = 4000;
 
 /** Typing indicator keepalive (Telegram typing expires ~5s). */
 const TYPING_KEEPALIVE_MS = 4_000;
+
+/** Convert any audio file to OGG Opus buffer for Telegram sendVoice. */
+function convertToOgg(inputPath: string): Buffer {
+  const outPath = inputPath.replace(/\.[^.]+$/, "") + "-tg.ogg";
+  try {
+    execSync(
+      `ffmpeg -y -i "${inputPath}" -c:a libopus -b:a 32k -vbr on "${outPath}"`,
+      { stdio: "pipe" }
+    );
+    const buf = readFileSync(outPath);
+    try { unlinkSync(outPath); } catch {}
+    return buf;
+  } catch {
+    // ffmpeg failed — send raw buffer and let Telegram handle it
+    return readFileSync(inputPath);
+  }
+}
 
 function harnessFromPath(filePath: string): string | null {
   if (filePath.includes("gemini")) return "Gemini";
@@ -1256,10 +1273,13 @@ export class RelayTelegramBot {
           continue;
         }
         const buffer = readFileSync(f.path);
-        // Try as photo first, fall back to document
         const ext = f.name.split(".").pop()?.toLowerCase() ?? "";
         if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) {
           await this.bridge.sendPhoto(Buffer.from(buffer), f.name);
+        } else if (["wav", "mp3", "ogg", "m4a", "aac", "flac"].includes(ext)) {
+          // Convert to OGG Opus for proper Telegram voice note display
+          const oggBuffer = convertToOgg(f.path);
+          await this.bridge.sendVoiceNote(oggBuffer);
         } else {
           await this.bridge.sendDocument(Buffer.from(buffer), f.name);
         }

@@ -109,21 +109,48 @@ function Shell() {
             useHQStore.getState().addEvent(event)
 
             if (['job:created', 'job:claimed', 'job:completed', 'job:failed'].includes(event.type)) {
-              getJobs().then(res => useHQStore.getState().setJobs(res.jobs))
+              scheduleJobsRefresh()
             } else if (event.type === 'system:modified' && event.path?.includes('DAEMON-STATUS')) {
-              getDaemon().then(res => useHQStore.getState().setDaemonTasks(res.tasks))
+              scheduleDaemonRefresh()
             } else if (['task:created', 'task:claimed'].includes(event.type)) {
-              getAgents().then(res => useHQStore.getState().setRelays(res.relays))
+              scheduleRelaysRefresh()
             }
           }
         } catch { /* ignore */ }
       }
     }
 
+    // Debounce timers — prevents parallel filesystem scans when events burst
+    let jobsTimer: ReturnType<typeof setTimeout> | null = null
+    let daemonTimer: ReturnType<typeof setTimeout> | null = null
+    let relaysTimer: ReturnType<typeof setTimeout> | null = null
+
+    const scheduleJobsRefresh = () => {
+      if (jobsTimer) clearTimeout(jobsTimer)
+      jobsTimer = setTimeout(() => {
+        getJobs().then(res => useHQStore.getState().setJobs(res.jobs))
+      }, 300)
+    }
+    const scheduleDaemonRefresh = () => {
+      if (daemonTimer) clearTimeout(daemonTimer)
+      daemonTimer = setTimeout(() => {
+        getDaemon().then(res => useHQStore.getState().setDaemonTasks(res.tasks))
+      }, 300)
+    }
+    const scheduleRelaysRefresh = () => {
+      if (relaysTimer) clearTimeout(relaysTimer)
+      relaysTimer = setTimeout(() => {
+        getAgents().then(res => useHQStore.getState().setRelays(res.relays))
+      }, 300)
+    }
+
     connect()
     return () => {
       ws?.close()
       if (retryTimer) clearTimeout(retryTimer)
+      if (jobsTimer) clearTimeout(jobsTimer)
+      if (daemonTimer) clearTimeout(daemonTimer)
+      if (relaysTimer) clearTimeout(relaysTimer)
     }
   }, [])
 
@@ -197,6 +224,14 @@ function Shell() {
               inactiveProps={{ style: { color: 'var(--text-dim)' } }}
             >
               Vault
+            </Link>
+            <Link
+              to="/drawit"
+              className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
+              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
+              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
+            >
+              ◈ DrawIt
             </Link>
             <button
               onClick={() => useHQStore.getState().setChatPanelOpen(!useHQStore.getState().chatPanelOpen)}

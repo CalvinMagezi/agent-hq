@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Unattended Setup CLI** (`scripts/hq.ts`): Revamped `hq init` with step-tracking (`initState.ts`), dependency preflight auto-installation, and support for injecting API keys via shell environment variables (e.g. `OPENROUTER_API_KEY=... hq init -y`) for fully headless deployment.
+- **`hq update` command** (`scripts/hq.ts`): New command to automatically fetch the latest version, update dependencies, and restart background services.
+- **Speak Tool / TTS** (`packages/hq-tools/src/tools/tts.ts`): Added local Text-to-Speech tool featuring Kokoro-82M (default), F5-TTS (voice cloning from reference), and macOS `say` fallback.
+- **Telegram Voice Notes** (`apps/relay-adapter-telegram/`): Telegram relay now converts all generated or sent audio files into OGG Opus format via `ffmpeg` so they render natively as voice notes in the app.
+- **Vault Cartographer Worker** (`scripts/vault-workers/workers/vaultCartographer.ts`): New vault worker (SBLU-1) running every 4 hours to analyze vault structural health—finding dead links, orphans, and semantic cluster gaps using Ollama models.
+- **SBLU Retraining Daemon** (`scripts/agent-hq-daemon.ts`): Added automated 3 AM EAT background task to trigger model fine-tuning and Weaver database retraining (`scripts/sblu/retrain.ts`).
+- **Control Center Diagrams & Performance** (`apps/hq-control-center/`): Added Markdown Table support and a new DiagramViewer (`/drawit` route/canvas). Optimized AI chat token streaming with 50ms batching to prevent excessive re-renders.
+- **Weaver Training Logging** (`apps/agent/lib/promptBuilder.ts`): RAG query context pairs are now logged to `_embeddings/weaver-training.jsonl` to improve SBLU-4 model embeddings retrieval.
 - **HQ Control Center Vault Redesign** (`apps/hq-control-center/`): Moved `notes` and `chat` routes into a unified `/vault` UI with a slide-out Chat Panel. Added `SelectionToolbar` for sending text selections directly to the chat context.
 - **Synaptic Homeostasis in Vault Memory** (`packages/vault-memory/`): Implemented memory decay and pruning mechanisms (`forgetter.ts`, `db.ts`) to actively remove old, low-importance, unconsolidated memories while protecting frequently-accessed ones.
 - **Memory Ingestion Salience Detection** (`packages/vault-memory/src/ingester.ts`): Added `applySalienceBoost` to recognize important milestones and risks to boost their retention priority, mirroring biological synaptic tagging.

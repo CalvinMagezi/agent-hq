@@ -23,6 +23,7 @@ import { projectNudger } from "./workers/projectNudger.js";
 import { noteEnricher } from "./workers/noteEnricher.js";
 import { dailyPreparer } from "./workers/dailyPreparer.js";
 import { orphanRescuer } from "./workers/orphanRescuer.js";
+import { vaultCartographer } from "./workers/vaultCartographer.js";
 
 // ── Worker Registry ───────────────────────────────────────────────────
 
@@ -33,6 +34,7 @@ const WORKERS: VaultWorker[] = [
     noteEnricher,
     dailyPreparer,
     orphanRescuer,
+    vaultCartographer,
 ];
 
 export function getWorkers(): VaultWorker[] {
@@ -75,8 +77,8 @@ async function llmCall(prompt: string, systemPrompt?: string): Promise<string> {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
-            // 30s timeout — Ollama can be slow for first call
-            signal: AbortSignal.timeout(30_000),
+            // 90s timeout — qwen3.5:9b cold-start can take 60+ seconds on first load
+            signal: AbortSignal.timeout(90_000),
         });
 
         if (res.ok) {

@@ -1,3 +1,16 @@
+<!--
+agent-hq:
+  version: "1.0.0"
+  min_bun: "1.1.0"
+  setup_command: "bunx @calvin.magezi/agent-hq init --non-interactive"
+  repo: "https://github.com/CalvinMagezi/agent-hq"
+  platforms: [macos, linux, windows]
+  required_env: [OPENROUTER_API_KEY]
+  optional_env: [GEMINI_API_KEY, DISCORD_BOT_TOKEN, DISCORD_USER_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, GROQ_API_KEY, WHATSAPP_OWNER_JID]
+  health_check: "hq health"
+  docs: "https://deepwiki.com/CalvinMagezi/agent-hq"
+-->
+
 # Agent-HQ
 
 <p align="center">
@@ -177,7 +190,42 @@ hq init        # interactive setup — installs tools, scaffolds vault, sets up 
 
 ---
 
-## Quick Start
+## Quick Start (for AI agents)
+
+> **Give this section to your AI agent.** It will handle everything.
+
+```bash
+# 1. Install Bun (if not already installed)
+curl -fsSL https://bun.sh/install | bash   # macOS / Linux
+# Windows: powershell -c "irm bun.sh/install.ps1 | iex"
+
+# 2. Run setup (clones repo, installs deps, pulls Ollama models, scaffolds vault)
+bunx @calvin.magezi/agent-hq init --non-interactive
+
+# 3. Set required API key (choose one)
+echo "OPENROUTER_API_KEY=sk-or-..." >> ~/agent-hq/apps/agent/.env.local
+# OR: echo "GEMINI_API_KEY=AIza..." >> ~/agent-hq/apps/agent/.env.local
+
+# 4. (Optional) Set Discord token for relay
+echo "DISCORD_BOT_TOKEN=MT..." >> ~/agent-hq/apps/discord-relay/.env.local
+echo "DISCORD_USER_ID=123456789" >> ~/agent-hq/apps/discord-relay/.env.local
+
+# 5. Start everything
+cd ~/agent-hq && hq start all
+
+# 6. Verify
+hq health
+```
+
+The `hq init` command is **idempotent** — safe to re-run. It skips steps already completed.
+Pass API keys as environment variables for fully unattended setup:
+
+```bash
+OPENROUTER_API_KEY=sk-or-... DISCORD_BOT_TOKEN=MT... DISCORD_USER_ID=123 \
+  bunx @calvin.magezi/agent-hq init --non-interactive
+```
+
+## Quick Start (manual)
 
 ```bash
 git clone https://github.com/CalvinMagezi/agent-hq.git
@@ -199,34 +247,22 @@ Open the PWA at `http://localhost:4747` — or connect via Tailscale from any de
 
 ## Environment Variables
 
-### Discord Relay (`apps/discord-relay/.env.local`)
-```bash
-DISCORD_USER_ID=your_discord_user_id
-DISCORD_BOT_TOKEN=your_claude_bot_token
-DISCORD_BOT_TOKEN_OPENCODE=your_opencode_token   # optional
-DISCORD_BOT_TOKEN_GEMINI=your_gemini_bot_token   # optional
-```
+> Can also be passed to `hq init --non-interactive` as shell env vars for unattended setup.
 
-### HQ Agent (`apps/agent/.env.local`)
-```bash
-OPENROUTER_API_KEY=your_key    # or GEMINI_API_KEY
-DEFAULT_MODEL=gemini-2.5-flash
-```
-
-### Telegram (`apps/relay-adapter-telegram/.env.local`)
-```bash
-TELEGRAM_BOT_TOKEN=your_botfather_token
-TELEGRAM_USER_ID=your_numeric_id
-GROQ_API_KEY=your_key          # voice transcription
-OPENROUTER_API_KEY=your_key    # AI vision
-```
-
-### WhatsApp (`apps/relay-adapter-whatsapp/.env.local`)
-```bash
-WHATSAPP_OWNER_JID=your_number@s.whatsapp.net
-OPENROUTER_API_KEY=your_key
-GROQ_API_KEY=your_key
-```
+| Variable | File | Required | Description |
+|----------|------|----------|-------------|
+| `OPENROUTER_API_KEY` | `apps/agent/.env.local` | **Yes** (or Gemini) | LLM provider — get key at openrouter.ai |
+| `GEMINI_API_KEY` | `apps/agent/.env.local` | **Yes** (or OR) | Google Gemini direct access |
+| `DEFAULT_MODEL` | `apps/agent/.env.local` | No | Default model ID (default: `gemini-2.5-flash`) |
+| `DISCORD_BOT_TOKEN` | `apps/discord-relay/.env.local` | For Discord relay | Bot token from Discord Developer Portal |
+| `DISCORD_USER_ID` | `apps/discord-relay/.env.local` | For Discord relay | Your Discord user ID (18-digit number) |
+| `DISCORD_BOT_TOKEN_OPENCODE` | `apps/discord-relay/.env.local` | No | Second bot for OpenCode harness |
+| `DISCORD_BOT_TOKEN_GEMINI` | `apps/discord-relay/.env.local` | No | Third bot for Gemini CLI harness |
+| `TELEGRAM_BOT_TOKEN` | `apps/relay-adapter-telegram/.env.local` | For Telegram | Token from @BotFather |
+| `TELEGRAM_USER_ID` | `apps/relay-adapter-telegram/.env.local` | For Telegram | Your Telegram numeric user ID |
+| `GROQ_API_KEY` | Telegram / WhatsApp `.env.local` | No | Voice transcription via Groq Whisper |
+| `WHATSAPP_OWNER_JID` | `apps/relay-adapter-whatsapp/.env.local` | For WhatsApp | Your WhatsApp JID (`+256700000000@s.whatsapp.net`) |
+| `VAULT_PATH` | All `.env.local` files | No | Custom vault path (default: `<repo>/.vault`) |
 
 ---
 

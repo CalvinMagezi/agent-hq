@@ -1,0 +1,57 @@
+name: Publish CLI to npm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/hq-cli/**'
+      - 'scripts/hq.ts'
+
+jobs:
+  publish:
+    name: Publish @calvin.magezi/agent-hq
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Ensure bin is executable
+        run: chmod +x packages/hq-cli/bin/hq
+
+      - name: Check if version changed
+        id: check
+        run: |
+          PKG=$(node -p "require('./packages/hq-cli/package.json').version")
+          PUB=$(npm view @calvin.magezi/agent-hq version 2>/dev/null || echo "none")
+          echo "pkg_version=$PKG" >> $GITHUB_OUTPUT
+          echo "pub_version=$PUB" >> $GITHUB_OUTPUT
+          if [ "$PKG" != "$PUB" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to npm
+        if: steps.check.outputs.changed == 'true'
+        working-directory: packages/hq-cli
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_AUTOMATION_TOKEN }}
+
+      - name: Already published
+        if: steps.check.outputs.changed == 'false'
+        run: |
+          echo "Version ${{ steps.check.outputs.pkg_version }} already published — skipping."
+          echo "Bump the version in packages/hq-cli/package.json to trigger a new publish."

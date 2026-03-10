@@ -4,15 +4,15 @@
  * Text-to-speech via local models. Three-tier architecture:
  *   Tier 1 (default):  Kokoro-82M via kokoro-onnx (pip install kokoro-onnx soundfile)
  *                      ~600 MB RAM, ~0.3s/sentence, ONNX CPU inference
- *                      Model files: .vault/_system/voice/kokoro-v1.0.int8.onnx
- *                                   .vault/_system/voice/voices-v1.0.bin
+ *                      Model files: ~/.agent-hq/voice/kokoro-v1.0.int8.onnx
+ *                                   ~/.agent-hq/voice/voices-v1.0.bin
  *   Tier 2 (clone):    F5-TTS MLX (pip install f5-tts-mlx)
  *                      Zero-shot voice cloning from _system/voice/reference.wav
  *   Tier 3 (fallback): macOS `say` command — 15ms, zero dependencies
  *
  * One-time setup:
  *   pip3.13 install kokoro-onnx soundfile
- *   # Model files already in .vault/_system/voice/
+ *   # Model files live in ~/.agent-hq/voice/ (outside vault to avoid iCloud sync issues)
  */
 
 import * as fs from "fs";
@@ -75,6 +75,14 @@ sf.write(out, samples, rate)
 print(out)
 `;
 
+/** Resolve Kokoro model directory — prefers ~/.agent-hq/voice/, falls back to vault */
+function resolveModelDir(vaultPath: string): string {
+  const preferredDir = path.join(os.homedir(), ".agent-hq", "voice");
+  const preferredModel = path.join(preferredDir, "kokoro-v1.0.int8.onnx");
+  if (fs.existsSync(preferredModel)) return preferredDir;
+  return path.join(vaultPath, "_system", "voice");
+}
+
 async function speakKokoro(
   text: string,
   voice: string,
@@ -82,13 +90,14 @@ async function speakKokoro(
   outputPath: string,
   vaultPath: string
 ): Promise<boolean> {
-  const modelPath  = path.join(vaultPath, "_system", "voice", "kokoro-v1.0.int8.onnx");
-  const voicesPath = path.join(vaultPath, "_system", "voice", "voices-v1.0.bin");
+  const modelDir   = resolveModelDir(vaultPath);
+  const modelPath  = path.join(modelDir, "kokoro-v1.0.int8.onnx");
+  const voicesPath = path.join(modelDir, "voices-v1.0.bin");
 
   if (!fs.existsSync(modelPath) || !fs.existsSync(voicesPath)) {
     console.warn(
-      `[TTS/kokoro] Model files missing at ${vaultPath}/_system/voice/. ` +
-        "Run: cp /tmp/kokoro-v1.0.int8.onnx /tmp/voices-v1.0.bin .vault/_system/voice/"
+      `[TTS/kokoro] Model files missing. Expected at ~/.agent-hq/voice/ or ${vaultPath}/_system/voice/. ` +
+        "Run: mkdir -p ~/.agent-hq/voice && cp kokoro-v1.0.int8.onnx voices-v1.0.bin ~/.agent-hq/voice/"
     );
     return false;
   }

@@ -12,13 +12,12 @@
  */
 
 import type { ServerWebSocket } from 'bun'
-import { spawn } from 'bun'
 import { VaultSync } from '@repo/vault-sync'
-import { VaultClient, SearchClient, TraceDB } from '@repo/vault-client'
-import { calculateCost } from '@repo/vault-client/pricing'
+import { SearchClient, TraceDB } from '@repo/vault-client'
+import { UnifiedAdapterBot, type UnifiedAdapterBotConfig, buildPlatformConfig } from "@repo/relay-adapter-core"
+import { WebBridge } from "./webBridge.js"
 import webpush from 'web-push'
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 
 const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, '../../.vault')
@@ -27,7 +26,6 @@ const SUBS_FILE = path.join(VAULT_PATH, '_system/push-subscriptions.json')
 
 // ─── Vault singletons ─────────────────────────────────────────────────────────
 
-const vaultClient = new VaultClient(VAULT_PATH)
 const searchClient = new SearchClient(VAULT_PATH)
 const traceDb = new TraceDB(VAULT_PATH)
 
@@ -62,750 +60,75 @@ export async function sendWebPush(title: string, body: string, url = '/', tag = 
   if (dead.length) saveSubs(subs.filter(s => !dead.includes(s.endpoint)))
 }
 
-// ─── Thread storage ───────────────────────────────────────────────────────────
 
-const THREADS_DIR = path.join(VAULT_PATH, '_threads/web')
+// ─── Thread helpers (thin wrappers over VaultThreadStore for PWA WS protocol) ─
 
-interface ThreadMessage {
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  harness?: string
-  timestamp: string
-  stats?: {
-    model: string
-    latencyMs: number
-    inputTokens: number
-    outputTokens: number
-    cost: number
-    contextUsed?: number
-  }
-}
-interface Thread {
-  threadId: string
-  title: string
-  harness: string
-  messages: ThreadMessage[]
-  createdAt: string
-  updatedAt: string
-  totalInputTokens?: number
-  totalOutputTokens?: number
-  totalCost?: number
+function listThreads() {
+  const threadsDir = path.join(VAULT_PATH, '_threads')
+  if (!fs.existsSync(threadsDir)) return []
+  return fs.readdirSync(threadsDir)
+    .filter(f => f.endsWith('.json'))
+    .map(f => {
+      try {
+        const t = JSON.parse(fs.readFileSync(path.join(threadsDir, f), 'utf-8'))
+        return {
+          threadId: t.id,
+          title: t.title || t.id,
+          harness: t.activeHarness,
+          updatedAt: new Date(t.updatedAt).toISOString(),
+          messageCount: t.messages?.length ?? 0
+        }
+      } catch { return null }
+    })
+    .filter(Boolean)
+    .sort((a: any, b: any) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
 }
 
-function loadThread(threadId: string): Thread | null {
+const SAFE_THREAD_ID = /^[a-zA-Z0-9_-]{1,120}$/
+
+function loadThread(id: string) {
+  if (!SAFE_THREAD_ID.test(id)) return null
+  const p = path.join(VAULT_PATH, '_threads', `${id}.json`)
+  if (!fs.existsSync(p)) return null
   try {
-    const p = path.join(THREADS_DIR, `${threadId}.json`)
-    return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf-8')) : null
+    const t = JSON.parse(fs.readFileSync(p, 'utf-8'))
+    return {
+      threadId: t.id,
+      title: t.title,
+      harness: t.activeHarness,
+      messages: t.messages.map((m: any) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: new Date(m.timestamp).toISOString(),
+        harness: m.harness
+      })),
+      createdAt: new Date(t.createdAt).toISOString(),
+      updatedAt: new Date(t.updatedAt).toISOString(),
+      totalInputTokens: t.totalInputTokens,
+      totalOutputTokens: t.totalOutputTokens,
+      totalCost: t.totalCost
+    }
   } catch { return null }
 }
-function saveThread(thread: Thread) {
-  fs.mkdirSync(THREADS_DIR, { recursive: true })
-  fs.writeFileSync(path.join(THREADS_DIR, `${thread.threadId}.json`), JSON.stringify(thread, null, 2))
+
+function saveThread(thread: any) {
+  const threadsDir = path.join(VAULT_PATH, '_threads')
+  fs.mkdirSync(threadsDir, { recursive: true })
+  fs.writeFileSync(path.join(threadsDir, `${thread.threadId}.json`), JSON.stringify({
+    id: thread.threadId,
+    title: thread.title,
+    activeHarness: thread.harness,
+    messages: thread.messages.map((m: any) => ({
+        ...m,
+        timestamp: new Date(m.timestamp).getTime()
+    })),
+    createdAt: new Date(thread.createdAt).getTime(),
+    updatedAt: new Date(thread.updatedAt).getTime(),
+    totalInputTokens: thread.totalInputTokens,
+    totalOutputTokens: thread.totalOutputTokens,
+    totalCost: thread.totalCost
+  }, null, 2))
 }
-function listThreads() {
-  try {
-    if (!fs.existsSync(THREADS_DIR)) return []
-    return fs.readdirSync(THREADS_DIR)
-      .filter(f => f.endsWith('.json'))
-      .map(f => { try { return JSON.parse(fs.readFileSync(path.join(THREADS_DIR, f), 'utf-8')) as Thread } catch { return null } })
-      .filter(Boolean)
-      .sort((a: any, b: any) => b.updatedAt.localeCompare(a.updatedAt))
-      .map((t: any) => ({ threadId: t.threadId, title: t.title, harness: t.harness, updatedAt: t.updatedAt, messageCount: t.messages.length }))
-  } catch { return [] }
-}
-
-// ─── Vault context cache ──────────────────────────────────────────────────────
-
-interface VaultCtx { soul: string; memory: string; preferences: string; heartbeat: string; pinnedNotes: string; builtAt: number }
-let ctxCache: VaultCtx | null = null
-const CTX_TTL = 30 * 1000 // 30s — stays fresh for pinned notes and news pulse
-
-function readSystemFile(name: string): string {
-  try {
-    const p = path.join(VAULT_PATH, `_system/${name}.md`)
-    if (!fs.existsSync(p)) return ''
-    return fs.readFileSync(p, 'utf-8').replace(/^---[\s\S]*?---\n?/, '').trim()
-  } catch { return '' }
-}
-
-function readNewsPulse(): string {
-  try {
-    const p = path.join(VAULT_PATH, '_system/HEARTBEAT.md')
-    if (!fs.existsSync(p)) return ''
-    const raw = fs.readFileSync(p, 'utf-8')
-    const match = raw.match(/<!-- agent-hq-news-pulse -->([\s\S]*)$/)
-    return match ? match[1].trim() : ''
-  } catch { return '' }
-}
-
-async function getVaultCtx(): Promise<VaultCtx> {
-  if (ctxCache && Date.now() - ctxCache.builtAt < CTX_TTL) return ctxCache
-  try {
-    const agentCtx = await vaultClient.getAgentContext()
-    const pinnedArr = agentCtx.pinnedNotes ?? []
-    const pinnedNotes = pinnedArr.length > 0
-      ? pinnedArr.slice(0, 5).map((n: { title: string; content: string }) => `- [${n.title}]: ${n.content.slice(0, 300)}`).join('\n')
-      : ''
-    ctxCache = {
-      soul: agentCtx.soul ?? readSystemFile('SOUL'),
-      memory: agentCtx.memory ?? readSystemFile('MEMORY'),
-      preferences: agentCtx.preferences ?? readSystemFile('PREFERENCES'),
-      heartbeat: readNewsPulse(),
-      pinnedNotes,
-      builtAt: Date.now(),
-    }
-  } catch {
-    ctxCache = {
-      soul: readSystemFile('SOUL'),
-      memory: readSystemFile('MEMORY'),
-      preferences: readSystemFile('PREFERENCES'),
-      heartbeat: readNewsPulse(),
-      pinnedNotes: '',
-      builtAt: Date.now(),
-    }
-  }
-  return ctxCache!
-}
-
-function buildSystemContext(ctx: VaultCtx): string {
-  const date = new Date().toLocaleString('en-US', { timeZone: 'Africa/Kampala', dateStyle: 'full', timeStyle: 'short' })
-  const parts = [`Current date/time (Kampala EAT): ${date}`]
-  if (ctx.soul) parts.push(`## Identity\n${ctx.soul}`)
-  if (ctx.memory) parts.push(`## Persistent Memory\n${ctx.memory}`)
-  if (ctx.preferences) parts.push(`## User Preferences\n${ctx.preferences}`)
-  if (ctx.pinnedNotes) parts.push(`## Pinned Notes\n${ctx.pinnedNotes}`)
-  if (ctx.heartbeat) parts.push(`## Current World Context\n${ctx.heartbeat}`)
-  parts.push(`## Vault\nThe vault (.vault/) is the shared brain for all agents. Key locations:\n- _system/: SOUL.md, MEMORY.md, PREFERENCES.md\n- _jobs/: job queue\n- Notebooks/Projects/: Kolaborate, SiteSeer, Chamuka, YMF\n- _threads/: conversation history`)
-  return parts.join('\n\n')
-}
-
-/** Format thread history as a readable transcript for stateless harnesses */
-function buildHistoryTranscript(messages: ThreadMessage[]): string {
-  return messages
-    .filter(m => m.role !== 'system')
-    .map(m => {
-      const label = m.role === 'user' ? 'User' : (m.harness ?? 'Assistant')
-      return `${label}: ${m.content}`
-    })
-    .join('\n\n')
-}
-
-// ─── Session stores (per thread) ─────────────────────────────────────────────
-
-const SESSION_TTL_MS = 4 * 60 * 60 * 1000
-
-interface ClaudeSession { sessionId: string; lastActivity: string }
-const CLAUDE_SESSIONS_FILE = path.join(VAULT_PATH, '_threads/web-claude-sessions.json')
-
-function loadClaudeSessions(): Record<string, ClaudeSession> {
-  try {
-    if (fs.existsSync(CLAUDE_SESSIONS_FILE)) return JSON.parse(fs.readFileSync(CLAUDE_SESSIONS_FILE, 'utf-8'))
-  } catch { /* ignore */ }
-  return {}
-}
-function saveClaudeSessions(sessions: Record<string, ClaudeSession>) {
-  fs.mkdirSync(path.dirname(CLAUDE_SESSIONS_FILE), { recursive: true })
-  fs.writeFileSync(CLAUDE_SESSIONS_FILE, JSON.stringify(sessions, null, 2))
-}
-
-// ─── Harness runners ──────────────────────────────────────────────────────────
-
-export type HarnessType = 'claude-code' | 'gemini-cli' | 'opencode' | 'hq-agent' | 'codex-cli'
-
-const HARNESS_TIMEOUT_MS = 60 * 60 * 1000 // 1 hour
-
-/**
- * Run Claude Code CLI with streaming.
- * Sends chat:token events to the WebSocket client as Claude generates output.
- * Returns the full response text.
- */
-async function runClaude(
-  ws: ServerWebSocket<unknown>,
-  threadId: string,
-  prompt: string,
-  systemContext: string,
-): Promise<string> {
-  const sessions = loadClaudeSessions()
-  const session = sessions[threadId]
-  const age = session ? Date.now() - new Date(session.lastActivity).getTime() : Infinity
-  const resumeId = session && age < SESSION_TTL_MS ? session.sessionId : null
-
-  const cmd: string[] = [
-    process.env.CLAUDE_PATH ?? 'claude',
-    '--dangerously-skip-permissions',
-    '--verbose',
-    '--output-format', 'stream-json',
-    '--max-turns', '100',
-    '--model', 'sonnet',
-    '--system-prompt', systemContext,
-  ]
-  if (resumeId) cmd.push('--resume', resumeId)
-  cmd.push('-p', prompt)
-
-  const env = { ...process.env }
-  // Ensure HOME is set (required for claude/gemini config discovery)
-  if (!env.HOME) env.HOME = os.homedir()
-
-  console.log(`[hq-ws] [claude] spawning: ${cmd.slice(0, 3).join(' ')} ... (thread: ${threadId}, resume: ${resumeId ?? 'none'})`)
-  const proc = spawn({ cmd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env })
-
-  let fullText = ''
-  let newSessionId: string | null = null
-
-  const timer = setTimeout(() => { console.log('[hq-ws] [claude] timeout, killing'); proc.kill() }, HARNESS_TIMEOUT_MS)
-
-  try {
-    // Drain stderr concurrently so it doesn't block stdout pipe
-    const stderrChunks: string[] = []
-    const stderrDone = new Response(proc.stderr).text().then(s => { if (s.trim()) stderrChunks.push(s.trim()) })
-
-    // Stream stdout line-by-line — parse stream-json format
-    const reader = proc.stdout.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-
-      // Process complete lines
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        try {
-          const evt = JSON.parse(trimmed) as Record<string, any>
-
-          // Session ID appears on most events
-          if (typeof evt.session_id === 'string') newSessionId = evt.session_id
-
-          // Text content from assistant messages
-          if (evt.type === 'assistant') {
-            const content = evt.message?.content
-            if (Array.isArray(content)) {
-              for (const block of content) {
-                if (block.type === 'text' && block.text) {
-                  fullText += block.text
-                  try { ws.send(JSON.stringify({ type: 'chat:token', threadId, token: block.text })) } catch { /* ws closed */ }
-                }
-              }
-            }
-          }
-
-          // Final result — may contain the full response if streaming missed parts
-          if (evt.type === 'result') {
-            console.log(`[hq-ws] [claude] result event: subtype=${evt.subtype} has_result=${!!evt.result}`)
-            if (typeof evt.result === 'string' && evt.result && !fullText) {
-              fullText = evt.result
-              try { ws.send(JSON.stringify({ type: 'chat:token', threadId, token: fullText })) } catch { /* ws closed */ }
-            }
-          }
-
-          if (evt.type === 'error') {
-            console.error(`[hq-ws] [claude] error event:`, JSON.stringify(evt).slice(0, 200))
-          }
-        } catch { /* non-JSON line — log for debugging */ }
-      }
-    }
-
-    const exitCode = await proc.exited
-    await stderrDone
-    console.log(`[hq-ws] [claude] exit code: ${exitCode}, text length: ${fullText.length}`)
-    if (stderrChunks.length) console.error(`[hq-ws] [claude] stderr: ${stderrChunks.join('\n').slice(0, 500)}`)
-  } finally {
-    clearTimeout(timer)
-  }
-
-  // Persist session
-  if (newSessionId) {
-    sessions[threadId] = { sessionId: newSessionId, lastActivity: new Date().toISOString() }
-    saveClaudeSessions(sessions)
-  }
-
-  return fullText.trim()
-}
-
-/**
- * Run Codex CLI with session resumption and stdin-based prompt delivery.
- *
- * Codex outputs JSONL — we parse item.completed agent_message events for text.
- * Sessions are stored per-thread so subsequent messages resume without re-injecting
- * the full system context.
- *
- * CLI:
- *   New:    codex exec --json --dangerously-bypass-approvals-and-sandbox -
- *   Resume: codex exec resume <thread_id> --json --dangerously-bypass-approvals-and-sandbox -
- *   ('-' means read prompt from stdin — avoids arg-length limits and shell escaping)
- */
-interface CodexSession { threadId: string; lastActivity: string }
-const CODEX_SESSIONS_FILE = path.join(VAULT_PATH, '_threads/web-codex-sessions.json')
-
-function loadCodexSessions(): Record<string, CodexSession> {
-  try {
-    if (fs.existsSync(CODEX_SESSIONS_FILE)) return JSON.parse(fs.readFileSync(CODEX_SESSIONS_FILE, 'utf-8'))
-  } catch { /* ignore */ }
-  return {}
-}
-function saveCodexSessions(sessions: Record<string, CodexSession>) {
-  fs.mkdirSync(path.dirname(CODEX_SESSIONS_FILE), { recursive: true })
-  fs.writeFileSync(CODEX_SESSIONS_FILE, JSON.stringify(sessions, null, 2))
-}
-
-async function runCodex(
-  ws: ServerWebSocket<unknown>,
-  threadId: string,
-  prompt: string,
-): Promise<string> {
-  const sessions = loadCodexSessions()
-  const session = sessions[threadId]
-  const age = session ? Date.now() - new Date(session.lastActivity).getTime() : Infinity
-  const resumeId = session && age < SESSION_TTL_MS ? session.threadId : null
-
-  const cmd: string[] = [process.env.CODEX_PATH ?? 'codex', 'exec']
-  if (resumeId) cmd.push('resume', resumeId)
-  cmd.push('--json', '--dangerously-bypass-approvals-and-sandbox', '-')
-
-  const env = { ...process.env }
-  if (!env.HOME) env.HOME = os.homedir()
-
-  console.log(`[hq-ws] [codex] spawning: ${cmd.slice(0, 4).join(' ')} ... (thread: ${threadId}, resume: ${resumeId ?? 'none'}, prompt: ${prompt.length} chars)`)
-
-  const proc = spawn({ cmd, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe', env })
-
-  // Write prompt via stdin — avoids arg-length limits and shell escaping issues
-  proc.stdin.write(prompt)
-  proc.stdin.end()
-
-  let fullText = ''
-  let newCodexId: string | null = null
-
-  const timer = setTimeout(() => { console.log('[hq-ws] [codex] timeout, killing'); proc.kill() }, HARNESS_TIMEOUT_MS)
-
-  try {
-    const stderrChunks: string[] = []
-    const stderrDone = new Response(proc.stderr).text().then(s => { if (s.trim()) stderrChunks.push(s.trim()) })
-
-    // Stream stdout line-by-line and parse JSONL events as they arrive
-    const reader = proc.stdout.getReader()
-    const decoder = new TextDecoder()
-    let buf = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += decoder.decode(value, { stream: true })
-
-      const lines = buf.split('\n')
-      buf = lines.pop() ?? ''
-
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-        try {
-          const evt = JSON.parse(trimmed)
-          if (evt.type === 'thread.started' && evt.thread_id) {
-            newCodexId = evt.thread_id
-          }
-          if (evt.type === 'item.completed' && evt.item?.type === 'agent_message' && evt.item?.text) {
-            fullText += evt.item.text
-            // Stream tokens to PWA as they arrive (each item.completed is a full response segment)
-            const words = evt.item.text.split(/(\s+)/)
-            for (const word of words) {
-              if (word) {
-                try { ws.send(JSON.stringify({ type: 'chat:token', threadId, token: word })) } catch { /* ws closed */ }
-                await Bun.sleep(6)
-              }
-            }
-          }
-        } catch { /* non-JSON line — ignore */ }
-      }
-    }
-
-    const exitCode = await proc.exited
-    await stderrDone
-    console.log(`[hq-ws] [codex] exit: ${exitCode}, text: ${fullText.length} chars`)
-    if (stderrChunks.length) console.error(`[hq-ws] [codex] stderr: ${stderrChunks.join('\n').slice(0, 300)}`)
-  } finally {
-    clearTimeout(timer)
-  }
-
-  if (newCodexId) {
-    sessions[threadId] = { threadId: newCodexId, lastActivity: new Date().toISOString() }
-    saveCodexSessions(sessions)
-  }
-
-  return fullText.trim() || 'No response from Codex.'
-}
-
-/**
- * Run a stateless harness (Gemini CLI or OpenCode).
- * Waits for full output then streams it back in chunks.
- */
-async function runStateless(
-  ws: ServerWebSocket<unknown>,
-  threadId: string,
-  harness: 'gemini-cli' | 'opencode',
-  prompt: string,
-): Promise<string> {
-  let cmd: string[]
-  if (harness === 'gemini-cli') {
-    cmd = [process.env.GEMINI_PATH ?? 'gemini', '--yolo', '-p', prompt]
-  } else {
-    cmd = [process.env.OPENCODE_PATH ?? 'opencode', 'run', '-m', 'openrouter/moonshotai/kimi-k2', prompt]
-  }
-
-  const env = { ...process.env }
-  if (!env.HOME) env.HOME = os.homedir()
-
-  console.log(`[hq-ws] [${harness}] spawning: ${cmd[0]} ${cmd[1] ?? ''} (thread: ${threadId})`)
-  const proc = spawn({ cmd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env })
-  const timer = setTimeout(() => { console.log(`[hq-ws] [${harness}] timeout, killing`); proc.kill() }, HARNESS_TIMEOUT_MS)
-
-  let stdout = ''
-  let stderr = ''
-  try {
-    ;[stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ])
-    const exitCode = await proc.exited
-    console.log(`[hq-ws] [${harness}] exit: ${exitCode}, stdout: ${stdout.length} chars, stderr: ${stderr.length} chars`)
-    if (stderr.trim()) console.error(`[hq-ws] [${harness}] stderr: ${stderr.trim().slice(0, 300)}`)
-  } finally {
-    clearTimeout(timer)
-  }
-
-  const result = stdout.trim() || stderr.trim() || `No response from ${harness}.`
-
-  // Stream the result back in word-sized chunks so the UI feels live
-  const words = result.split(/(\s+)/)
-  for (const word of words) {
-    if (!word) continue
-    try { ws.send(JSON.stringify({ type: 'chat:token', threadId, token: word })) } catch { break }
-    // Small delay between chunks for a natural streaming feel
-    await Bun.sleep(8)
-  }
-
-  return result
-}
-
-/**
- * For hq-agent: create a job in the vault and wait for result.
- * Streams progress updates while waiting.
- */
-async function runHQAgent(
-  ws: ServerWebSocket<unknown>,
-  threadId: string,
-  prompt: string,
-): Promise<string> {
-  try {
-    // Use rpc type so the agent submits an explicit result via submit_result tool
-    const jobId = await vaultClient.createJob({
-      type: 'rpc',
-      instruction: prompt,
-      priority: 60,
-      securityProfile: 'standard',
-      threadId,
-    })
-
-    console.log(`[hq-ws] [hq-agent] created rpc job: ${jobId}`)
-    ws.send(JSON.stringify({ type: 'chat:status', threadId, status: `HQ Agent job queued: ${jobId}` }))
-
-    const POLL_MS = 3000
-    const MAX_WAIT_MS = 10 * 60 * 1000
-    const start = Date.now()
-    let lastProgressAt = 0
-
-    while (Date.now() - start < MAX_WAIT_MS) {
-      await Bun.sleep(POLL_MS)
-
-      const elapsed = Math.round((Date.now() - start) / 1000)
-
-      // Poll for completed job via getJob()
-      try {
-        const job = await vaultClient.getJob(jobId)
-        if (job && (job.status === 'done' || job.status === 'failed')) {
-          const result = job.result ?? job.streamingText ?? (job.status === 'failed' ? 'HQ Agent job failed.' : '')
-          if (result) {
-            console.log(`[hq-ws] [hq-agent] job ${job.status}, response length: ${result.length}`)
-            const words = result.split(/(\s+)/)
-            for (const word of words) {
-              if (!word) continue
-              try { ws.send(JSON.stringify({ type: 'chat:token', threadId, token: word })) } catch { break }
-              await Bun.sleep(8)
-            }
-            return result
-          }
-        }
-      } catch { /* getJob may throw if files are locked, retry next cycle */ }
-
-      if (elapsed - lastProgressAt >= 10) {
-        lastProgressAt = elapsed
-        ws.send(JSON.stringify({ type: 'chat:status', threadId, status: `HQ Agent working… (${elapsed}s)` }))
-      }
-    }
-
-    return 'HQ Agent timed out waiting for job result.'
-  } catch (e: any) {
-    return `Failed to create HQ Agent job: ${e.message}`
-  }
-}
-
-// ─── Main chat handler ────────────────────────────────────────────────────────
-
-async function handleChatSend(ws: ServerWebSocket<unknown>, payload: {
-  threadId: string; content: string; harness: string; context?: { type: string; path: string; content: string }
-}) {
-  const { threadId, content, harness, context } = payload as { threadId: string; content: string; harness: HarnessType; context?: { type: string; path: string; content: string } }
-  const now = new Date().toISOString()
-
-  // Load or create thread
-  let thread = loadThread(threadId) ?? {
-    threadId,
-    title: content.slice(0, 60).trim(),
-    harness,
-    messages: [] as ThreadMessage[],
-    createdAt: now,
-    updatedAt: now,
-  }
-
-  // Record harness switch in thread history
-  const prevHarness = thread.harness
-  if (harness !== prevHarness && thread.messages.length > 0) {
-    thread.messages.push({
-      role: 'system',
-      content: `[Switched to ${harness} from ${prevHarness}]`,
-      timestamp: now,
-    })
-    thread.harness = harness
-  }
-
-  // Append user message
-  thread.messages.push({ role: 'user', content, timestamp: now })
-  thread.updatedAt = now
-  saveThread(thread)
-
-  // Build vault context (shared across all harnesses)
-  const vaultCtx = await getVaultCtx()
-  let systemContext = buildSystemContext(vaultCtx)
-
-  // Scan for file references in message and UI context
-  let additionalContext = ""
-
-  if (context && (context.type === 'file' || context.type === 'selection')) {
-    additionalContext += `\n\n## Context Provided by User: ${context.path}\n${context.content}\n\n`
-  }
-
-  const fileRefs = Array.from(content.matchAll(/\[\[([^\]]+)\]\]/g)).map(m => m[1])
-  const resolvedVault = path.resolve(VAULT_PATH)
-  for (const ref of fileRefs) {
-    try {
-      const refPath = path.resolve(VAULT_PATH, ref)
-      if (!refPath.startsWith(resolvedVault + path.sep) && refPath !== resolvedVault) continue
-      if (fs.existsSync(refPath)) {
-        const text = fs.readFileSync(refPath, 'utf-8').slice(0, 10000) // limit size
-        additionalContext += `\n\n## Referenced File: ${ref}\n${text}\n\n`
-      }
-    } catch { }
-  }
-
-  if (additionalContext) {
-    systemContext += '\n\n' + additionalContext
-  }
-
-  let response = ''
-  const startedAt = Date.now()
-  let inputTokens = 0
-  let outputTokens = 0
-  let fallbackHarnessUsed: string | null = null
-
-  // Define fallback chain
-  const FALLBACK_CHAIN: Record<string, string> = {
-    'claude-code': 'hq-agent',
-    'codex-cli': 'gemini-cli',
-    'hq-agent': 'gemini-cli',
-  }
-
-  const tryRun = async (currentHarness: string): Promise<string> => {
-    try {
-      if (currentHarness === 'claude-code') {
-        const r = await runClaude(ws, threadId, content, systemContext)
-        outputTokens = Math.ceil(r.length / 4)
-        return r
-      } else if (currentHarness === 'codex-cli') {
-        const codexSessions = loadCodexSessions()
-        const hasSession = codexSessions[threadId] &&
-          Date.now() - new Date(codexSessions[threadId].lastActivity).getTime() < SESSION_TTL_MS
-
-        let codexPrompt: string
-        if (hasSession) {
-          codexPrompt = content
-        } else {
-          const history = buildHistoryTranscript(
-            thread.messages.filter(m => m.role !== 'system').slice(0, -1)
-          )
-          codexPrompt = systemContext
-          if (history) codexPrompt += `\n\n## Conversation History\n${history}`
-          codexPrompt += `\n\n## Current Message\nUser: ${content}`
-        }
-
-        const r = await runCodex(ws, threadId, codexPrompt)
-        outputTokens = Math.ceil(r.length / 4)
-        return r
-      } else if (currentHarness === 'gemini-cli' || currentHarness === 'opencode') {
-        const history = buildHistoryTranscript(
-          thread.messages.filter(m => m.role !== 'system').slice(0, -1)
-        )
-        let fullPrompt = `${systemContext}\n\n`
-        if (history) fullPrompt += `## Conversation History\n${history}\n\n`
-        fullPrompt += `## Current Message\nUser: ${content}`
-        inputTokens = Math.ceil(fullPrompt.length / 4)
-        const r = await runStateless(ws, threadId, currentHarness as 'gemini-cli' | 'opencode', fullPrompt)
-        outputTokens = Math.ceil(r.length / 4)
-        return r
-      } else if (currentHarness === 'hq-agent') {
-        const history = buildHistoryTranscript(thread.messages.filter(m => m.role !== 'system').slice(0, -1))
-        const fullPrompt = history ? `${history}\n\nUser: ${content}` : content
-        const r = await runHQAgent(ws, threadId, fullPrompt)
-        outputTokens = Math.ceil(r.length / 4)
-        return r
-      } else {
-        throw new Error(`Unknown harness: ${currentHarness}`)
-      }
-    } catch (e: any) {
-      if (FALLBACK_CHAIN[currentHarness]) {
-        console.warn(`[hq-ws] ${currentHarness} failed, trying fallback ${FALLBACK_CHAIN[currentHarness]}:`, e.message)
-        fallbackHarnessUsed = FALLBACK_CHAIN[currentHarness]
-        // Send a system message to indicate fallback
-        ws.send(JSON.stringify({ 
-          type: 'chat:history', 
-          threadId, 
-          thread: { 
-            ...loadThread(threadId), 
-            messages: [{ role: 'system', content: `[${currentHarness} failed. Falling back to ${fallbackHarnessUsed}...]`, timestamp: new Date().toISOString() }] 
-          } as any, 
-          isAppend: true 
-        }))
-        return await tryRun(FALLBACK_CHAIN[currentHarness])
-      }
-      throw e
-    }
-  }
-
-  // Rough estimate of input context: system + history
-  const estimatedInputChars = systemContext.length + content.length
-  inputTokens = Math.ceil(estimatedInputChars / 4)
-
-  try {
-    response = await tryRun(harness)
-  } catch (e: any) {
-    const errMsg = `Error running ${harness}: ${e.message}`
-    ws.send(JSON.stringify({ type: 'chat:error', threadId, error: errMsg }))
-    response = errMsg
-  }
-
-  const finalHarness = fallbackHarnessUsed || harness
-  const latencyMs = Date.now() - startedAt
-
-  // Model name for cost calculation
-  const modelMap: Record<string, string> = {
-    'claude-code': 'anthropic/claude-sonnet-4',
-    'gemini-cli': 'gemini-2.5-flash',
-    'codex-cli': 'openai/gpt-4o',
-    'opencode': 'moonshotai/kimi-k2',
-    'hq-agent': 'gemini-2.5-flash',
-  }
-  const modelId = modelMap[finalHarness] ?? finalHarness
-  const cost = calculateCost(modelId, inputTokens, outputTokens)
-
-  const msgStats = {
-    model: modelId.split('/').pop() ?? modelId,
-    latencyMs,
-    inputTokens,
-    outputTokens,
-    cost,
-    contextUsed: inputTokens,
-  }
-
-  // Save assistant response
-  if (response) {
-    let finalSaveHarness = finalHarness
-    // Phase 3: Memory Intent Processing
-    let strippedResponse = response
-    // ... (logic from before)
-    const rememberMatch = response.match(/\[REMEMBER:\s*([\s\S]*?)\]/i)
-    const goalMatch = response.match(/\[GOAL:\s*([\s\S]*?)\]/i)
-    const doneMatch = response.match(/\[DONE:\s*([\s\S]*?)\]/i)
-
-    if (rememberMatch || goalMatch || doneMatch) {
-      try {
-        const memoryPath = path.join(VAULT_PATH, '_system/MEMORY.md')
-        let memoryContent = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : '# Memory\n'
-        let updated = false
-
-        if (rememberMatch) {
-          const note = rememberMatch[1].trim()
-          if (!memoryContent.includes('## Pending Notes')) memoryContent += '\n\n## Pending Notes\n'
-          memoryContent += `\n- ${note} (from ${harness} in ${threadId})`
-          updated = true
-          ws.send(JSON.stringify({ type: 'chat:memory-updated', summary: `Remembered: ${note.slice(0, 50)}...` }))
-        }
-        if (goalMatch) {
-          const goal = goalMatch[1].trim()
-          if (!memoryContent.includes('## Active Goals')) memoryContent += '\n\n## Active Goals\n'
-          memoryContent += `\n- [ ] ${goal}`
-          updated = true
-          ws.send(JSON.stringify({ type: 'chat:memory-updated', summary: `New Goal: ${goal.slice(0, 50)}...` }))
-        }
-        if (doneMatch) {
-          const done = doneMatch[1].trim()
-          const regex = new RegExp(`- \\[ \\] ${done.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i')
-          if (regex.test(memoryContent)) {
-              memoryContent = memoryContent.replace(regex, `- [x] ~~${done}~~`)
-              updated = true
-              ws.send(JSON.stringify({ type: 'chat:memory-updated', summary: `Goal Completed: ${done.slice(0, 50)}...` }))
-          }
-        }
-
-        if (updated) fs.writeFileSync(memoryPath, memoryContent)
-        // Strip tags for display
-        strippedResponse = response
-          .replace(/\[REMEMBER:\s*[\s\S]*?\]/gi, '')
-          .replace(/\[GOAL:\s*[\s\S]*?\]/gi, '')
-          .replace(/\[DONE:\s*[\s\S]*?\]/gi, '')
-          .trim()
-      } catch (e) { console.error('[hq-ws] memory update failed:', e) }
-    }
-
-    thread.messages.push({ role: 'assistant', content: strippedResponse, harness: finalHarness, timestamp: new Date().toISOString(), stats: msgStats })
-    thread.updatedAt = new Date().toISOString()
-    // Accumulate session totals
-    thread.totalInputTokens = (thread.totalInputTokens ?? 0) + inputTokens
-    thread.totalOutputTokens = (thread.totalOutputTokens ?? 0) + outputTokens
-    thread.totalCost = (thread.totalCost ?? 0) + cost
-    saveThread(thread)
-  }
-
-  ws.send(JSON.stringify({
-    type: 'chat:done',
-    threadId,
-    harness: finalHarness,
-    stats: msgStats,
-    sessionTotals: {
-      inputTokens: thread.totalInputTokens ?? 0,
-      outputTokens: thread.totalOutputTokens ?? 0,
-      cost: thread.totalCost ?? 0,
-    }
-  }))
-}
-
-// ─── Kill active harness ──────────────────────────────────────────────────────
-
-// Track active processes per thread so we can kill them
-const activeProcs = new Map<string, { kill: () => void }>()
 
 // ─── VaultSync + WebSocket server ────────────────────────────────────────────
 
@@ -813,6 +136,26 @@ const clients = new Set<ServerWebSocket<unknown>>()
 
 const vaultSync = new VaultSync({ vaultPath: VAULT_PATH, deviceId: 'hq-pwa-ws', debug: false })
 vaultSync.start().catch(console.error)
+
+// ─── Unified Bot Setup ───────────────────────────────────────────────
+
+const webBridge = new WebBridge(clients);
+const botConfig: UnifiedAdapterBotConfig = {
+  bridge: webBridge,
+  platformConfig: buildPlatformConfig("web", {
+    defaultTimeout: 120_000,
+    harnessTimeouts: { relay: 120_000 },
+  }),
+  relay: {
+    apiKey: process.env.AGENTHQ_API_KEY || "local-master-key",
+    debug: true,
+  },
+  vaultRoot: VAULT_PATH,
+  stateFile: path.join(VAULT_PATH, "_system/.pwa-bot-state.json"),
+};
+
+const unifiedBot = new UnifiedAdapterBot(botConfig);
+unifiedBot.start().catch(console.error);
 
 vaultSync.eventBus.on('*', (event: any) => {
   if (clients.size === 0) return
@@ -891,7 +234,7 @@ const corsHeaders = {
 
 const server = Bun.serve({
   port: WS_PORT,
-  hostname: '0.0.0.0',
+  hostname: process.env.WS_BIND_HOST ?? '127.0.0.1',
 
   async fetch(req, server) {
     const url = new URL(req.url)
@@ -991,30 +334,10 @@ const server = Bun.serve({
           ws.send(JSON.stringify({ type: 'chat:threads', threads: listThreads() }))
         } else if (msg.type === 'chat:load') {
           const thread = loadThread(msg.threadId)
-          // Include session info for session-capable harnesses
-          let sessionInfo: { active: boolean; expiresIn?: string } | undefined
-          if (thread) {
-            const claudeSessions = loadClaudeSessions()
-            const codexSessions = loadCodexSessions()
-            const cs = claudeSessions[msg.threadId] ?? codexSessions[msg.threadId]
-            if (cs) {
-              const age = Date.now() - new Date(cs.lastActivity).getTime()
-              const active = age < SESSION_TTL_MS
-              if (active) {
-                const remainMs = SESSION_TTL_MS - age
-                const remainH = Math.floor(remainMs / 3600000)
-                const remainM = Math.floor((remainMs % 3600000) / 60000)
-                sessionInfo = { active: true, expiresIn: remainH > 0 ? `${remainH}h ${remainM}m` : `${remainM}m` }
-              } else {
-                sessionInfo = { active: false }
-              }
-            }
-          }
           ws.send(JSON.stringify({
             type: 'chat:history',
             threadId: msg.threadId,
             thread,
-            sessionInfo,
             sessionTotals: thread ? {
               inputTokens: thread.totalInputTokens ?? 0,
               outputTokens: thread.totalOutputTokens ?? 0,
@@ -1023,26 +346,15 @@ const server = Bun.serve({
           }))
         } else if (msg.type === 'chat:delete') {
           try {
-            const p = path.join(THREADS_DIR, `${msg.threadId}.json`)
+            if (!msg.threadId || !SAFE_THREAD_ID.test(msg.threadId)) return
+            const p = path.join(VAULT_PATH, '_threads', `${msg.threadId}.json`)
             if (fs.existsSync(p)) fs.unlinkSync(p)
-            // Also clear Claude session for this thread
-            const sessions = loadClaudeSessions()
-            if (sessions[msg.threadId]) {
-              delete sessions[msg.threadId]
-              saveClaudeSessions(sessions)
-            }
             ws.send(JSON.stringify({ type: 'chat:threads', threads: listThreads() }))
           } catch { /* ignore */ }
         } else if (msg.type === 'chat:reset') {
-          // Reset harness session for a thread
-          const sessions = loadClaudeSessions()
-          if (sessions[msg.threadId]) {
-            delete sessions[msg.threadId]
-            saveClaudeSessions(sessions)
-          }
+          // No-op for now in unified mode, or we could clear the session in unifiedBot
           ws.send(JSON.stringify({ type: 'chat:reset_ok', threadId: msg.threadId }))
         } else if (msg.type === 'chat:rename') {
-          // Rename a thread title
           const thread = loadThread(msg.threadId)
           if (thread && msg.title) {
             thread.title = String(msg.title).slice(0, 100)
@@ -1051,18 +363,13 @@ const server = Bun.serve({
             broadcast({ type: 'chat:threads', threads: listThreads() })
           }
         } else if (msg.type === 'chat:retry') {
-          // Truncate thread and retry last user message
           const thread = loadThread(msg.threadId)
           if (thread && typeof msg.fromIndex === 'number') {
-            thread.messages = thread.messages.slice(0, msg.fromIndex + 1)
-            const lastUserMsg = thread.messages[thread.messages.length - 1]
+            const truncatedMessages = thread.messages.slice(0, msg.fromIndex + 1)
+            const lastUserMsg = truncatedMessages[truncatedMessages.length - 1]
             if (lastUserMsg && lastUserMsg.role === 'user') {
-              saveThread(thread)
-              handleChatSend(ws, { 
-                threadId: msg.threadId, 
-                content: lastUserMsg.content, 
-                harness: msg.harness || thread.harness 
-              }).catch(e =>
+              // We don't save the thread here, webBridge.handleIncoming will handle it
+              webBridge.handleIncoming(msg.threadId, lastUserMsg.content).catch(e =>
                 ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
               )
             }
@@ -1087,9 +394,9 @@ const server = Bun.serve({
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
           }
         } else if (msg.type === 'chat:send' || msg.type === 'chat:send-with-context') {
-          handleChatSend(ws, msg).catch(e =>
+          webBridge.handleIncoming(msg.threadId, msg.content).catch(e => 
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
-          )
+          );
         }
       } catch { /* ignore */ }
     },
@@ -1099,7 +406,7 @@ const server = Bun.serve({
   },
 })
 
-console.log(`[hq-ws] WebSocket server on ws://0.0.0.0:${server.port}/ws`)
+console.log(`[hq-ws] WebSocket server on ws://${process.env.WS_BIND_HOST ?? '127.0.0.1'}:${server.port}/ws`)
 console.log(`[hq-ws] Vault: ${VAULT_PATH}`)
 console.log(`[hq-ws] Web Push ${VAPID_PUBLIC_KEY ? 'enabled' : 'disabled'}`)
 

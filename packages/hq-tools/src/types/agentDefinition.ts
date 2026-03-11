@@ -15,7 +15,14 @@ export interface AgentDefinitionFrontmatter {
   autoLoad: boolean;
   tags: string[];
   defaultsTo?: "PASS" | "NEEDS_WORK" | "BLOCKED";  // quality gate default
-  
+
+  /**
+   * Ordered fallback harness chain when preferredHarness is offline.
+   * e.g. ["opencode", "gemini-cli"] means: try opencode first, then gemini-cli.
+   * Part of the Capability Resolution Chain feature (dapper-snacking-snowflake).
+   */
+  fallbackChain?: HarnessType[];
+
   // Performance tracking
   performanceProfile?: {
     targetSuccessRate: number;    // e.g. 0.85

@@ -4,11 +4,16 @@ import { fileURLToPath } from "url";
 import * as yaml from "js-yaml";
 import type { AgentDefinition, AgentDefinitionFrontmatter } from "./types/agentDefinition.js";
 
-// Hardcoded relative to workspace root or typical build output
-export const AGENTS_DIR = path.resolve(process.cwd(), "packages/hq-tools/agents");
+// Resolve relative to this file's location so it works from MCP and non-root CWDs
+const __dir = path.dirname(fileURLToPath(import.meta.url));
+export const AGENTS_DIR = path.resolve(__dir, "../agents");
 
 export function parseAgentFile(vertical: string, name: string): AgentDefinition | null {
   const agentPath = path.join(AGENTS_DIR, vertical, `${name}.md`);
+  // Path traversal guard
+  const resolvedAgents = path.resolve(AGENTS_DIR);
+  const resolvedAgent = path.resolve(agentPath);
+  if (!resolvedAgent.startsWith(resolvedAgents + path.sep)) return null;
   if (!fs.existsSync(agentPath)) return null;
 
   const content = fs.readFileSync(agentPath, "utf-8");
@@ -68,3 +73,20 @@ export function buildAgentPromptSection(agent: AgentDefinition): string {
     instructionBody
   ].join("\n");
 }
+
+/**
+ * Return the fallback harness chain for a named agent.
+ * Returns [] if the agent doesn't exist or has no fallbackChain set.
+ * Part of the Capability Resolution Chain feature (dapper-snacking-snowflake).
+ */
+export function getAgentFallbacks(agentName: string): string[] {
+  const names = listAgentNames();
+  for (const { vertical, name } of names) {
+    if (name === agentName) {
+      const agent = parseAgentFile(vertical, name);
+      if (agent?.fallbackChain) return agent.fallbackChain;
+    }
+  }
+  return [];
+}
+

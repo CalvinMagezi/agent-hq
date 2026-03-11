@@ -33,6 +33,7 @@ interface PromptBuildRequest {
     taskType?: TaskType;
     targetHarness?: HarnessType;
     projectName?: string;
+    projectId?: string;   // Optional: link job to project for goal ancestry context
     additionalContext?: string;
     role?: AgentRole;
     executionMode?: ExecutionMode;
@@ -52,6 +53,7 @@ const BUDGET = {
     searchResults: 600,     // ~200 per result x 3
     projectContext: 500,
     pinnedNotes: 400,
+    newsContext: 200,
 };
 
 // ── Task Type Detection ──────────────────────────────────────────────
@@ -94,6 +96,79 @@ function detectProjectName(instruction: string, vaultPath: string): string | nul
 function truncate(text: string, maxChars: number): string {
     if (text.length <= maxChars) return text;
     return text.slice(0, maxChars - 3) + "...";
+}
+
+// ── Goal Ancestry ─────────────────────────────────────────────────────
+
+/**
+ * Build a Mission → Project Goal → Task context section.
+ * Reads SOUL.md for the mission statement and project notes for the goal.
+ * Gracefully degrades if files are missing.
+ * Part of the Goal Ancestry feature (dapper-snacking-snowflake).
+ */
+function buildGoalAncestrySection(
+    vaultPath: string,
+    projectId: string | undefined,
+    taskInstruction: string,
+): string {
+    const parts: string[] = [];
+
+    // 1. Mission from SOUL.md
+    try {
+        const soulPath = path.join(vaultPath, "_system", "SOUL.md");
+        if (fs.existsSync(soulPath)) {
+            const raw = fs.readFileSync(soulPath, "utf-8");
+            // Extract first meaningful paragraph after frontmatter
+            const body = raw.replace(/^---[\s\S]*?---\s*/m, "").trim();
+            const firstPara = body.split("\n\n")[0]?.trim();
+            if (firstPara) {
+                parts.push(`**Mission:** ${truncate(firstPara, 300)}`);
+            }
+        }
+    } catch {
+        // Non-critical
+    }
+
+    // 2. Project Goal from Notebooks/Projects/{projectId}/
+    if (projectId) {
+        try {
+            const projectDir = path.join(vaultPath, "Notebooks", "Projects", projectId);
+            const overviewNames = [`${projectId}.md`, "README.md", "Overview.md", "Goal.md", "Index.md"];
+            let projectGoal: string | null = null;
+
+            for (const name of overviewNames) {
+                const fp = path.join(projectDir, name);
+                if (fs.existsSync(fp)) {
+                    const raw = fs.readFileSync(fp, "utf-8");
+                    // Look for a ## Goal or ## Objective section first
+                    const goalMatch = raw.match(/##\s+(?:Goal|Objective|Mission)[\s\S]*?\n([^#]+)/i);
+                    if (goalMatch) {
+                        projectGoal = goalMatch[1].trim();
+                    } else {
+                        // Fall back to first paragraph of body
+                        const body = raw.replace(/^---[\s\S]*?---\s*/m, "").trim();
+                        projectGoal = body.split("\n\n")[0]?.trim() ?? null;
+                    }
+                    break;
+                }
+            }
+
+            if (projectGoal) {
+                parts.push(`**Project Goal (${projectId}):** ${truncate(projectGoal, 400)}`);
+            } else {
+                parts.push(`**Project:** ${projectId}`);
+            }
+        } catch {
+            parts.push(`**Project:** ${projectId}`);
+        }
+    }
+
+    // 3. Current Task
+    parts.push(`**Task:** ${truncate(taskInstruction, 200)}`);
+
+    if (parts.length <= 1) return ""; // Only "Task" — not useful as ancestry
+
+    return `## Goal Ancestry\n\n${parts.join("\n")}\n`;
 }
 
 function extractRelevantMemoryLines(memory: string, instruction: string, maxChars: number): string {
@@ -283,6 +358,7 @@ export class PromptBuilder {
             searchResults: Math.round(BUDGET.searchResults * modeMultiplier),
             projectContext: Math.round(BUDGET.projectContext * modeMultiplier),
             pinnedNotes: Math.round(BUDGET.pinnedNotes * modeMultiplier),
+            newsContext: Math.round(BUDGET.newsContext * modeMultiplier),
         };
 
         // In "quick" mode, skip search and pinned notes entirely
@@ -296,6 +372,14 @@ export class PromptBuilder {
         ]);
 
         // ── Build context sections (budgets scaled by execution mode) ──
+
+        // Goal Ancestry (Mission → Project → Task) — injected at the top of the prompt
+        const goalAncestry = buildGoalAncestrySection(
+            this.vaultPath,
+            request.projectId,
+            request.rawInstruction,
+        );
+        if (goalAncestry) contextSources.push("Goal Ancestry");
 
         let preferencesSection = "";
         if (systemContext?.preferences) {
@@ -365,6 +449,9 @@ export class PromptBuilder {
 
         // Philosophy 2: Elaborate Explanation — context
         const contextParts: string[] = [];
+        if (goalAncestry) {
+            contextParts.push(goalAncestry);
+        }
         if (preferencesSection) {
             contextParts.push(`### User Preferences\n${preferencesSection}`);
         }
@@ -379,6 +466,18 @@ export class PromptBuilder {
         }
         if (memorySection) {
             contextParts.push(`### Agent Memory (Relevant)\n${memorySection}`);
+        }
+
+        // Current Events (skip in quick mode)
+        if (request.executionMode !== "quick") {
+            const briefsPath = path.join(this.vaultPath, "_system/NEWS-BRIEFS.md");
+            if (fs.existsSync(briefsPath)) {
+                try {
+                    const briefsRaw = fs.readFileSync(briefsPath, "utf-8");
+                    const briefsBody = briefsRaw.replace(/---[\s\S]*?---/, "").trim().slice(0, scaledBudget.newsContext);
+                    if (briefsBody) contextParts.push(`### Current Events\n${briefsBody}`);
+                } catch { /* ignore */ }
+            }
         }
         if (request.additionalContext) {
             contextParts.push(`### Additional Context\n${request.additionalContext}`);

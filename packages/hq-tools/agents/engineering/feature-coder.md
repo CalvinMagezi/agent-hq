@@ -7,6 +7,7 @@ baseRole: coder
 preferredHarness: claude-code
 maxTurns: 100
 autoLoad: false
+fallbackChain: [opencode, any]
 tags: [engineering, coding, implementation, typescript, feature]
 performanceProfile:
   targetSuccessRate: 0.90

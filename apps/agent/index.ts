@@ -52,6 +52,8 @@ import { detectExecutionMode, parseExplicitMode, getModeConfig } from "./lib/exe
 import { getFallbackChain, executeWithFallback, classifyError } from "./lib/modelFallback.js";
 import { createDefaultRegistry, createHQGatewayTools } from "@repo/hq-tools";
 import { SearchClient } from "@repo/vault-client/search";
+import { BudgetGuard } from "@repo/vault-client";
+
 
 dotenv.config({ path: ".env.local" });
 
@@ -463,6 +465,33 @@ async function handleJob(job: any) {
 
         console.log(`\n💬 New task received: "${job.instruction}"\n`);
         logger.info("Job started", { jobId: job._id, type: job.type, instruction: job.instruction.substring(0, 100) });
+
+        // ── Budget Check — block job if agent is over monthly budget ──────
+        const agentName = job.agentName ?? "default";
+        try {
+            const budgetGuard = new BudgetGuard(VAULT_PATH);
+            const budgetCheck = await budgetGuard.checkBudget(agentName);
+            if (budgetCheck.warning) {
+                logger.warn("Budget warning", { agentName, ...budgetCheck });
+                console.warn(`💰 ${budgetCheck.warning}`);
+            }
+            if (!budgetCheck.allowed) {
+                logger.error("Job blocked by budget enforcement", { agentName, ...budgetCheck });
+                await adapter.updateJobStatus({
+                    jobId: job._id,
+                    status: "failed" as any,
+                    result: budgetCheck.warning,
+                });
+                isBusy = false;
+                currentJobId = null;
+                toolState.currentJobId = null;
+                return;
+            }
+        } catch (budgetErr: any) {
+            // Non-critical — log and continue if budget check fails
+            logger.warn("Budget check failed, proceeding without enforcement", { error: budgetErr.message });
+        }
+
 
         // Check if this is a terminal-only job (no Pi SDK processing needed)
         // Terminal jobs are marked with orchestrationType: "single" or instruction starts with [TERMINAL]

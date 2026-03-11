@@ -7,6 +7,7 @@ baseRole: coder
 preferredHarness: claude-code
 maxTurns: 60
 autoLoad: false
+fallbackChain: [opencode, any]
 tags: [engineering, testing, coverage, tdd, bun-test]
 performanceProfile:
   targetSuccessRate: 0.88

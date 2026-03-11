@@ -70,7 +70,7 @@ function markSent(key: string): void {
 
 // ─── Telegram push ────────────────────────────────────────────────────────────
 
-async function sendTelegram(text: string): Promise<boolean> {
+export async function sendTelegram(text: string): Promise<boolean> {
   if (!TG_AVAILABLE) return false;
   try {
     const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -97,7 +97,7 @@ async function sendTelegram(text: string): Promise<boolean> {
 
 // ─── Web Push (PWA native notifications) ─────────────────────────────────────
 
-async function sendWebPush(title: string, body: string, url = "/"): Promise<boolean> {
+export async function sendWebPush(title: string, body: string, url = "/"): Promise<boolean> {
   try {
     const res = await fetch(`${WS_SERVER}/push/send`, {
       method: "POST",
@@ -112,7 +112,7 @@ async function sendWebPush(title: string, body: string, url = "/"): Promise<bool
 
 // ─── Discord webhook push ─────────────────────────────────────────────────────
 
-async function sendDiscord(text: string): Promise<boolean> {
+export async function sendDiscord(text: string): Promise<boolean> {
   if (!DISCORD_AVAILABLE) return false;
   try {
     const res = await fetch(DISCORD_WEBHOOK, {

@@ -7,6 +7,7 @@ baseRole: devops
 preferredHarness: claude-code
 maxTurns: 60
 autoLoad: false
+fallbackChain: [opencode]
 tags: [ops, deployment, safety, dry-run, rollback]
 performanceProfile:
   targetSuccessRate: 0.92

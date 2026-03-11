@@ -7,6 +7,7 @@ baseRole: researcher
 preferredHarness: claude-code
 maxTurns: 50
 autoLoad: false
+fallbackChain: [opencode, any]
 tags: [engineering, tech-debt, refactoring, metrics, coupling]
 performanceProfile:
   targetSuccessRate: 0.85

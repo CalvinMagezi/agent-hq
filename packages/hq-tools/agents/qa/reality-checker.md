@@ -8,6 +8,7 @@ preferredHarness: claude-code
 maxTurns: 30
 autoLoad: false
 defaultsTo: NEEDS_WORK
+fallbackChain: [opencode]
 tags: [qa, review, validation, gating, quality]
 performanceProfile:
   targetSuccessRate: 0.85

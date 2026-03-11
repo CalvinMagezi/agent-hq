@@ -102,8 +102,15 @@ export {
   listAgentNames,
   getAllAgents,
   buildAgentPromptSection,
+  getAgentFallbacks,
   AGENTS_DIR,
 } from "./agentLoader.js";
+export {
+  resolveCapability,
+  getCapabilityChain,
+  needsFallback,
+} from "./capabilityResolver.js";
+export type { CapabilityResolution } from "./capabilityResolver.js";
 export {
   parseTeamFile,
   getBuiltInTeam,

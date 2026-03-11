@@ -195,6 +195,7 @@ async function writeCronSchedule(): Promise<void> {
     { interval: "Every 5min", task: "relay-health", description: "Check relay bot connectivity" },
     { interval: "Every 30min", task: "memory-consolidation", description: "Consolidate cross-harness memories via Ollama qwen3.5:9b" },
     { interval: "Every 30min", task: "embeddings", description: "Embed new/modified vault notes into FTS5 + vector index" },
+    { interval: "Monthly 1st", task: "budget-reset", description: "Reset currentMonthUsd/todayUsd counters in budget.md" },
     { interval: "Every 1hr", task: "stale-cleanup", description: "Delete jobs >7 days old" },
     { interval: "Every 1hr", task: "delegation-cleanup", description: "Purge stale delegation signals and oversized result files" },
     { interval: "Every 2hr", task: "note-linking", description: "Add semantic Related Notes sections to all embedded notes" },
@@ -716,6 +717,37 @@ const tasks: {
       lastRun: 0,
     },
     {
+      name: "budget-reset",
+      intervalMs: 60 * 60 * 1000, // checked every hour; only fires on 1st of month
+      fn: async () => {
+        const now = new Date();
+        if (now.getDate() !== 1 || now.getHours() !== 0) return;
+
+        // Avoid re-running if already reset this month
+        const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+        const flagPath = path.join(VAULT_PATH, "_embeddings", `.budget-reset-${monthKey}`);
+        if (fs.existsSync(flagPath)) return;
+
+        const budgetPath = path.join(VAULT_PATH, "_usage", "budget.md");
+        if (!fs.existsSync(budgetPath)) return;
+
+        try {
+          const raw = fs.readFileSync(budgetPath, "utf-8");
+          const { default: matter } = await import("gray-matter");
+          const parsed = matter(raw);
+          parsed.data.currentMonthUsd = 0;
+          parsed.data.todayUsd = 0;
+          parsed.data.lastChecked = now.toISOString();
+          fs.writeFileSync(budgetPath, matter.stringify(parsed.content, parsed.data), "utf-8");
+          fs.writeFileSync(flagPath, now.toISOString());
+          console.log(`[budget-reset] Monthly budget counters reset for ${monthKey}`);
+        } catch (err) {
+          console.error("[budget-reset] Failed:", err);
+        }
+      },
+      lastRun: 0,
+    },
+    {
       name: "stale-cleanup",
       intervalMs: 60 * 60 * 1000,
       fn: cleanupStaleJobs,
@@ -915,6 +947,81 @@ async function runScheduler(): Promise<void> {
     });
 
     console.log("[daemon] Event subscriptions registered (embeddings, heartbeat, approvals)");
+
+    // ─── Touch Points (event-driven intelligent vault reactions) ─────────────
+    try {
+      const { createTouchPointEngine } = await import("./touchpoints/engine.js");
+      const { ChannelRouter } = await import("./touchpoints/channelRouter.js");
+      const { frontmatterFixer } = await import("./touchpoints/points/frontmatterFixer.js");
+      const { sizeWatchdog } = await import("./touchpoints/points/sizeWatchdog.js");
+      const { tagSuggester } = await import("./touchpoints/points/tagSuggester.js");
+      const { folderOrganizer } = await import("./touchpoints/points/folderOrganizer.js");
+      const { conversationLearner } = await import("./touchpoints/points/conversationLearner.js");
+      const { staleThreadDetector } = await import("./touchpoints/points/staleThreadDetector.js");
+      const { newsClusterer } = await import("./touchpoints/points/newsClusterer.js");
+      const { newsLinker } = await import("./touchpoints/points/newsLinker.js");
+
+      const channelRouter = new ChannelRouter(VAULT_PATH);
+
+      const tpEngine = createTouchPointEngine({
+        vault,
+        search,
+        memoryIngester: memorySystem.ingester,
+        vaultPath: VAULT_PATH,
+        llm: async (prompt: string, systemPrompt?: string) => {
+          // Reuse vault-workers LLM cascade (Ollama → Gemini Flash Lite → Flash)
+          const { WorkerRunner } = await import("./vault-workers/index.js");
+          // llmCall is not exported from vault-workers, build it inline via Ollama
+          const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+          const OLLAMA_MODEL = process.env.VAULT_WORKER_MODEL ?? "qwen3.5:9b";
+          const body = {
+            model: OLLAMA_MODEL,
+            messages: [
+              ...(systemPrompt ? [{ role: "system", content: systemPrompt }] : []),
+              { role: "user", content: prompt.slice(0, 8000) },
+            ],
+            max_tokens: 1024,
+            stream: false,
+          };
+          const res = await fetch(`${OLLAMA_BASE_URL}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(90_000),
+          });
+          if (!res.ok) throw new Error(`Ollama error: ${res.status}`);
+          const data = await res.json() as { choices: Array<{ message: { content: string } }> };
+          const content = data.choices[0]?.message?.content;
+          if (!content) throw new Error("Ollama returned no content");
+          return content;
+        },
+        notify: channelRouter,
+      });
+
+      tpEngine
+        .register(frontmatterFixer)
+        .register(sizeWatchdog)
+        .register(tagSuggester)
+        .register(folderOrganizer)
+        .register(conversationLearner)
+        .register(staleThreadDetector)
+        .register(newsClusterer)
+        .register(newsLinker);
+
+      tpEngine.start(vault);
+
+      // Register stale-thread-detector as a periodic daemon task (6hr)
+      tasks.push({
+        name: "stale-thread-detector",
+        intervalMs: 6 * 60 * 60 * 1000,
+        fn: () => tpEngine.runPeriodic("stale-thread-detector"),
+        lastRun: 0,
+      });
+
+      console.log("[daemon] Touch Point Engine started with 6 touch points");
+    } catch (err) {
+      console.warn("[daemon] Touch Point Engine failed to load (non-fatal):", err instanceof Error ? err.message : err);
+    }
   } catch (err) {
     console.warn("[daemon] Vault sync engine failed to start, falling back to polling-only:", err);
   }

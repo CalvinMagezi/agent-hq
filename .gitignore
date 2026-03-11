@@ -82,3 +82,4 @@ sync-server.db
 target/
 *.node
 
+.playwright-mcp

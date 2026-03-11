@@ -8,6 +8,7 @@ preferredHarness: claude-code
 maxTurns: 40
 autoLoad: false
 defaultsTo: NEEDS_WORK
+fallbackChain: [opencode]
 tags: [engineering, security, owasp, audit, vulnerabilities]
 performanceProfile:
   targetSuccessRate: 0.80

@@ -6,6 +6,13 @@ import type { RelayConfig } from "./types.js";
 
 function readNewsPulse(vaultPath: string): string {
   try {
+    const briefsPath = join(vaultPath, "_system/NEWS-BRIEFS.md");
+    if (existsSync(briefsPath)) {
+      const raw = readFileSync(briefsPath, "utf-8");
+      // Strip frontmatter and return the topic index
+      return raw.replace(/---[\s\S]*?---/, "").trim();
+    }
+
     const p = join(vaultPath, "_system/HEARTBEAT.md");
     if (!existsSync(p)) return "";
     const raw = readFileSync(p, "utf-8");

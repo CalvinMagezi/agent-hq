@@ -45,7 +45,7 @@ export class VoiceHandler {
 
   async transcribe(audioBuffer: Buffer, filename = "audio.ogg"): Promise<string> {
     const formData = new FormData();
-    const blob = new Blob([audioBuffer], { type: this.getMimeType(filename) });
+    const blob = new Blob([new Uint8Array(audioBuffer)], { type: this.getMimeType(filename) });
     formData.append("file", blob, filename);
     formData.append("model", this.transcriptionModel);
     formData.append("response_format", "verbose_json");

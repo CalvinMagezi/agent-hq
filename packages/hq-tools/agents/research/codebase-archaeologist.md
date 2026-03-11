@@ -7,6 +7,7 @@ baseRole: researcher
 preferredHarness: claude-code
 maxTurns: 60
 autoLoad: false
+fallbackChain: [opencode, any]
 tags: [research, codebase, dependency-graph, architecture, read-only]
 performanceProfile:
   targetSuccessRate: 0.90

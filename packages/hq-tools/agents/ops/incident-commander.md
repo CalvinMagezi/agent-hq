@@ -7,6 +7,7 @@ baseRole: devops
 preferredHarness: claude-code
 maxTurns: 60
 autoLoad: false
+fallbackChain: [opencode, any]
 tags: [ops, incident, root-cause, postmortem, blameless]
 performanceProfile:
   targetSuccessRate: 0.88

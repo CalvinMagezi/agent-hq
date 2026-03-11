@@ -8,6 +8,7 @@ preferredHarness: claude-code
 maxTurns: 30
 autoLoad: false
 defaultsTo: NEEDS_WORK
+fallbackChain: [opencode, gemini-cli]
 tags: [content, documentation, audit, staleness, accuracy]
 performanceProfile:
   targetSuccessRate: 0.83

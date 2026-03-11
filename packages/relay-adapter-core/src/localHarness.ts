@@ -23,6 +23,7 @@ interface HarnessStateFile {
 const BLANK_SESSION: SessionEntry = { sessionId: null, lastActivity: "" };
 const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const TIMEOUT_MS = 60 * 60 * 1000; // 1 hour process timeout
+const MAX_AUTO_CONTINUES = 3; // Auto-continue up to 3 times when hitting turn limit
 
 export class LocalHarness {
   private sessions: Record<LocalHarnessType, SessionEntry> = {
@@ -78,17 +79,17 @@ export class LocalHarness {
     console.log(`[local-harness] Session reset for ${harness}`);
   }
 
-  async run(harness: LocalHarnessType, prompt: string): Promise<string> {
+  async run(harness: LocalHarnessType, prompt: string, onToken?: (token: string) => void): Promise<string> {
     if (this.running) {
       return "Still processing your previous message. Please wait, or type !reset to cancel.";
     }
     this.running = true;
     try {
       switch (harness) {
-        case "claude-code": return await this.runClaude(prompt);
-        case "opencode": return await this.runOpenCode(prompt);
-        case "gemini-cli": return await this.runGemini(prompt);
-        case "codex-cli": return await this.runCodex(prompt);
+        case "claude-code": return await this.runClaude(prompt, onToken);
+        case "opencode": return await this.runOpenCode(prompt, onToken);
+        case "gemini-cli": return await this.runGemini(prompt, onToken);
+        case "codex-cli": return await this.runCodex(prompt, onToken);
       }
     } finally {
       this.running = false;
@@ -96,57 +97,156 @@ export class LocalHarness {
     }
   }
 
-  private async runClaude(prompt: string): Promise<string> {
+  private async runClaude(prompt: string, onToken?: (token: string) => void): Promise<string> {
+    const parts: string[] = [];
+    let continueCount = 0;
+    let currentPrompt = prompt;
+    let useResume = true; // first call uses --resume, subsequent use --continue
+    let lastStderr = "";
+
+    while (true) {
+      const result = await this.spawnClaude(currentPrompt, onToken, useResume);
+
+      if (result.text) parts.push(result.text);
+      if (result.stderr) lastStderr = result.stderr;
+
+      // Auto-continue if we hit the turn limit
+      if (
+        result.hitTurnLimit &&
+        continueCount < MAX_AUTO_CONTINUES &&
+        this.sessions["claude-code"].sessionId
+      ) {
+        continueCount++;
+        console.log(
+          `[local-harness] Auto-continuing Claude (${continueCount}/${MAX_AUTO_CONTINUES})`,
+        );
+        currentPrompt = "Continue where you left off.";
+        useResume = false; // use --continue for auto-continues
+        continue;
+      }
+
+      break;
+    }
+
+    if (continueCount > 0) {
+      console.log(`[local-harness] Claude completed with ${continueCount} auto-continue(s)`);
+    }
+
+    const joined = parts.join("\n\n---\n\n").trim();
+    if (joined) return joined;
+
+    // Surface the actual error instead of a generic message
+    if (lastStderr) {
+      const shortErr = lastStderr.substring(0, 300);
+      return `Claude CLI error: ${shortErr}`;
+    }
+    return "No response from Claude.";
+  }
+
+  private async spawnClaude(
+    prompt: string,
+    onToken?: (token: string) => void,
+    useResume = true,
+  ): Promise<{ text: string; hitTurnLimit: boolean; stderr: string }> {
     const session = this.sessions["claude-code"];
     const age = session.lastActivity
       ? Date.now() - new Date(session.lastActivity).getTime()
       : Infinity;
-    const resume = session.sessionId && age < SESSION_TTL_MS ? session.sessionId : null;
+    const hasLiveSession = session.sessionId && age < SESSION_TTL_MS;
 
     const cmd = [
       "claude",
       "--dangerously-skip-permissions",
-      "--output-format", "json",
+      "--output-format", "stream-json",
+      "--verbose",
       "--max-turns", "100",
       "--model", "sonnet",
     ];
-    if (resume) cmd.push("--resume", resume);
+    if (hasLiveSession && session.sessionId) {
+      if (useResume) {
+        cmd.push("--resume", session.sessionId);
+      } else {
+        cmd.push("--continue");
+      }
+    }
     cmd.push("-p", prompt);
 
-    const { stdout, stderr } = await this.exec(cmd);
+    const proc = spawn({
+      cmd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        // Prevent "cannot launch inside another Claude Code session" error
+        CLAUDECODE: undefined,
+        CLAUDE_CODE_ENTRYPOINT: undefined,
+      },
+    });
+    this.activeKill = () => proc.kill();
 
     let text = "";
     let newSessionId: string | null = null;
     let hitTurnLimit = false;
 
-    for (const line of stdout.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const msg = JSON.parse(trimmed) as Record<string, unknown>;
-        if (msg.type === "result") {
-          if (msg.subtype === "error_max_turns") {
-            hitTurnLimit = true;
-          }
-          if (typeof msg.result === "string" && msg.result) {
-            text = msg.result;
-          }
+    // Capture stderr for diagnostics
+    const stderrPromise = new Response(proc.stderr).text();
+
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed) as Record<string, any>;
+            if (typeof msg.session_id === "string") newSessionId = msg.session_id;
+
+            if (msg.type === "assistant") {
+              const content = msg.message?.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === "text" && block.text) {
+                    text += block.text;
+                    onToken?.(block.text);
+                  }
+                }
+              }
+            } else if (msg.type === "result") {
+              if (msg.subtype === "error_max_turns") hitTurnLimit = true;
+              // Extract result text if present (newer CLI versions include it)
+              if (typeof msg.result === "string" && msg.result) {
+                if (!text) {
+                  text = msg.result;
+                  onToken?.(text);
+                }
+              }
+            }
+          } catch { /* non-JSON */ }
         }
-        if (typeof msg.session_id === "string") {
-          newSessionId = msg.session_id;
-        }
-      } catch {
-        // Non-JSON line
       }
+    } finally {
+      reader.releaseLock();
     }
 
-    if (!text && hitTurnLimit) {
-      text = "Reached the session turn limit. Type !reset to start a fresh conversation.";
-    }
+    const exitCode = await proc.exited;
+    const stderrText = await stderrPromise;
 
-    if (!text) {
-      const raw = stdout.trim();
-      text = raw.startsWith("{") || raw.startsWith("[") ? "" : raw;
+    if (stderrText.trim()) {
+      console.warn(`[local-harness] Claude stderr: ${stderrText.trim().substring(0, 500)}`);
+    }
+    if (exitCode !== 0 && !text) {
+      console.error(`[local-harness] Claude exited with code ${exitCode}`);
     }
 
     if (newSessionId) {
@@ -157,22 +257,26 @@ export class LocalHarness {
       this.save();
     }
 
-    return text || stderr.trim() || "No response from Claude.";
+    return { text: text.trim(), hitTurnLimit, stderr: stderrText.trim() };
   }
 
-  private async runOpenCode(prompt: string): Promise<string> {
+  private async runOpenCode(prompt: string, onToken?: (token: string) => void): Promise<string> {
     const cmd = ["opencode", "run", "-m", "anthropic/claude-sonnet-4-6", "-p", prompt];
     const { stdout, stderr } = await this.exec(cmd);
-    return stdout.trim() || stderr.trim() || "No response from OpenCode.";
+    const text = stdout.trim() || stderr.trim() || "No response from OpenCode.";
+    if (onToken && text) onToken(text);
+    return text;
   }
 
-  private async runGemini(prompt: string): Promise<string> {
+  private async runGemini(prompt: string, onToken?: (token: string) => void): Promise<string> {
     const cmd = ["gemini", "--yolo", "-p", prompt];
     const { stdout, stderr } = await this.exec(cmd);
-    return stdout.trim() || stderr.trim() || "No response from Gemini.";
+    const text = stdout.trim() || stderr.trim() || "No response from Gemini.";
+    if (onToken && text) onToken(text);
+    return text;
   }
 
-  private async runCodex(prompt: string): Promise<string> {
+  private async runCodex(prompt: string, onToken?: (token: string) => void): Promise<string> {
     const session = this.sessions["codex-cli"];
     const age = session.lastActivity
       ? Date.now() - new Date(session.lastActivity).getTime()
@@ -183,54 +287,60 @@ export class LocalHarness {
     if (threadId) cmd.push("resume", threadId);
     cmd.push("--json", "--dangerously-bypass-approvals-and-sandbox", "-");
 
-    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const proc = spawn({
-        cmd,
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        env: { ...process.env },
-      });
-
-      this.activeKill = () => proc.kill();
-
-      proc.stdin.write(prompt);
-      proc.stdin.end();
-
-      const timer = setTimeout(() => {
-        proc.kill();
-        reject(new Error(`Codex timed out after ${TIMEOUT_MS / 60000} minutes`));
-      }, TIMEOUT_MS);
-
-      Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
-      ])
-        .then(([stdout, stderr]) => {
-          clearTimeout(timer);
-          resolve({ stdout, stderr });
-        })
-        .catch((err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
+    const proc = spawn({
+      cmd,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
     });
+    this.activeKill = () => proc.kill();
 
-    const textParts: string[] = [];
+    proc.stdin.write(prompt);
+    proc.stdin.end();
+
+    let text = "";
     let newThreadId: string | null = null;
-    for (const line of result.stdout.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const data = JSON.parse(trimmed);
-        if (data.type === "thread.started" && data.thread_id) {
-          newThreadId = data.thread_id;
+    const stderrPromise = new Response(proc.stderr).text();
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const data = JSON.parse(trimmed);
+            if (data.type === "thread.started" && data.thread_id) newThreadId = data.thread_id;
+            if (data.type === "item.completed" && data.item?.type === "agent_message" && data.item?.text) {
+              const segment = data.item.text;
+              text += segment;
+              onToken?.(segment);
+            }
+          } catch { /* ignore */ }
         }
-        if (data.type === "item.completed" && data.item?.type === "agent_message" && data.item?.text) {
-          textParts.push(data.item.text);
-        }
-      } catch { /* non-JSON line */ }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const exitCode = await proc.exited;
+    const stderrText = await stderrPromise;
+
+    if (stderrText.trim()) {
+      console.warn(`[local-harness] Codex stderr: ${stderrText.trim().substring(0, 500)}`);
+    }
+    if (exitCode !== 0 && !text) {
+      console.error(`[local-harness] Codex exited with code ${exitCode}`);
     }
 
     if (newThreadId) {
@@ -238,7 +348,7 @@ export class LocalHarness {
       this.save();
     }
 
-    return textParts.join("\n").trim() || result.stderr.trim() || "No response from Codex.";
+    return text.trim() || "No response from Codex.";
   }
 
   private exec(cmd: string[]): Promise<{ stdout: string; stderr: string }> {

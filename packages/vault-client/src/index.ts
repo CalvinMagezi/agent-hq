@@ -38,3 +38,5 @@ export { calculateCost } from "./pricing";
 export * from "./types";
 export { SearchClient } from "./search";
 export { TraceDB } from "./traceDb";
+export { BudgetGuard } from "./budgetGuard";
+export type { BudgetCheckResult } from "./budgetGuard";

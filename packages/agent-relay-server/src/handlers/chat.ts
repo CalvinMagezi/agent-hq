@@ -131,6 +131,20 @@ export class ChatHandler {
         clientType: ws.data.clientType,
       });
 
+      // Build user message — text-only or multimodal with images
+      const userMessage: any = msg.images && msg.images.length > 0
+        ? {
+            role: "user",
+            content: [
+              { type: "text", text: msg.content },
+              ...msg.images.map((img) => ({
+                type: "image_url",
+                image_url: { url: img.url, detail: "auto" as const },
+              })),
+            ],
+          }
+        : { role: "user", content: msg.content };
+
       const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -143,7 +157,7 @@ export class ChatHandler {
           model,
           messages: [
             { role: "system", content: systemPrompt },
-            { role: "user", content: msg.content },
+            userMessage,
           ],
           stream: true,
         }),

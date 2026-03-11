@@ -3,13 +3,12 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import matter from 'gray-matter'
 import { VAULT_PATH } from './vault'
-import { SearchClient } from '@repo/vault-client/search'
-
-// Lazy singleton — avoids opening DB on every import
-let _searchClient: SearchClient | null = null
-function getSearchClient(): SearchClient | null {
+// Dynamic import to avoid Vite SSR trying to resolve bun:sqlite statically
+let _searchClient: any | null = null
+async function getSearchClient(): Promise<any | null> {
   if (_searchClient) return _searchClient
   try {
+    const { SearchClient } = await import('@repo/vault-client/search')
     _searchClient = new SearchClient(VAULT_PATH)
     return _searchClient
   } catch {
@@ -144,7 +143,7 @@ export const searchNotes = createServerFn({ method: 'GET' })
     if (!query.trim()) return { results: [] }
 
     // Use FTS5 via SearchClient for fast, ranked search
-    const sc = getSearchClient()
+    const sc = await getSearchClient()
     if (sc) {
       const hits = sc.keywordSearch(query, 30)
       return {
@@ -206,7 +205,11 @@ export const searchNotes = createServerFn({ method: 'GET' })
 export const getNoteTree = createServerFn({ method: 'GET' })
   .inputValidator((root?: string) => root ?? 'Notebooks')
   .handler(async ({ data: root }): Promise<{ tree: NoteTreeNode }> => {
-    const rootDir = path.join(VAULT_PATH, root)
+    const rootDir = path.resolve(VAULT_PATH, root)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if (!rootDir.startsWith(resolvedVault + path.sep) && rootDir !== resolvedVault) {
+      return { tree: { name: root, path: root, type: 'dir', children: [] } }
+    }
     const tree: NoteTreeNode = { name: root, path: root, type: 'dir', children: [] }
 
     const buildTree = (dir: string, node: NoteTreeNode) => {

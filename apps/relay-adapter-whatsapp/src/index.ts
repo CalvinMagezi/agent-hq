@@ -133,7 +133,6 @@ const bridge = new WhatsAppBridge({
 const vaultPath = process.env.VAULT_PATH ?? path.resolve(process.cwd(), "../../.vault");
 
 const bot = new RelayWhatsAppBot({
-  guard,
   bridge,
   relayHost: process.env.RELAY_HOST,
   relayPort: process.env.RELAY_PORT
@@ -144,7 +143,6 @@ const bot = new RelayWhatsAppBot({
   voiceHandler,
   mediaHandler,
   mediaAutoProcess,
-  vaultPath,
 });
 
 bot.start().catch((err) => {

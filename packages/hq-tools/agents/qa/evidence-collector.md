@@ -7,6 +7,7 @@ baseRole: researcher
 preferredHarness: claude-code
 maxTurns: 30
 autoLoad: false
+fallbackChain: [opencode, any]
 tags: [qa, evidence, validation, screenshots, logs]
 performanceProfile:
   targetSuccessRate: 0.82

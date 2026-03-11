@@ -129,6 +129,8 @@ export interface ChatSendMessage {
   requestId?: string;
   /** Model override */
   modelOverride?: string;
+  /** Optional images to send alongside text (base64 data URIs) */
+  images?: Array<{ url: string; mediaType?: string }>;
 }
 
 export interface ChatDeltaMessage {

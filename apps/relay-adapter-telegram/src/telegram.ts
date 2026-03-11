@@ -13,6 +13,7 @@ import { Bot, type Context, InputFile, InlineKeyboard } from "grammy";
 import fs from "node:fs";
 import path from "node:path";
 import type { TelegramGuard } from "./guard.js";
+import type { PlatformBridge, PlatformCapabilities, PlatformAction, SendOpts, UnifiedMessage } from "@repo/relay-adapter-core";
 
 // ─── Message types ───────────────────────────────────────────────
 
@@ -66,7 +67,25 @@ export interface TelegramBridgeConfig {
 /** Max messages to keep in the reply-context cache. */
 const MAX_CACHE_SIZE = 100;
 
-export class TelegramBridge {
+export class TelegramBridge implements PlatformBridge {
+  // ── PlatformBridge identity ─────────────────────────────────────────
+  readonly platformId = "telegram" as const;
+
+  readonly capabilities: PlatformCapabilities = {
+    maxMessageLength: 4000,
+    supportsInlineKeyboards: true,
+    supportsReactions: true,
+    supportsStreaming: false,
+    supportsVoice: true,
+    supportsMedia: true,
+    formatType: "html",
+  };
+
+  // ── PlatformBridge message handler (UnifiedMessage) ──────────────
+  private unifiedMessageCallback: ((msg: UnifiedMessage) => void) | null = null;
+  private actionCallback: ((action: PlatformAction) => void) | null = null;
+
+  // ── Internal state ─────────────────────────────────────────────
   private bot: Bot;
   private guard: TelegramGuard;
   private token: string;
@@ -87,9 +106,14 @@ export class TelegramBridge {
     this.bot = new Bot(config.token);
   }
 
-  /** Register message callback. */
-  onMessage(callback: MessageCallback): void {
+  /** Register message callback for raw TelegramMessage (legacy — used internally). */
+  onTelegramMessage(callback: MessageCallback): void {
     this.messageCallback = callback;
+  }
+
+  /** PlatformBridge.onMessage — registers a UnifiedMessage handler. */
+  onMessage(handler: (msg: UnifiedMessage) => void): void {
+    this.unifiedMessageCallback = handler;
   }
 
   /** Register callback query handler (inline keyboard button presses). */
@@ -716,6 +740,91 @@ export class TelegramBridge {
     if (this.messageCallback) {
       this.messageCallback(msg);
     }
+    // Also fire the PlatformBridge unified handler
+    if (this.unifiedMessageCallback) {
+      const unified: UnifiedMessage = {
+        id: String(msg.id),
+        chatId: String(msg.chatId),
+        userId: String(msg.userId),
+        content: msg.content,
+        timestamp: msg.timestamp * 1000,
+        platform: "telegram",
+        isVoiceNote: msg.isVoiceNote,
+        audioBuffer: msg.audioBuffer,
+        mediaType: msg.mediaType as UnifiedMessage["mediaType"],
+        mediaBuffer: msg.mediaBuffer,
+        mediaMimeType: msg.mediaMimeType,
+        mediaFilename: msg.mediaFilename,
+        mediaSize: msg.mediaSize,
+        location: msg.location,
+        contactName: msg.contactName,
+        contactPhone: msg.contactPhone,
+        pollQuestion: msg.pollQuestion,
+        pollOptions: msg.pollOptions,
+        replyToId: msg.replyToMessageId !== undefined ? String(msg.replyToMessageId) : undefined,
+        replyContent: msg.replyContent,
+      };
+      this.unifiedMessageCallback(unified);
+    }
+  }
+
+  // ── PlatformBridge interface methods ───────────────────────────────────────
+
+  /** Register a handler for UnifiedMessage events (used by UnifiedAdapterBot). */
+  // onMessage overload for PlatformBridge compatibility
+  // (the existing method above takes MessageCallback, this stores the unified handler)
+  setUnifiedMessageHandler(handler: (msg: UnifiedMessage) => void): void {
+    this.unifiedMessageCallback = handler;
+  }
+
+  setActionHandler(handler: (action: PlatformAction) => void): void {
+    this.actionCallback = handler;
+  }
+
+  // PlatformBridge.onMessage — delegates to setUnifiedMessageHandler for unified usage
+  // Note: The existing onMessage(MessageCallback) stays for backward compat.
+  // UnifiedAdapterBot should call setUnifiedMessageHandler / setActionHandler instead.
+
+  /** PlatformBridge.sendText */
+  async sendText(text: string, opts?: SendOpts): Promise<string | null> {
+    const msgId = await this.sendMessage(text, { replyTo: opts?.replyToId ? Number(opts.replyToId) : undefined });
+    return msgId !== null ? String(msgId) : null;
+  }
+
+  /** PlatformBridge.sendTyping */
+  async sendTyping(): Promise<void> {
+    await this.sendChatAction("typing");
+  }
+
+  /** PlatformBridge.sendReaction */
+  async sendReaction(msgId: string, emoji: string): Promise<void> {
+    await this.reactToMessage(Number(msgId), emoji);
+  }
+
+  /** PlatformBridge.sendFile */
+  async sendFile(buffer: Buffer, filename: string, caption?: string): Promise<void> {
+    // Empty buffer = export signal from commands.ts; handled in bot.ts
+    if (buffer.length === 0 && filename.startsWith("__export__:")) return;
+    const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+    if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) {
+      await this.sendPhoto(buffer, caption);
+    } else if (["wav", "mp3", "ogg", "m4a", "aac", "flac"].includes(ext)) {
+      await this.sendVoiceNote(buffer);
+    } else {
+      await this.sendDocument(buffer, filename, caption);
+    }
+  }
+
+  /** PlatformBridge.onMessage (unified) — wraps setUnifiedMessageHandler */
+  // Kept to satisfy PlatformBridge interface
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  onUnified(handler: (msg: UnifiedMessage) => void): void {
+    this.setUnifiedMessageHandler(handler);
+  }
+
+  /** PlatformBridge.onAction */
+  onAction(handler: (action: PlatformAction) => void): void {
+    this.setActionHandler(handler);
   }
 }
 

@@ -17,6 +17,7 @@
 
 import * as readline from "readline";
 import * as path from "path";
+import * as fs from "fs";
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
 import { RelayClient } from "@repo/agent-relay-protocol";
@@ -157,6 +158,16 @@ async function getDynamicSystemPrompt(userMessage: string): Promise<string> {
   const recentActivity = await vault.getRecentActivityContext(10);
   if (recentActivity) {
     parts.push(recentActivity);
+  }
+
+  // Current Events
+  const briefsPath = path.join(VAULT_PATH, "_system/NEWS-BRIEFS.md");
+  if (fs.existsSync(briefsPath)) {
+    try {
+      const briefsRaw = fs.readFileSync(briefsPath, "utf-8");
+      const briefsBody = briefsRaw.replace(/---[\s\S]*?---/, "").trim().slice(0, 500);
+      if (briefsBody) parts.push("## Current Events\n" + briefsBody);
+    } catch { /* ignore */ }
   }
 
   // Semantic Search Context

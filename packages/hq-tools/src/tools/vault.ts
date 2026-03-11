@@ -256,28 +256,33 @@ export const VaultWriteNoteTool: HQTool<{ path: string; content: string; frontma
 
 // ── 7. vault_create_job ───────────────────────────────────────────
 
-export const VaultCreateJobTool: HQTool<{ instruction: string; priority?: number; type?: string }, any> = {
+export const VaultCreateJobTool: HQTool<{ instruction: string; priority?: number; type?: string; projectId?: string }, any> = {
   name: "vault_create_job",
-  description: "Create a new job in the vault queue (_jobs/pending/).",
+  description: "Create a new job in the vault queue (_jobs/pending/). Optionally link to a project via projectId for goal ancestry context in agent prompts.",
   tags: ["vault", "job", "create", "task", "orchestration"],
   requiresWriteAccess: true,
   schema: Type.Object({
     instruction: Type.String({ description: "Task instruction for the agent" }),
     priority: Type.Optional(Type.Number({ description: "Job priority (1-100). Default 50." })),
-    type: Type.Optional(Type.String({ description: "Job type (background, rpc, interactive). Default background." }))
+    type: Type.Optional(Type.String({ description: "Job type (background, rpc, interactive). Default background." })),
+    projectId: Type.Optional(Type.String({ description: "Project name from Notebooks/Projects/{projectId}/ to link for goal ancestry context." }))
   }),
   async execute(input, ctx) {
     const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const jobFilename = `${jobId}.md`;
     const fullPath = path.join(ctx.vaultPath, "_jobs", "pending", jobFilename);
 
-    const frontmatter = {
+    const frontmatter: Record<string, any> = {
       jobId,
       status: "pending",
       priority: input.priority || 50,
       type: input.type || "background",
       createdAt: new Date().toISOString()
     };
+
+    if (input.projectId) {
+      frontmatter.projectId = input.projectId;
+    }
 
     const fileContent = matter.stringify(`# Instruction\n\n${input.instruction}`, frontmatter);
     const dir = path.dirname(fullPath);

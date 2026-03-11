@@ -459,14 +459,20 @@ export class ClaudeHarness implements BaseHarness {
         text = data.result
           ? String(data.result)
           : "Hit the budget limit for this call. Use `!budget <amount>` to adjust.";
-      } else if (data.result !== undefined) {
-        text = String(data.result);
-      } else if (data.content !== undefined) {
-        text = String(data.content);
-      } else if (data.message !== undefined) {
-        text = String(data.message);
+      } else if (typeof data.result === "string" && data.result) {
+        text = data.result;
+      } else if (typeof data.content === "string" && data.content) {
+        text = data.content;
+      } else if (typeof data.message === "string" && data.message) {
+        text = data.message;
       } else {
-        text = "Claude finished but returned no text. Use `!continue` to follow up.";
+        // Summarize what happened without dumping raw JSON
+        const turns = data.num_turns ?? 0;
+        const cost = data.total_cost_usd ?? 0;
+        const duration = data.duration_ms ? Math.round(data.duration_ms / 1000) : 0;
+        text = turns > 0
+          ? `Claude completed ${turns} turn(s) of work in ${duration}s ($${cost.toFixed(4)}). Use \`!continue\` to follow up or ask for a summary.`
+          : "Claude finished but returned no text. Use `!continue` to follow up.";
       }
 
       return { text: text.trim(), sessionId, subtype };

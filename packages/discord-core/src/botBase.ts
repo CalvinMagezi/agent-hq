@@ -157,7 +157,7 @@ export abstract class DiscordBotBase {
   }
 
   /** Send one or more file attachments to a channel. */
-  async sendFile(channelId: string, files: import("discord.js").AttachmentBuilder[]): Promise<void> {
+  async sendDiscordFiles(channelId: string, files: import("discord.js").AttachmentBuilder[]): Promise<void> {
     if (!this.client || files.length === 0) return;
     try {
       const channel = await this.client.channels.fetch(channelId);
@@ -188,7 +188,7 @@ export abstract class DiscordBotBase {
   // ── Subclass hooks ─────────────────────────────────────────────────
 
   /** Handle an incoming authorized, deduplicated, mention-stripped message. */
-  abstract onMessage(msg: IncomingMessage): Promise<void>;
+  abstract onDiscordMessage(msg: IncomingMessage): Promise<void>;
 
   /** Called when the bot is ready and connected. */
   onReady?(): Promise<void>;
@@ -249,7 +249,7 @@ export abstract class DiscordBotBase {
     };
 
     try {
-      await this.onMessage(incoming);
+      await this.onDiscordMessage(incoming);
     } catch (err: any) {
       console.error(`[${this.label}] Error in onMessage:`, err.message);
     }

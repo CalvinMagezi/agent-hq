@@ -29,6 +29,7 @@ import qrcode from "qrcode-terminal";
 import fs from "node:fs";
 import path from "node:path";
 import type { WhatsAppGuard } from "./guard.js";
+import type { PlatformBridge, PlatformCapabilities, PlatformAction, SendOpts, UnifiedMessage } from "@repo/relay-adapter-core";
 
 // ── Connection resilience constants ─────────────────────────────
 
@@ -119,7 +120,24 @@ export interface WhatsAppBridgeConfig {
   getMessageForPoll?: (key: proto.IMessageKey) => Promise<proto.IMessage | undefined>;
 }
 
-export class WhatsAppBridge {
+export class WhatsAppBridge implements PlatformBridge {
+  // ── PlatformBridge identity ─────────────────────────────────────────
+  readonly platformId = "whatsapp" as const;
+
+  readonly capabilities: PlatformCapabilities = {
+    maxMessageLength: 65536, // WhatsApp has no hard limit on text
+    supportsInlineKeyboards: false,
+    supportsReactions: true,
+    supportsStreaming: false,
+    supportsVoice: true,
+    supportsMedia: true,
+    formatType: "whatsapp",
+  };
+
+  private unifiedMessageCallback: ((msg: UnifiedMessage) => void) | null = null;
+  private actionCallback: ((action: PlatformAction) => void) | null = null;
+
+  // ── Internal state ─────────────────────────────────────────────
   private sock: WASocket | null = null;
   private guard: WhatsAppGuard;
   private authDir: string;
@@ -151,8 +169,18 @@ export class WhatsAppBridge {
     this.logger = pino({ level: this.logLevel });
   }
 
-  /** Register a callback for incoming messages (only self-chat messages). */
-  onMessage(callback: MessageCallback): void {
+  /** PlatformBridge.onMessage — registers a UnifiedMessage handler. */
+  onMessage(handler: (msg: UnifiedMessage) => void): void {
+    this.unifiedMessageCallback = handler;
+  }
+
+  /** PlatformBridge.onAction */
+  onAction(handler: (action: PlatformAction) => void): void {
+    this.actionCallback = handler;
+  }
+
+  /** Register a callback for raw WhatsAppMessage events (internal use). */
+  onWhatsAppMessage(callback: MessageCallback): void {
     this.messageCallback = callback;
   }
 
@@ -429,8 +457,8 @@ export class WhatsAppBridge {
     }
   }
 
-  /** React to a message with an emoji. */
-  async sendReaction(targetMsgKey: proto.IMessageKey, emoji: string): Promise<void> {
+  /** React to a message with an emoji (Baileys IMessageKey overload). */
+  async sendWAReaction(targetMsgKey: proto.IMessageKey, emoji: string): Promise<void> {
     if (!this.sock) return;
     try {
       await this.sock.sendMessage(this.guard.ownerJid, {
@@ -441,9 +469,67 @@ export class WhatsAppBridge {
     }
   }
 
+  /** PlatformBridge.sendReaction — reacts to a message by ID string. */
+  async sendReaction(msgId: string, emoji: string, chatId?: string): Promise<void> {
+    if (!this.sock) return;
+    const targetJid = chatId || this.guard.ownerJid;
+    try {
+      await this.sock.sendMessage(targetJid, {
+        react: { text: emoji, key: { id: msgId, remoteJid: targetJid, fromMe: false } },
+      });
+    } catch (err) {
+      console.error("[whatsapp] Failed to send reaction:", err);
+    }
+  }
+
   /** Remove a reaction from a message. */
   async removeReaction(targetMsgKey: proto.IMessageKey): Promise<void> {
-    await this.sendReaction(targetMsgKey, "");
+    await this.sendWAReaction(targetMsgKey, "");
+  }
+
+  /** PlatformBridge.sendText */
+  async sendText(text: string, opts?: SendOpts): Promise<string | null> {
+    const targetJid = opts?.chatId || this.guard.ownerJid;
+    // We reuse sendMessage but need to handle custom JID if provided in opts
+    if (!this.sock) return null;
+    try {
+      const result = await this.sock.sendMessage(targetJid, { text });
+      return this.trackSentMessage(result);
+    } catch (err) {
+      console.error("[whatsapp] sendText failed:", err);
+      return null;
+    }
+  }
+
+  /** PlatformBridge.sendTyping */
+  async sendTyping(chatId?: string): Promise<void> {
+    if (!this.sock) return;
+    const targetJid = chatId || this.guard.ownerJid;
+    try {
+      await this.sock.sendPresenceUpdate("composing", targetJid);
+    } catch { /* non-critical */ }
+  }
+
+  /** PlatformBridge.sendFile */
+  async sendFile(
+    buffer: Buffer,
+    filename: string,
+    caption?: string,
+    chatId?: string
+  ): Promise<void> {
+    const targetJid = chatId || this.guard.ownerJid;
+    const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+    if (["jpg", "jpeg", "png", "webp", "gif"].includes(ext)) {
+      // Baileys sendImage
+      await this.sock?.sendMessage(targetJid, { image: buffer, caption });
+    } else {
+      await this.sock?.sendMessage(targetJid, {
+        document: buffer,
+        fileName: filename,
+        mimetype: "application/octet-stream",
+        caption,
+      });
+    }
   }
 
   /** Edit a previously sent message. */
@@ -507,15 +593,7 @@ export class WhatsAppBridge {
     }
   }
 
-  /** Send typing indicator (composing). */
-  async sendTyping(): Promise<void> {
-    if (!this.sock) return;
-    try {
-      await this.sock.sendPresenceUpdate("composing", this.guard.ownerJid);
-    } catch {
-      // Non-critical
-    }
-  }
+
 
   /** Send recording indicator (recording audio). */
   async sendRecording(): Promise<void> {

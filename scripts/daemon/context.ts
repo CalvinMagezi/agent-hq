@@ -12,6 +12,11 @@ import type { SearchClient } from "@repo/vault-client/search";
 export interface MemorySystem {
   forgetter: { runCycle: () => { decayed: number; pruned: number; statsAfter: { total: number } } };
   consolidator: { runCycle: () => Promise<any>; refreshMemoryFile: () => Promise<void> };
+  /** Memory ingester — converts raw text into structured memory entries via Ollama */
+  ingester: {
+    ingest(opts: { text: string; source: string; harness?: string }): Promise<number | null>;
+    ingestBatch(items: Array<{ text: string; source: string; harness?: string }>): Promise<number[]>;
+  };
 }
 
 export interface DaemonContext {

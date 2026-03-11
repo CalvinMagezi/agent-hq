@@ -7,6 +7,7 @@ baseRole: researcher
 preferredHarness: gemini-cli
 maxTurns: 40
 autoLoad: false
+fallbackChain: [claude-code, opencode]
 tags: [research, market, tam-sam-som, competitive, primary-sources]
 performanceProfile:
   targetSuccessRate: 0.85

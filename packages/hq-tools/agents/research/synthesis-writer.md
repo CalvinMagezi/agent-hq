@@ -7,6 +7,7 @@ baseRole: researcher
 preferredHarness: claude-code
 maxTurns: 50
 autoLoad: false
+fallbackChain: [gemini-cli, opencode]
 tags: [research, synthesis, writing, compression, distillation]
 performanceProfile:
   targetSuccessRate: 0.88

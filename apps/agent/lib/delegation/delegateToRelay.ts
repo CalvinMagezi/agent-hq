@@ -7,10 +7,14 @@
 
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
+import * as fs from "fs";
+import * as path from "path";
 import type { AgentRole } from "../agentRoles.js";
 import { getRoleConfig, detectRole } from "../agentRoles.js";
 import { getModeConfig } from "../executionModes.js";
 import { getFallbackChain, serializeFallbackChain } from "../modelFallback.js";
+import { resolveCapability, needsFallback } from "@repo/hq-tools";
+import { BudgetGuard } from "@repo/vault-client";
 import {
     _vault, _currentJobId, _traceDb, _currentTraceId,
     _currentJobSpanId, _currentExecutionMode,
@@ -112,6 +116,22 @@ Use securityConstraints per task to restrict what the relay can do (e.g., noGit:
         }
 
         try {
+            // ── Compute per-task budget ceiling from remaining agent budget ──
+            let budgetCeilingUsd: number | undefined;
+            if (_vault) {
+                try {
+                    const budgetGuard = new BudgetGuard(path.resolve(_vault.resolve(".")));
+                    const agentName = args.tasks[0]?.agentName ?? "default";
+                    const check = await budgetGuard.checkBudget(agentName);
+                    if (check.allowed && check.remaining < Infinity) {
+                        // Split remaining budget evenly across tasks
+                        budgetCeilingUsd = Math.max(0.01, check.remaining / args.tasks.length);
+                    }
+                } catch {
+                    // Non-critical — skip budget ceiling
+                }
+            }
+
             const tasksWithTrace = args.tasks.map((t) => {
                 const role: AgentRole = (t.role as AgentRole | undefined) ?? detectRole(t.instruction);
                 const roleConfig = getRoleConfig(role);
@@ -120,6 +140,42 @@ Use securityConstraints per task to restrict what the relay can do (e.g., noGit:
                 if (effectiveHarness === "any" && roleConfig?.preferredHarness && roleConfig.preferredHarness !== "any") {
                     effectiveHarness = roleConfig.preferredHarness;
                 }
+
+                // ── Capability Resolution Chain ─────────────────────────────
+                // When a named agent is provided and harness is "any", walk the
+                // agent's fallbackChain to find the best available relay.
+                // "Available" is approximated by querying the vault relay health.
+                if (t.agentName && effectiveHarness === "any") {
+                    try {
+                        // Get relay health to determine available harnesses
+                        const relayHealthDir = _vault?.resolve("_delegation/relay-health");
+                        if (relayHealthDir) {
+                            const availableHarnesses: string[] = [];
+                            if (fs.existsSync(relayHealthDir)) {
+                                const files = fs.readdirSync(relayHealthDir).filter((f: string) => f.endsWith(".md"));
+                                for (const f of files) {
+                                    const content = fs.readFileSync(path.join(relayHealthDir, f), "utf-8");
+                                    if (content.includes("status: online") || content.includes("status: healthy")) {
+                                        // Extract harness type from filename (e.g. claude-code-xyz.md)
+                                        if (f.startsWith("claude-code")) availableHarnesses.push("claude-code");
+                                        else if (f.startsWith("opencode")) availableHarnesses.push("opencode");
+                                        else if (f.startsWith("gemini-cli")) availableHarnesses.push("gemini-cli");
+                                    }
+                                }
+                            }
+                            if (availableHarnesses.length > 0 && needsFallback(t.agentName, availableHarnesses)) {
+                                const resolution = resolveCapability(t.agentName, availableHarnesses);
+                                if (resolution) {
+                                    console.warn(`⚡ Capability fallback: "${t.agentName}" preferred ${resolution.preferredHarness} → routing to ${resolution.harness} (depth: ${resolution.fallbackDepth})`);
+                                    effectiveHarness = resolution.harness;
+                                }
+                            }
+                        }
+                    } catch {
+                        // Non-critical — fall through to original harness resolution
+                    }
+                }
+
 
                 const effectiveModel = t.modelOverride
                     ?? roleConfig?.modelHint
@@ -158,6 +214,7 @@ Use securityConstraints per task to restrict what the relay can do (e.g., noGit:
                             fallbackModels: serializeFallbackChain(fallbackChain),
                         }),
                         executionMode: _currentExecutionMode,
+                        ...(budgetCeilingUsd !== undefined && { budgetCeilingUsd }),
                     },
                 };
             });

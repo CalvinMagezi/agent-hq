@@ -33,6 +33,7 @@ export interface SessionReactions {
   onStatusUpdate: (session: OrchestratedSession, message: string) => void;
   onResult: (session: OrchestratedSession, result: string) => void;
   onFailed: (session: OrchestratedSession, error: string) => void;
+  onToken?: (session: OrchestratedSession, token: string) => void;
 }
 
 const PROGRESS_INTERVAL_MS = 5 * 60 * 1000;
@@ -142,8 +143,12 @@ export class SessionOrchestrator {
     reactions: SessionReactions,
     label: string,
   ): Promise<string> {
+    const onToken = (token: string) => {
+      reactions.onToken?.(session, token);
+    };
+
     try {
-      return await this.localHarness.run(session.harness, session.prompt);
+      return await this.localHarness.run(session.harness, session.prompt, onToken);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
 
@@ -158,7 +163,7 @@ export class SessionOrchestrator {
         `_${label} encountered an error. Retrying (attempt ${session.retries + 1})..._`,
       );
 
-      return await this.localHarness.run(session.harness, session.prompt);
+      return await this.localHarness.run(session.harness, session.prompt, onToken);
     }
   }
 }

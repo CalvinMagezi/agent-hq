@@ -7,6 +7,7 @@ baseRole: researcher
 preferredHarness: claude-code
 maxTurns: 40
 autoLoad: false
+fallbackChain: [gemini-cli, opencode]
 tags: [content, documentation, readability, code-examples]
 performanceProfile:
   targetSuccessRate: 0.88

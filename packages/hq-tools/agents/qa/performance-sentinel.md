@@ -8,6 +8,7 @@ preferredHarness: opencode
 maxTurns: 30
 autoLoad: false
 defaultsTo: NEEDS_WORK
+fallbackChain: [claude-code, any]
 tags: [qa, performance, benchmarks, p95, regressions]
 performanceProfile:
   targetSuccessRate: 0.80

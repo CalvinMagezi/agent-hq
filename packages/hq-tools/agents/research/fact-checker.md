@@ -8,6 +8,7 @@ preferredHarness: gemini-cli
 maxTurns: 30
 autoLoad: false
 defaultsTo: NEEDS_WORK
+fallbackChain: [claude-code, opencode]
 tags: [research, fact-checking, cross-reference, primary-sources, confidence]
 performanceProfile:
   targetSuccessRate: 0.85

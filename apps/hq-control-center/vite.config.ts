@@ -10,6 +10,10 @@ export default defineConfig({
     port: 4747,
     host: '0.0.0.0',
   },
+  ssr: {
+    // bun: protocol modules can only be resolved by Bun's runtime, not Node/esbuild
+    external: ['bun:sqlite', 'bun:ffi', '@repo/vault-client', '@repo/vault-sync'],
+  },
   plugins: [
     tsConfigPaths(),
     tanstackStart(),

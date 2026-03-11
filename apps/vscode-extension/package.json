@@ -1,0 +1,197 @@
+{
+    "name": "agent-hq",
+    "displayName": "Agent-HQ",
+    "description": "Vault-Aware IDE integration for Agent-HQ Harnesses",
+    "version": "0.4.0",
+    "publisher": "agent-hq",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/CalvinMagezi/agent-hq.git"
+    },
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "main": "./out/extension.js",
+    "activationEvents": [],
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "agentHQ",
+                    "title": "Agent-HQ",
+                    "icon": "resources/icon.svg"
+                }
+            ]
+        },
+        "views": {
+            "agentHQ": [
+                {
+                    "id": "agentHQ.harnessView",
+                    "name": "Harnesses",
+                    "type": "tree"
+                },
+                {
+                    "id": "agentHQ.jobQueueView",
+                    "name": "Vault Queue",
+                    "type": "tree"
+                }
+            ]
+        },
+        "commands": [
+            {
+                "command": "agentHQ.openChat",
+                "title": "Agent-HQ: Open Chat"
+            },
+            {
+                "command": "agentHQ.switchHarness",
+                "title": "Agent-HQ: Switch Harness"
+            },
+            {
+                "command": "agentHQ.newSession",
+                "title": "Agent-HQ: New Session"
+            },
+            {
+                "command": "agentHQ.openHarness",
+                "title": "Open",
+                "icon": "$(terminal)"
+            },
+            {
+                "command": "agentHQ.createJob",
+                "title": "Agent-HQ: Create Job from Selection",
+                "icon": "$(add)"
+            },
+            {
+                "command": "agentHQ.createJobFile",
+                "title": "Agent-HQ: Create Job from File",
+                "icon": "$(file-add)"
+            },
+            {
+                "command": "agentHQ.refreshQueue",
+                "title": "Refresh Queue",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "agentHQ.approveRequest",
+                "title": "Approve",
+                "icon": "$(check)"
+            },
+            {
+                "command": "agentHQ.denyRequest",
+                "title": "Deny",
+                "icon": "$(x)"
+            },
+            {
+                "command": "agentHQ.openJobFile",
+                "title": "Open File",
+                "icon": "$(go-to-file)"
+            }
+        ],
+        "menus": {
+            "editor/context": [
+                {
+                    "command": "agentHQ.createJob",
+                    "when": "editorHasSelection",
+                    "group": "agentHQ@1"
+                },
+                {
+                    "command": "agentHQ.createJobFile",
+                    "group": "agentHQ@2"
+                }
+            ],
+            "view/title": [
+                {
+                    "command": "agentHQ.refreshQueue",
+                    "when": "view == agentHQ.jobQueueView",
+                    "group": "navigation"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "command": "agentHQ.openHarness",
+                    "when": "view == agentHQ.harnessView && viewItem == harnessItem",
+                    "group": "inline"
+                },
+                {
+                    "command": "agentHQ.approveRequest",
+                    "when": "view == agentHQ.jobQueueView && viewItem == approvalItem",
+                    "group": "inline@1"
+                },
+                {
+                    "command": "agentHQ.denyRequest",
+                    "when": "view == agentHQ.jobQueueView && viewItem == approvalItem",
+                    "group": "inline@2"
+                }
+            ]
+        },
+        "keybindings": [
+            {
+                "command": "agentHQ.openChat",
+                "key": "ctrl+shift+a",
+                "mac": "cmd+shift+a"
+            },
+            {
+                "command": "agentHQ.switchHarness",
+                "key": "ctrl+shift+h",
+                "mac": "cmd+shift+h"
+            }
+        ],
+        "configuration": {
+            "title": "Agent-HQ",
+            "properties": {
+                "agentHQ.defaultHarness": {
+                    "type": "string",
+                    "default": "hq",
+                    "enum": [
+                        "hq",
+                        "claude",
+                        "opencode",
+                        "codex",
+                        "gemini"
+                    ],
+                    "description": "The default harness to use when opening chat."
+                },
+                "agentHQ.hqPath": {
+                    "type": "string",
+                    "default": "hq",
+                    "description": "Path to the hq CLI"
+                },
+                "agentHQ.vaultPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to the Agent-HQ vault directory. Auto-detected from workspace .vault/ or VAULT_PATH env if empty."
+                },
+                "agentHQ.harnesses": {
+                    "type": "array",
+                    "default": [],
+                    "description": "Custom harness definitions that extend or override detected harnesses.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "label": { "type": "string" },
+                            "cli": { "type": "string" },
+                            "description": { "type": "string" },
+                            "icon": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "package": "vsce package --no-dependencies --out agent-hq-0.4.0.vsix",
+        "publish": "vsce publish"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.85.0",
+        "@types/node": "20.x",
+        "typescript": "^5.3.3",
+        "@vscode/vsce": "^2.22.0"
+    }
+}

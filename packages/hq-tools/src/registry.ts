@@ -18,6 +18,8 @@ export interface HQContext {
   googleWorkspaceCredentialsFile?: string;
   /** Caller's security profile — gates write-access tools */
   securityProfile?: "minimal" | "standard" | "guarded" | "admin";
+  /** Performant vault search client (FTS5 + semantic) */
+  searchClient?: any;
 }
 
 export interface HQToolSummary {

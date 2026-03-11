@@ -1,8 +1,8 @@
 /**
  * Code-Graph native AgentTool wrappers.
  *
- * These expose the same logic as the vault-mcp code-graph tools but as
- * native AgentTools so the HQ Agent can call them directly without MCP.
+ * These expose graph analysis logic from @repo/vault-client/graph as
+ * native AgentTools so the HQ Agent can call them directly.
  */
 
 import { Type } from "@sinclair/typebox";

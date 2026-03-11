@@ -259,10 +259,12 @@ function getTaskTypeGuidance(taskType: TaskType): { steps: string; dod: string }
 export class PromptBuilder {
     private vault: VaultClient;
     private vaultPath: string;
+    private searchClient: any; // Ideally SearchClient type from @repo/vault-client/search
 
-    constructor(vaultPath: string) {
+    constructor(vaultPath: string, searchClient?: any) {
         this.vaultPath = vaultPath;
         this.vault = new VaultClient(vaultPath);
+        this.searchClient = searchClient;
     }
 
     async build(request: PromptBuildRequest): Promise<BuiltPrompt> {
@@ -289,7 +291,7 @@ export class PromptBuilder {
         // Gather context in parallel
         const [systemContext, searchResults, projectContext] = await Promise.all([
             this.vault.getAgentContext().catch(() => null),
-            skipSearch ? Promise.resolve([] as SearchResult[]) : this.vault.searchNotes(request.rawInstruction, 3).catch(() => [] as SearchResult[]),
+            skipSearch ? Promise.resolve([] as SearchResult[]) : (this.searchClient ? this.searchClient.keywordSearch(request.rawInstruction, 5) : this.vault.searchNotes(request.rawInstruction, 3)).catch(() => [] as SearchResult[]),
             projectName ? this.getProjectContext(projectName) : Promise.resolve(null),
         ]);
 
@@ -314,18 +316,18 @@ export class PromptBuilder {
         let searchSection = "";
         if (searchResults.length > 0) {
             searchSection = searchResults
-                .map(r => `- **${r.title}** (${r.notebook}): ${truncate(r.snippet, 200)}`)
+                .map((r: any) => `- **${r.title}** (${r.notebook}): ${truncate(r.snippet, 200)}`)
                 .join("\n");
-            contextSources.push(...searchResults.map(r => r.title));
+            contextSources.push(...searchResults.map((r: any) => r.title));
 
             // Log query→context pairs for SBLU-4 (Weaver) training data
             try {
-                const avgRelevance = searchResults.reduce((s, r) => s + (r.relevance ?? 0), 0) / searchResults.length;
+                const avgRelevance = searchResults.reduce((s: number, r: any) => s + (r.relevance ?? 0), 0) / searchResults.length;
                 const weaverLogPath = path.join(this.vaultPath, "_embeddings", "weaver-training.jsonl");
                 const entry = JSON.stringify({
                     jobInstruction: request.rawInstruction.slice(0, 400),
                     queryUsed: request.rawInstruction.slice(0, 200),
-                    contextSelected: searchResults.map(r => r.title),
+                    contextSelected: searchResults.map((r: any) => r.title),
                     relevanceScore: Math.min(1, avgRelevance / 5),
                     ts: new Date().toISOString(),
                 });
@@ -435,8 +437,8 @@ export class PromptBuilder {
 let _builder: PromptBuilder | null = null;
 
 /** Initialize prompt builder with vault path (call once at startup) */
-export function initPromptBuilder(vaultPath: string) {
-    _builder = new PromptBuilder(vaultPath);
+export function initPromptBuilder(vaultPath: string, searchClient?: any) {
+    _builder = new PromptBuilder(vaultPath, searchClient);
 }
 
 // ── BuildPromptTool ──────────────────────────────────────────────────

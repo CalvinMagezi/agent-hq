@@ -42,6 +42,15 @@ export {
   DrawItAnalyzeTool,
   CreateDiagramTool,
 } from "./tools/drawit.js";
+export {
+  VaultSearchTool,
+  VaultReadTool,
+  VaultContextTool,
+  VaultListTool,
+  VaultBatchReadTool,
+  VaultWriteNoteTool,
+  VaultCreateJobTool
+} from "./tools/vault.js";
 
 import { ToolRegistry, type HQContext } from "./registry.js";
 import { ImageGenTool } from "./tools/imageGen.js";
@@ -60,6 +69,21 @@ import {
   GoogleWorkspaceWriteTool
 } from "./tools/googleWorkspace.js";
 import { SpeakTool } from "./tools/tts.js";
+import {
+  ListAgentsTool,
+  LoadAgentTool,
+  ListTeamsTool,
+  RunTeamWorkflowTool,
+} from "./tools/agents.js";
+import {
+  VaultSearchTool,
+  VaultReadTool,
+  VaultContextTool,
+  VaultListTool,
+  VaultBatchReadTool,
+  VaultWriteNoteTool,
+  VaultCreateJobTool
+} from "./tools/vault.js";
 
 export {
   GoogleWorkspaceSchemaTool,
@@ -67,6 +91,33 @@ export {
   GoogleWorkspaceWriteTool
 };
 export { SpeakTool } from "./tools/tts.js";
+export {
+  ListAgentsTool,
+  LoadAgentTool,
+  ListTeamsTool,
+  RunTeamWorkflowTool,
+} from "./tools/agents.js";
+export {
+  parseAgentFile,
+  listAgentNames,
+  getAllAgents,
+  buildAgentPromptSection,
+  AGENTS_DIR,
+} from "./agentLoader.js";
+export {
+  parseTeamFile,
+  getBuiltInTeam,
+  getCustomTeam,
+  getTeam,
+  listBuiltInTeams,
+  listCustomTeams,
+  getAllTeams,
+  TEAMS_DIR,
+  VAULT_TEAMS_DIR,
+} from "./teamLoader.js";
+export * from "./types/agentDefinition.js";
+export * from "./types/teamManifest.js";
+export * from "./types/teamPerformance.js";
 
 /**
  * Create the default registry with all built-in HQ tools pre-registered.
@@ -93,5 +144,18 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(GoogleWorkspaceWriteTool);
   // Text-to-speech (Kokoro-82M MLX primary, F5-TTS clone, macOS say fallback)
   registry.register(SpeakTool);
+  // Agent library and team workflow tools
+  registry.register(ListAgentsTool);
+  registry.register(LoadAgentTool);
+  registry.register(ListTeamsTool);
+  registry.register(RunTeamWorkflowTool);
+  // Vault storage and search tools
+  registry.register(VaultSearchTool);
+  registry.register(VaultReadTool);
+  registry.register(VaultContextTool);
+  registry.register(VaultListTool);
+  registry.register(VaultBatchReadTool);
+  registry.register(VaultWriteNoteTool);
+  registry.register(VaultCreateJobTool);
   return registry;
 }

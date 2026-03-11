@@ -7,8 +7,16 @@ import type { ChannelSettings } from "../types.js";
 const SETTINGS_FILE = "channel-settings.json";
 const USAGE_FILE = "usage.json";
 const PLUGINS_FILE = "gemini-plugins.json";
-const DEFAULT_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes (Gemini preview models retry with backoff)
-const MAX_CONCURRENT_CALLS = 3;
+const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes (accounts for 90s internal rate-limit retry headroom)
+const MAX_CONCURRENT_CALLS = 8; // OAuth supports 60 RPM — up from 3
+
+// Default model — gemini-3-flash-preview is OAuth-free (1000 RPD) via the released CLI
+const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+
+const GEMINI_MODEL_TIERS = {
+    primary: "gemini-3-flash-preview",   // OAuth free, 60 RPM, 1000 RPD
+    heavy: "gemini-3.1-pro-preview",     // requires paid API key
+} as const;
 
 export interface GeminiMcpServer {
   command?: string;          // stdio: executable (e.g. "npx", "uvx")
@@ -161,7 +169,7 @@ export class GeminiHarness implements BaseHarness {
 
     const args: string[] = [
       this.config.geminiPath,
-      "--output-format", "json",
+      "--output-format", "stream-json",  // NDJSON events: MESSAGE, RESULT, ERROR
       "--yolo", // auto-approve tool actions in non-interactive mode
     ];
 
@@ -191,47 +199,83 @@ export class GeminiHarness implements BaseHarness {
     );
 
     try {
+      // Strip GEMINI_API_KEY from subprocess env so CLI uses OAuth credentials
+      // instead of API-key auth. API key = 100 RPD; OAuth = 1000 RPD.
+      const { GEMINI_API_KEY: _stripApiKey, ...cleanEnv } = process.env;
       const proc = spawn(args, {
         stdout: "pipe",
         stderr: "pipe",
         cwd: this.config.projectDir || undefined,
+        env: cleanEnv, // OAuth takes over; API key cannot shadow it
       });
       this.activeProcs.set(channelId, proc);
 
       const outputPromise = (async () => {
-        // Drain stderr concurrently to avoid pipe deadlock while streaming stdout
-        const stderrPromise = new Response(proc.stderr).text();
-        const exitedPromise = proc.exited;
+          // Drain stderr concurrently to avoid pipe deadlock while streaming stdout
+          const stderrPromise = new Response(proc.stderr).text();
+          const exitedPromise = proc.exited;
 
-        // Stream stdout with optional chunk callback
-        let output = "";
-        const reader = proc.stdout!.getReader();
-        const decoder = new TextDecoder();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value, { stream: true });
-          output += chunk;
-          onChunk?.(chunk);
-        }
-        const tail = decoder.decode();
-        if (tail) { output += tail; onChunk?.(tail); }
+          // Stream stdout: parse NDJSON events from stream-json output
+          let accumulatedText = "";
+          let rawOutput = "";
+          const reader = proc.stdout!.getReader();
+          const decoder = new TextDecoder();
+          let lineBuffer = "";
 
-        const [stderr, exitCode] = await Promise.all([stderrPromise, exitedPromise]);
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value, { stream: true });
+            rawOutput += chunk;
+            lineBuffer += chunk;
 
-        // Always try parsing stdout first — Gemini CLI often exits with code 1
-        // due to non-fatal MCP discovery errors while still producing valid output
-        const parsed = this.parseOutput(output, settings.model);
+            // Process complete lines — each is a JSON event
+            const lines = lineBuffer.split("\n");
+            lineBuffer = lines.pop() ?? ""; // keep incomplete last line
 
-        if (exitCode !== 0) {
-          console.warn(`[Gemini CLI] exit code ${exitCode} (non-fatal MCP/network errors likely)`);
-          if (parsed && !parsed.startsWith("Gemini CLI finished but")) return parsed;
-          console.error("[Gemini CLI] stderr:", stderr.substring(0, 500));
-          return `Error: Gemini CLI exited with code ${exitCode}. ${stderr.substring(0, 200)}`;
-        }
+            for (const line of lines) {
+              const t = line.trim();
+              if (!t) continue;
+              try {
+                const event = JSON.parse(t);
+                // MESSAGE events carry incremental response text
+                if (event.type === "MESSAGE" && event.content) {
+                  accumulatedText += event.content;
+                  onChunk?.(event.content);
+                }
+              } catch {
+                // Non-JSON line (e.g. startup noise) — skip
+              }
+            }
+          }
 
-        return parsed;
-      })();
+          // Process any remaining buffered line
+          if (lineBuffer.trim()) {
+            rawOutput += lineBuffer;
+            try {
+              const event = JSON.parse(lineBuffer.trim());
+              if (event.type === "MESSAGE" && event.content) {
+                accumulatedText += event.content;
+                onChunk?.(event.content);
+              }
+            } catch { /* ignore */ }
+          }
+
+          const [stderr, exitCode] = await Promise.all([stderrPromise, exitedPromise]);
+
+          // Parse NDJSON for RESULT/ERROR events and token stats
+          const parsed = this.parseStreamOutput(rawOutput, accumulatedText, settings.model);
+
+          if (exitCode !== 0) {
+            console.warn(`[Gemini CLI] exit code ${exitCode} (non-fatal MCP/network errors likely)`);
+            if (parsed && !parsed.startsWith("Gemini CLI finished but") && !parsed.startsWith("Gemini error:")) return parsed;
+            console.error("[Gemini CLI] stderr:", stderr.substring(0, 500));
+            return `Error: Gemini CLI exited with code ${exitCode}. ${stderr.substring(0, 200)}`;
+          }
+
+          return parsed;
+        })();
+
 
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => {
@@ -252,7 +296,7 @@ export class GeminiHarness implements BaseHarness {
         return "Request cancelled by user.";
       }
       if (error.message?.includes("timed out")) {
-        return "Gemini CLI took too long to respond (5 min timeout). Try a shorter or simpler request.";
+        return "Gemini CLI took too long to respond (5 min timeout). Try a shorter or simpler request."; // timeout is 5 min
       }
       console.error("[Gemini CLI] Error:", error.message);
       return "Error: Could not run Gemini CLI. Is 'gemini' installed and authenticated?";
@@ -260,7 +304,83 @@ export class GeminiHarness implements BaseHarness {
   }
 
   /**
-   * Parse JSON output from Gemini CLI.
+   * Parse NDJSON stream-json output from Gemini CLI.
+   *
+   * Event types:
+   *   INIT       — session start metadata
+   *   MESSAGE    — incremental response text (already streamed via onChunk)
+   *   TOOL_USE   — tool invocation
+   *   TOOL_RESULT — tool result
+   *   ERROR      — error (check code for TerminalQuotaError=429 vs transient)
+   *   RESULT     — final event with stats (tokens, tool calls, file diffs)
+   *
+   * Falls back to plain text if NDJSON parsing fails entirely.
+   */
+  private parseStreamOutput(raw: string, accumulatedText: string, model?: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      return accumulatedText.trim() || "Gemini CLI finished but returned no text. Try rephrasing your request.";
+    }
+
+    let resultEvent: any | null = null;
+    let errorEvent: any | null = null;
+
+    for (const line of trimmed.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try {
+        const event = JSON.parse(t);
+        if (event.type === "RESULT") resultEvent = event;
+        if (event.type === "ERROR") errorEvent = event;
+      } catch { /* non-JSON line — skip */ }
+    }
+
+    // Handle explicit ERROR events
+    if (errorEvent) {
+      const code = errorEvent.error?.code ?? errorEvent.code;
+      const msg = errorEvent.error?.message ?? errorEvent.message ?? JSON.stringify(errorEvent.error ?? errorEvent);
+      if (code === 429) {
+        // TerminalQuotaError — daily limit exhausted
+        console.error("[Gemini CLI] TerminalQuotaError (daily quota exhausted):", msg);
+        return "Daily Gemini quota exhausted. OpenRouter fallback will activate on next retry.";
+      }
+      console.error("[Gemini CLI] API error event:", msg.substring(0, 200));
+      return `Gemini error: ${msg}`;
+    }
+
+    // Extract token stats from RESULT event
+    if (resultEvent?.stats?.models) {
+      let totalTokens = 0;
+      for (const [modelName, info] of Object.entries(resultEvent.stats.models as Record<string, any>)) {
+        const tokens = info?.tokens?.total ?? 0;
+        totalTokens += tokens;
+        const key = modelName || model || "gemini";
+        const existing = this.usage.byModel[key] ?? { calls: 0, costUsd: 0, turns: 0 };
+        existing.calls += 1;
+        existing.turns += 1;
+        this.usage.byModel[key] = existing;
+      }
+      this.usage.totalTurns += 1;
+      this.usage.totalCalls += 1;
+      this.usage.lastCallAt = new Date().toISOString();
+      this.persistUsage().catch(() => {});
+      if (totalTokens > 0) {
+        console.log(`[Gemini CLI] Tokens: ${totalTokens}`);
+      }
+    }
+
+    // Return accumulated streaming text (already delivered via onChunk)
+    if (accumulatedText.trim()) return accumulatedText.trim();
+
+    // Fallback: if no MESSAGE events streamed, try RESULT.response
+    if (resultEvent?.response) return String(resultEvent.response).trim();
+
+    // Final fallback: plain text
+    return trimmed || "Gemini CLI finished but returned no text. Try rephrasing your request.";
+  }
+
+  /**
+   * Legacy JSON output parser (kept as fallback for older CLI versions).
    *
    * Official JSON schema:
    *   {
@@ -272,9 +392,6 @@ export class GeminiHarness implements BaseHarness {
    *     },
    *     "error": { ... }  // only on error
    *   }
-   *
-   * Falls back to plain text if JSON parsing fails (--output-format json may not be
-   * supported on older Gemini CLI versions).
    */
   private parseOutput(raw: string, model?: string): string {
     const trimmed = raw.trim();

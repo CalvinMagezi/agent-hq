@@ -23,6 +23,7 @@
  */
 
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { SBLURegistry } from "./sbluRegistry.js";
 import type { SBLUEntry } from "./sbluRegistry.js";
@@ -114,7 +115,7 @@ function checkReadiness(entry: SBLUEntry): ReadinessResult {
 }
 
 // Dedicated venv for SBLU training tools (mlx-lm, llama.cpp wrappers)
-const SBLU_VENV = process.env.SBLU_VENV ?? "/Users/calvinmagezi/.sblu-env";
+const SBLU_VENV = process.env.SBLU_VENV ?? path.join(os.homedir(), ".sblu-env");
 const SBLU_PYTHON = `${SBLU_VENV}/bin/python3`;
 
 function checkMLXAvailable(): boolean {

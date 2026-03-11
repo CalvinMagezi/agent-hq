@@ -15,11 +15,8 @@ import { fileURLToPath } from "url";
 import { Type } from "@sinclair/typebox";
 import type { HQTool, HQContext } from "../registry.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 // Skills live alongside this package so any consumer can access them
-export const SKILLS_DIR = path.resolve(__dirname, "../../skills");
+export const SKILLS_DIR = path.resolve(process.cwd(), "packages/hq-tools/skills");
 
 // Skills auto-injected into agent context without requiring explicit load_skill
 export const AUTO_LOAD_SKILLS = ["obsidian", "code-mapper", "google-workspace", "voice"];

@@ -15,11 +15,13 @@ import type { ServerWebSocket } from 'bun'
 import { spawn } from 'bun'
 import { VaultSync } from '@repo/vault-sync'
 import { VaultClient, SearchClient, TraceDB } from '@repo/vault-client'
+import { calculateCost } from '@repo/vault-client/pricing'
 import webpush from 'web-push'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 
-const VAULT_PATH = process.env.VAULT_PATH ?? '/Users/calvinmagezi/Documents/GitHub/agent-hq/.vault'
+const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(import.meta.dir, '../../.vault')
 const WS_PORT = parseInt(process.env.WS_PORT ?? '4748')
 const SUBS_FILE = path.join(VAULT_PATH, '_system/push-subscriptions.json')
 
@@ -33,7 +35,7 @@ const traceDb = new TraceDB(VAULT_PATH)
 
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY ?? ''
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY ?? ''
-const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? 'mailto:calvin@kolaborate.io'
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT ?? 'mailto:your-email@example.com'
 
 if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY)
@@ -69,6 +71,14 @@ interface ThreadMessage {
   content: string
   harness?: string
   timestamp: string
+  stats?: {
+    model: string
+    latencyMs: number
+    inputTokens: number
+    outputTokens: number
+    cost: number
+    contextUsed?: number
+  }
 }
 interface Thread {
   threadId: string
@@ -77,6 +87,9 @@ interface Thread {
   messages: ThreadMessage[]
   createdAt: string
   updatedAt: string
+  totalInputTokens?: number
+  totalOutputTokens?: number
+  totalCost?: number
 }
 
 function loadThread(threadId: string): Thread | null {
@@ -231,7 +244,7 @@ async function runClaude(
 
   const env = { ...process.env }
   // Ensure HOME is set (required for claude/gemini config discovery)
-  if (!env.HOME) env.HOME = '/Users/calvinmagezi'
+  if (!env.HOME) env.HOME = os.homedir()
 
   console.log(`[hq-ws] [claude] spawning: ${cmd.slice(0, 3).join(' ')} ... (thread: ${threadId}, resume: ${resumeId ?? 'none'})`)
   const proc = spawn({ cmd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env })
@@ -356,7 +369,7 @@ async function runCodex(
   cmd.push('--json', '--dangerously-bypass-approvals-and-sandbox', '-')
 
   const env = { ...process.env }
-  if (!env.HOME) env.HOME = '/Users/calvinmagezi'
+  if (!env.HOME) env.HOME = os.homedir()
 
   console.log(`[hq-ws] [codex] spawning: ${cmd.slice(0, 4).join(' ')} ... (thread: ${threadId}, resume: ${resumeId ?? 'none'}, prompt: ${prompt.length} chars)`)
 
@@ -445,7 +458,7 @@ async function runStateless(
   }
 
   const env = { ...process.env }
-  if (!env.HOME) env.HOME = '/Users/calvinmagezi'
+  if (!env.HOME) env.HOME = os.homedir()
 
   console.log(`[hq-ws] [${harness}] spawning: ${cmd[0]} ${cmd[1] ?? ''} (thread: ${threadId})`)
   const proc = spawn({ cmd, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe', env })
@@ -604,73 +617,189 @@ async function handleChatSend(ws: ServerWebSocket<unknown>, payload: {
   }
 
   let response = ''
+  const startedAt = Date.now()
+  let inputTokens = 0
+  let outputTokens = 0
+  let fallbackHarnessUsed: string | null = null
 
-  try {
-    if (harness === 'claude-code') {
-      // Claude: streaming, session-resumed per thread
-      // For the first message or after a harness switch, Claude gets full context via --system-prompt.
-      // Session resumption handles all subsequent history automatically.
-      response = await runClaude(ws, threadId, content, systemContext)
+  // Define fallback chain
+  const FALLBACK_CHAIN: Record<string, string> = {
+    'claude-code': 'hq-agent',
+    'codex-cli': 'gemini-cli',
+    'hq-agent': 'gemini-cli',
+  }
 
-    } else if (harness === 'codex-cli') {
-      // Codex: session-aware (resumes via thread_id). Inject history only on first turn;
-      // subsequent turns in the same session just pass the user message.
-      const codexSessions = loadCodexSessions()
-      const hasSession = codexSessions[threadId] &&
-        Date.now() - new Date(codexSessions[threadId].lastActivity).getTime() < SESSION_TTL_MS
+  const tryRun = async (currentHarness: string): Promise<string> => {
+    try {
+      if (currentHarness === 'claude-code') {
+        const r = await runClaude(ws, threadId, content, systemContext)
+        outputTokens = Math.ceil(r.length / 4)
+        return r
+      } else if (currentHarness === 'codex-cli') {
+        const codexSessions = loadCodexSessions()
+        const hasSession = codexSessions[threadId] &&
+          Date.now() - new Date(codexSessions[threadId].lastActivity).getTime() < SESSION_TTL_MS
 
-      let codexPrompt: string
-      if (hasSession) {
-        // Session active — just send the new user message
-        codexPrompt = content
-      } else {
-        // New session — inject system context + recent history so codex has context
+        let codexPrompt: string
+        if (hasSession) {
+          codexPrompt = content
+        } else {
+          const history = buildHistoryTranscript(
+            thread.messages.filter(m => m.role !== 'system').slice(0, -1)
+          )
+          codexPrompt = systemContext
+          if (history) codexPrompt += `\n\n## Conversation History\n${history}`
+          codexPrompt += `\n\n## Current Message\nUser: ${content}`
+        }
+
+        const r = await runCodex(ws, threadId, codexPrompt)
+        outputTokens = Math.ceil(r.length / 4)
+        return r
+      } else if (currentHarness === 'gemini-cli' || currentHarness === 'opencode') {
         const history = buildHistoryTranscript(
           thread.messages.filter(m => m.role !== 'system').slice(0, -1)
         )
-        codexPrompt = systemContext
-        if (history) codexPrompt += `\n\n## Conversation History\n${history}`
-        codexPrompt += `\n\n## Current Message\nUser: ${content}`
+        let fullPrompt = `${systemContext}\n\n`
+        if (history) fullPrompt += `## Conversation History\n${history}\n\n`
+        fullPrompt += `## Current Message\nUser: ${content}`
+        inputTokens = Math.ceil(fullPrompt.length / 4)
+        const r = await runStateless(ws, threadId, currentHarness as 'gemini-cli' | 'opencode', fullPrompt)
+        outputTokens = Math.ceil(r.length / 4)
+        return r
+      } else if (currentHarness === 'hq-agent') {
+        const history = buildHistoryTranscript(thread.messages.filter(m => m.role !== 'system').slice(0, -1))
+        const fullPrompt = history ? `${history}\n\nUser: ${content}` : content
+        const r = await runHQAgent(ws, threadId, fullPrompt)
+        outputTokens = Math.ceil(r.length / 4)
+        return r
+      } else {
+        throw new Error(`Unknown harness: ${currentHarness}`)
       }
-
-      response = await runCodex(ws, threadId, codexPrompt)
-
-    } else if (harness === 'gemini-cli' || harness === 'opencode') {
-      // Stateless harnesses: inject full conversation history into the prompt
-      const history = buildHistoryTranscript(
-        thread.messages.filter(m => m.role !== 'system').slice(0, -1) // exclude current user msg
-      )
-
-      let fullPrompt = `${systemContext}\n\n`
-      if (history) fullPrompt += `## Conversation History\n${history}\n\n`
-      fullPrompt += `## Current Message\nUser: ${content}`
-
-      response = await runStateless(ws, threadId, harness as 'gemini-cli' | 'opencode', fullPrompt)
-
-    } else if (harness === 'hq-agent') {
-      // HQ Agent: submit job to vault queue
-      const history = buildHistoryTranscript(thread.messages.filter(m => m.role !== 'system').slice(0, -1))
-      const fullPrompt = history ? `${history}\n\nUser: ${content}` : content
-      response = await runHQAgent(ws, threadId, fullPrompt)
-
-    } else {
-      response = `Unknown harness: ${harness}`
-      ws.send(JSON.stringify({ type: 'chat:token', threadId, token: response }))
+    } catch (e: any) {
+      if (FALLBACK_CHAIN[currentHarness]) {
+        console.warn(`[hq-ws] ${currentHarness} failed, trying fallback ${FALLBACK_CHAIN[currentHarness]}:`, e.message)
+        fallbackHarnessUsed = FALLBACK_CHAIN[currentHarness]
+        // Send a system message to indicate fallback
+        ws.send(JSON.stringify({ 
+          type: 'chat:history', 
+          threadId, 
+          thread: { 
+            ...loadThread(threadId), 
+            messages: [{ role: 'system', content: `[${currentHarness} failed. Falling back to ${fallbackHarnessUsed}...]`, timestamp: new Date().toISOString() }] 
+          } as any, 
+          isAppend: true 
+        }))
+        return await tryRun(FALLBACK_CHAIN[currentHarness])
+      }
+      throw e
     }
+  }
+
+  // Rough estimate of input context: system + history
+  const estimatedInputChars = systemContext.length + content.length
+  inputTokens = Math.ceil(estimatedInputChars / 4)
+
+  try {
+    response = await tryRun(harness)
   } catch (e: any) {
     const errMsg = `Error running ${harness}: ${e.message}`
     ws.send(JSON.stringify({ type: 'chat:error', threadId, error: errMsg }))
     response = errMsg
   }
 
+  const finalHarness = fallbackHarnessUsed || harness
+  const latencyMs = Date.now() - startedAt
+
+  // Model name for cost calculation
+  const modelMap: Record<string, string> = {
+    'claude-code': 'anthropic/claude-sonnet-4',
+    'gemini-cli': 'gemini-2.5-flash',
+    'codex-cli': 'openai/gpt-4o',
+    'opencode': 'moonshotai/kimi-k2',
+    'hq-agent': 'gemini-2.5-flash',
+  }
+  const modelId = modelMap[finalHarness] ?? finalHarness
+  const cost = calculateCost(modelId, inputTokens, outputTokens)
+
+  const msgStats = {
+    model: modelId.split('/').pop() ?? modelId,
+    latencyMs,
+    inputTokens,
+    outputTokens,
+    cost,
+    contextUsed: inputTokens,
+  }
+
   // Save assistant response
   if (response) {
-    thread.messages.push({ role: 'assistant', content: response, harness, timestamp: new Date().toISOString() })
+    let finalSaveHarness = finalHarness
+    // Phase 3: Memory Intent Processing
+    let strippedResponse = response
+    // ... (logic from before)
+    const rememberMatch = response.match(/\[REMEMBER:\s*([\s\S]*?)\]/i)
+    const goalMatch = response.match(/\[GOAL:\s*([\s\S]*?)\]/i)
+    const doneMatch = response.match(/\[DONE:\s*([\s\S]*?)\]/i)
+
+    if (rememberMatch || goalMatch || doneMatch) {
+      try {
+        const memoryPath = path.join(VAULT_PATH, '_system/MEMORY.md')
+        let memoryContent = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, 'utf-8') : '# Memory\n'
+        let updated = false
+
+        if (rememberMatch) {
+          const note = rememberMatch[1].trim()
+          if (!memoryContent.includes('## Pending Notes')) memoryContent += '\n\n## Pending Notes\n'
+          memoryContent += `\n- ${note} (from ${harness} in ${threadId})`
+          updated = true
+          ws.send(JSON.stringify({ type: 'chat:memory-updated', summary: `Remembered: ${note.slice(0, 50)}...` }))
+        }
+        if (goalMatch) {
+          const goal = goalMatch[1].trim()
+          if (!memoryContent.includes('## Active Goals')) memoryContent += '\n\n## Active Goals\n'
+          memoryContent += `\n- [ ] ${goal}`
+          updated = true
+          ws.send(JSON.stringify({ type: 'chat:memory-updated', summary: `New Goal: ${goal.slice(0, 50)}...` }))
+        }
+        if (doneMatch) {
+          const done = doneMatch[1].trim()
+          const regex = new RegExp(`- \\[ \\] ${done.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i')
+          if (regex.test(memoryContent)) {
+              memoryContent = memoryContent.replace(regex, `- [x] ~~${done}~~`)
+              updated = true
+              ws.send(JSON.stringify({ type: 'chat:memory-updated', summary: `Goal Completed: ${done.slice(0, 50)}...` }))
+          }
+        }
+
+        if (updated) fs.writeFileSync(memoryPath, memoryContent)
+        // Strip tags for display
+        strippedResponse = response
+          .replace(/\[REMEMBER:\s*[\s\S]*?\]/gi, '')
+          .replace(/\[GOAL:\s*[\s\S]*?\]/gi, '')
+          .replace(/\[DONE:\s*[\s\S]*?\]/gi, '')
+          .trim()
+      } catch (e) { console.error('[hq-ws] memory update failed:', e) }
+    }
+
+    thread.messages.push({ role: 'assistant', content: strippedResponse, harness: finalHarness, timestamp: new Date().toISOString(), stats: msgStats })
     thread.updatedAt = new Date().toISOString()
+    // Accumulate session totals
+    thread.totalInputTokens = (thread.totalInputTokens ?? 0) + inputTokens
+    thread.totalOutputTokens = (thread.totalOutputTokens ?? 0) + outputTokens
+    thread.totalCost = (thread.totalCost ?? 0) + cost
     saveThread(thread)
   }
 
-  ws.send(JSON.stringify({ type: 'chat:done', threadId, harness }))
+  ws.send(JSON.stringify({
+    type: 'chat:done',
+    threadId,
+    harness: finalHarness,
+    stats: msgStats,
+    sessionTotals: {
+      inputTokens: thread.totalInputTokens ?? 0,
+      outputTokens: thread.totalOutputTokens ?? 0,
+      cost: thread.totalCost ?? 0,
+    }
+  }))
 }
 
 // ─── Kill active harness ──────────────────────────────────────────────────────
@@ -688,7 +817,61 @@ vaultSync.start().catch(console.error)
 vaultSync.eventBus.on('*', (event: any) => {
   if (clients.size === 0) return
   broadcast({ type: 'event', event })
+
+  // Derive workflow-level events from delegation task events
+  const evtType: string = event?.type ?? ''
+  const evtPath: string = event?.path ?? ''
+  if (evtType.startsWith('task:') && evtPath) {
+    const ts = Date.now()
+    if (evtType === 'task:claimed' && evtPath.includes('_delegation/claimed')) {
+      broadcast({ type: 'workflow:stage-started', taskPath: evtPath, timestamp: ts })
+    } else if (evtType === 'task:completed' && evtPath.includes('_delegation/completed')) {
+      broadcast({ type: 'workflow:stage-completed', taskPath: evtPath, timestamp: ts })
+    } else if (evtType === 'task:failed' && evtPath.includes('_delegation/failed')) {
+      broadcast({ type: 'workflow:gate-evaluated', outcome: 'BLOCKED', taskPath: evtPath, timestamp: ts })
+    }
+  }
 })
+
+// ─── Metrics directory watcher ────────────────────────────────────────────────
+// Watch _metrics/ for performance data changes and optimization recommendations.
+
+const METRICS_DIR = path.join(VAULT_PATH, '_metrics')
+const PENDING_OPT_SUBDIR = path.join('pending-optimizations')
+
+let metricsDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let optimizationDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+function startMetricsWatcher() {
+  if (!fs.existsSync(METRICS_DIR)) {
+    // Create the directory and retry once it exists
+    fs.mkdirSync(METRICS_DIR, { recursive: true })
+  }
+  try {
+    fs.watch(METRICS_DIR, { recursive: true }, (_eventType, filename) => {
+      if (!filename || clients.size === 0) return
+      const normalised = filename.replace(/\\/g, '/')
+      if (normalised.includes('pending-optimizations')) {
+        if (optimizationDebounceTimer) clearTimeout(optimizationDebounceTimer)
+        optimizationDebounceTimer = setTimeout(() => {
+          broadcast({ type: 'optimization:available', filename, timestamp: Date.now() })
+          optimizationDebounceTimer = null
+        }, 500)
+      } else {
+        if (metricsDebounceTimer) clearTimeout(metricsDebounceTimer)
+        metricsDebounceTimer = setTimeout(() => {
+          broadcast({ type: 'metric:updated', filename, timestamp: Date.now() })
+          metricsDebounceTimer = null
+        }, 500)
+      }
+    })
+    console.log(`[hq-ws] Watching metrics dir: ${METRICS_DIR}`)
+  } catch (e) {
+    console.warn(`[hq-ws] Could not watch metrics dir: ${e}`)
+  }
+}
+
+startMetricsWatcher()
 
 const pingInterval = setInterval(() => broadcast({ type: 'ping' }), 30_000)
 
@@ -743,6 +926,31 @@ const server = Bun.serve({
         return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders })
       } catch (e: any) { return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: corsHeaders }) }
     }
+    // ─── File Upload ──────────────────────────────────────────────────
+    if (url.pathname === '/upload' && req.method === 'POST') {
+      try {
+        const formData = await req.formData()
+        const file = formData.get('file') as File | null
+        if (!file) return new Response(JSON.stringify({ error: 'No file provided' }), { status: 400, headers: corsHeaders })
+
+        const uploadsDir = path.join(VAULT_PATH, '_uploads')
+        fs.mkdirSync(uploadsDir, { recursive: true })
+
+        const ext = file.name.includes('.') ? file.name.slice(file.name.lastIndexOf('.')) : ''
+        const safeName = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`
+        const filePath = path.join(uploadsDir, safeName)
+
+        const buf = await file.arrayBuffer()
+        fs.writeFileSync(filePath, Buffer.from(buf))
+
+        const vaultRelPath = `_uploads/${safeName}`
+        console.log(`[hq-ws] File uploaded: ${vaultRelPath} (${file.size} bytes)`)
+        return new Response(JSON.stringify({ ok: true, path: vaultRelPath, name: file.name, size: file.size }), { headers: corsHeaders })
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: corsHeaders })
+      }
+    }
+
     if (url.pathname === '/search') {
       const q = url.searchParams.get('q') || ''
       try {
@@ -783,7 +991,36 @@ const server = Bun.serve({
           ws.send(JSON.stringify({ type: 'chat:threads', threads: listThreads() }))
         } else if (msg.type === 'chat:load') {
           const thread = loadThread(msg.threadId)
-          ws.send(JSON.stringify({ type: 'chat:history', threadId: msg.threadId, thread }))
+          // Include session info for session-capable harnesses
+          let sessionInfo: { active: boolean; expiresIn?: string } | undefined
+          if (thread) {
+            const claudeSessions = loadClaudeSessions()
+            const codexSessions = loadCodexSessions()
+            const cs = claudeSessions[msg.threadId] ?? codexSessions[msg.threadId]
+            if (cs) {
+              const age = Date.now() - new Date(cs.lastActivity).getTime()
+              const active = age < SESSION_TTL_MS
+              if (active) {
+                const remainMs = SESSION_TTL_MS - age
+                const remainH = Math.floor(remainMs / 3600000)
+                const remainM = Math.floor((remainMs % 3600000) / 60000)
+                sessionInfo = { active: true, expiresIn: remainH > 0 ? `${remainH}h ${remainM}m` : `${remainM}m` }
+              } else {
+                sessionInfo = { active: false }
+              }
+            }
+          }
+          ws.send(JSON.stringify({
+            type: 'chat:history',
+            threadId: msg.threadId,
+            thread,
+            sessionInfo,
+            sessionTotals: thread ? {
+              inputTokens: thread.totalInputTokens ?? 0,
+              outputTokens: thread.totalOutputTokens ?? 0,
+              cost: thread.totalCost ?? 0,
+            } : undefined,
+          }))
         } else if (msg.type === 'chat:delete') {
           try {
             const p = path.join(THREADS_DIR, `${msg.threadId}.json`)
@@ -804,6 +1041,51 @@ const server = Bun.serve({
             saveClaudeSessions(sessions)
           }
           ws.send(JSON.stringify({ type: 'chat:reset_ok', threadId: msg.threadId }))
+        } else if (msg.type === 'chat:rename') {
+          // Rename a thread title
+          const thread = loadThread(msg.threadId)
+          if (thread && msg.title) {
+            thread.title = String(msg.title).slice(0, 100)
+            thread.updatedAt = new Date().toISOString()
+            saveThread(thread)
+            broadcast({ type: 'chat:threads', threads: listThreads() })
+          }
+        } else if (msg.type === 'chat:retry') {
+          // Truncate thread and retry last user message
+          const thread = loadThread(msg.threadId)
+          if (thread && typeof msg.fromIndex === 'number') {
+            thread.messages = thread.messages.slice(0, msg.fromIndex + 1)
+            const lastUserMsg = thread.messages[thread.messages.length - 1]
+            if (lastUserMsg && lastUserMsg.role === 'user') {
+              saveThread(thread)
+              handleChatSend(ws, { 
+                threadId: msg.threadId, 
+                content: lastUserMsg.content, 
+                harness: msg.harness || thread.harness 
+              }).catch(e =>
+                ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
+              )
+            }
+          }
+        } else if (msg.type === 'chat:search') {
+          // Vault search inline
+          try {
+            const results = searchClient.hybridSearch(msg.query, null, 5)
+            const content = results.length > 0 
+                ? `Results for "${msg.query}":\n\n` + results.map((r: any) => `- [[${r.path}]]: ${r.content.slice(0, 150)}...`).join('\n')
+                : `No results found for "${msg.query}".`
+            ws.send(JSON.stringify({
+              type: 'chat:history',
+              threadId: msg.threadId,
+              thread: {
+                ...loadThread(msg.threadId),
+                messages: [{ role: 'system', content: `[${content}]`, timestamp: new Date().toISOString() }]
+              } as any,
+              isAppend: true
+            }))
+          } catch (e: any) {
+            ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
+          }
         } else if (msg.type === 'chat:send' || msg.type === 'chat:send-with-context') {
           handleChatSend(ws, msg).catch(e =>
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))

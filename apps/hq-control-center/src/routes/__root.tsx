@@ -116,6 +116,14 @@ function Shell() {
               scheduleRelaysRefresh()
             }
           }
+          // Workflow + metrics real-time events (emitted directly, not wrapped in 'event')
+          if (['workflow:stage-started', 'workflow:stage-completed', 'workflow:gate-evaluated', 'workflow:completed'].includes(msg.type)) {
+            useHQStore.getState().addEvent({ type: msg.type, ...msg })
+            useHQStore.getState().bumpTeamsVersion()
+          }
+          if (msg.type === 'metric:updated' || msg.type === 'optimization:available') {
+            useHQStore.getState().bumpTeamsVersion()
+          }
         } catch { /* ignore */ }
       }
     }
@@ -232,6 +240,14 @@ function Shell() {
               inactiveProps={{ style: { color: 'var(--text-dim)' } }}
             >
               ◈ DrawIt
+            </Link>
+            <Link
+              to="/teams"
+              className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
+              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
+              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
+            >
+              🤖 Teams
             </Link>
             <button
               onClick={() => useHQStore.getState().setChatPanelOpen(!useHQStore.getState().chatPanelOpen)}

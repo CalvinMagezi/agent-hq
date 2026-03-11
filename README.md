@@ -70,6 +70,9 @@ You (PWA / Discord / Telegram / WhatsApp / Terminal)
        HQ Agent (Pi SDK)  ──► Shell · Filesystem · MCP ───►│
        Daemon             ──► Embeddings · Memory · Crons ─►│
        Claude Code Scheduled Tasks  ──► Vault micro-tasks ─►│
+                                                             │
+       External MCP Agents (Claude Code / Cursor / etc.)    │
+         └── hq_discover + hq_call ──► Full tool registry ─►│
 ```
 
 The vault is the center. Every agent reads from it and writes back to it. They share the same memory, job queue, and context — so switching harnesses mid-conversation doesn't lose context.
@@ -120,10 +123,11 @@ packages/
 ├── vault-sync-server/       # WebSocket relay for multi-device sync
 ├── agent-relay-protocol/    # Types + RelayClient SDK
 ├── agent-relay-server/      # Bun WS+REST gateway (port 18900)
+├── relay-adapter-core/      # Shared relay logic (voice, harness, orchestrator, media)
 ├── discord-core/            # Shared DiscordBotBase + utilities
-├── hq-tools/                # 2-tool gateway: hq_discover + hq_call
+├── hq-tools/                # 2-tool gateway + MCP server (hq_discover + hq_call)
 ├── context-engine/          # Token-budgeted context assembly
-└── hq-cli/                  # NPM package
+└── hq-cli/                  # NPM package (@calvin.magezi/agent-hq v0.5.0)
 
 plugins/
 └── obsidian-vault-sync/     # Obsidian plugin for cross-device sync
@@ -283,6 +287,91 @@ hq logs   [target] [N]          View logs
 hq follow [target]              Live-tail logs
 hq tasks:monitor                Scheduled task health report
 hq tasks:follow                 Live scheduled task dashboard
+```
+
+---
+
+## MCP Integration (Connect Any Agent to the Vault)
+
+Agent-HQ exposes its **full tool registry** via [MCP (Model Context Protocol)](https://modelcontextprotocol.io) — so any MCP-compatible agent (Claude Code, Antigravity, Cursor, Windsurf, etc.) can search, read, and write to your vault through just 2 tools.
+
+### How It Works
+
+The MCP server wraps **all HQ tools** (vault search, image gen, Google Workspace, DrawIT, team workflows, etc.) into a 2-tool gateway:
+
+| Tool | Purpose |
+|------|---------|
+| `hq_discover` | Search the registry by keyword — returns matching tools + descriptions |
+| `hq_call` | Execute any tool by name with JSON input |
+
+This keeps the token footprint fixed (~1K tokens) regardless of how many tools are in the registry.
+
+### Configure for Claude Code
+
+Add to your project's `.mcp.json` or `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "vault": {
+      "command": "bun",
+      "args": ["run", "<path-to-agent-hq>/packages/hq-tools/src/mcp.ts"],
+      "env": {
+        "VAULT_PATH": "<path-to-agent-hq>/.vault",
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
+        "SECURITY_PROFILE": "standard"
+      }
+    }
+  }
+}
+```
+
+### Configure for Claude Desktop / Other MCP Clients
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "agent-hq": {
+      "command": "bun",
+      "args": ["run", "<path-to-agent-hq>/packages/hq-tools/src/mcp.ts"],
+      "env": {
+        "VAULT_PATH": "<path-to-agent-hq>/.vault",
+        "OPENROUTER_API_KEY": "sk-or-...",
+        "SECURITY_PROFILE": "standard"
+      }
+    }
+  }
+}
+```
+
+### Available Tool Categories
+
+Once connected, `hq_discover ""` returns all available tools:
+
+| Category | Tools | Description |
+|----------|-------|-------------|
+| **Vault** | `vault_search`, `vault_read`, `vault_list`, `vault_batch_read`, `vault_context`, `vault_write_note`, `vault_create_job` | FTS5 search, read/write notes, system context |
+| **Image** | `generate_image` | AI image generation via OpenRouter |
+| **Diagrams** | `drawit_render`, `drawit_export`, `drawit_map`, `drawit_flow`, `drawit_analyze`, `create_diagram` | Architecture diagrams, flowcharts, dependency graphs |
+| **Google Workspace** | `google_workspace_schema`, `google_workspace_read`, `google_workspace_write` | Gmail, Calendar, Drive, Sheets, Docs |
+| **Voice** | `speak` | Text-to-speech via OpenAI TTS |
+| **Teams** | `list_agents`, `load_agent`, `list_teams`, `run_team_workflow` | Multi-agent team orchestration |
+| **Skills** | `list_skills`, `load_skill` | Runtime skill loading |
+
+### Example Usage
+
+```
+# From any MCP client:
+hq_discover "vault search"
+→ vault_search: Search the local Obsidian vault using SQLite FTS5...
+
+hq_call vault_search {"query": "project status", "mode": "keyword", "limit": 5}
+→ [ranked results with snippets, tags, relevance scores]
+
+hq_call vault_context {}
+→ {SOUL: {...}, MEMORY: {...}, PREFERENCES: {...}, HEARTBEAT: {...}}
 ```
 
 ---

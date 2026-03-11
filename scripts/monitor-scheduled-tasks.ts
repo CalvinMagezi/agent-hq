@@ -16,10 +16,11 @@
 
 import { readFileSync, existsSync, statSync, readdirSync } from "fs";
 import { join } from "path";
+import { homedir } from "os";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? join(import.meta.dir, "../.vault");
 const LOG_FILE = join(VAULT_PATH, "_logs/scheduled-tasks.log");
-const SCHEDULED_TASKS_DIR = join(process.env.HOME ?? "/Users/calvinmagezi", ".claude/scheduled-tasks");
+const SCHEDULED_TASKS_DIR = join(process.env.HOME ?? homedir(), ".claude/scheduled-tasks");
 
 // Expected schedules (cron → expected max gap in hours)
 const TASK_EXPECTATIONS: Record<string, { maxGapHours: number; allowedWritePaths: string[] }> = {

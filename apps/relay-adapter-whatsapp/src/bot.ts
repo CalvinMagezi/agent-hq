@@ -17,8 +17,9 @@ import type {
   ChatDeltaMessage,
   ChatFinalMessage,
 } from "@repo/agent-relay-protocol";
+import { VaultClient } from "@repo/vault-client";
 import type { proto } from "@whiskeysockets/baileys";
-import type { WhatsAppBridge, WhatsAppMessage } from "./whatsapp.js";
+import type { WhatsAppBridge, WhatsAppMessage, WAConnectionState } from "./whatsapp.js";
 import type { WhatsAppGuard } from "./guard.js";
 import type { VoiceHandler } from "./voice.js";
 import type { MediaHandler } from "./media.js";
@@ -42,6 +43,11 @@ function harnessFromPath(filePath: string): string | null {
 /** Typing indicator keepalive interval (Baileys composing expires ~25s). */
 const TYPING_KEEPALIVE_MS = 20_000;
 
+/** Health heartbeat interval (ms). */
+const HEALTH_HEARTBEAT_MS = 30_000;
+/** Max queued outbound messages while relay is disconnected. */
+const MAX_PENDING_OUTBOUND = 50;
+
 export interface RelayWhatsAppBotConfig {
   guard: WhatsAppGuard;
   bridge: WhatsAppBridge;
@@ -57,6 +63,8 @@ export interface RelayWhatsAppBotConfig {
   mediaAutoProcess?: boolean;
   /** Path to JSON file for persisting bot state (harness preference). Default: .whatsapp-state.json */
   stateFile?: string;
+  /** Path to .vault/ directory for health reporting. */
+  vaultPath?: string;
 }
 
 export class RelayWhatsAppBot {
@@ -89,6 +97,14 @@ export class RelayWhatsAppBot {
   private lastReceivedMsg: WhatsAppMessage | null = null;
   private lastSentMsgKey: proto.IMessageKey | null = null;
 
+  /** Health monitoring via vault */
+  private vault: VaultClient | null = null;
+  private healthInterval: ReturnType<typeof setInterval> | null = null;
+
+  /** Message queue for outbound messages when relay is disconnected */
+  private pendingOutbound: Array<{ content: string; sourceMsg?: WhatsAppMessage }> = [];
+  private draining = false;
+
   constructor(config: RelayWhatsAppBotConfig) {
     this.guard = config.guard;
     this.bridge = config.bridge;
@@ -99,6 +115,16 @@ export class RelayWhatsAppBot {
     this.loadState();
     this.localHarness = new LocalHarness(".whatsapp-harness-sessions.json");
     this.sessionOrchestrator = new SessionOrchestrator(this.localHarness);
+
+    // Initialize vault client for health reporting
+    if (config.vaultPath) {
+      try {
+        this.vault = new VaultClient(config.vaultPath);
+        console.log(`[relay-whatsapp] Vault health reporting enabled (${config.vaultPath})`);
+      } catch (err) {
+        console.warn("[relay-whatsapp] Failed to init VaultClient for health — health reporting disabled:", err);
+      }
+    }
 
     const relayConfig: RelayClientConfig = {
       host: config.relayHost,
@@ -116,14 +142,46 @@ export class RelayWhatsAppBot {
   async start(): Promise<void> {
     // Connect to relay server first
     console.log("[relay-whatsapp] Connecting to relay server...");
-    await this.relay.connect();
-    console.log("[relay-whatsapp] Connected to relay server");
+    try {
+      await this.relay.connect();
+      console.log("[relay-whatsapp] Connected to relay server");
+    } catch (err) {
+      console.warn(
+        "[relay-whatsapp] Relay server unavailable — will auto-reconnect. Error:",
+        err instanceof Error ? err.message : err,
+      );
+    }
 
     // Subscribe to vault events for live orchestration status
-    this.relay.send({ type: "system:subscribe", events: ["job:*", "task:*"] });
+    if (this.relay.isConnected) {
+      this.relay.send({ type: "system:subscribe", events: ["job:*", "task:*"] });
+    }
     this.relay.on("system:event", (eventMsg: any) => {
       this.handleVaultEvent(eventMsg.event, eventMsg.data).catch(console.error);
     });
+
+    // ── Relay reconnect: re-subscribe to events & drain queued messages ──
+    this.relay.on("auth-ack" as any, (msg: any) => {
+      if (msg.success) {
+        console.log("[relay-whatsapp] Relay reconnected — re-subscribing to events");
+        this.relay.send({ type: "system:subscribe", events: ["job:*", "task:*"] });
+        this.updateHealth();
+        this.drainPendingOutbound();
+      }
+    });
+
+    // ── Relay disconnect: update health ─────────────────────────
+    this.relay.on("disconnected" as any, () => {
+      this.updateHealth();
+    });
+
+    // ── Bridge connection state changes: update health ──────────
+    this.bridge.onConnectionStateChange = (state: WAConnectionState) => {
+      this.updateHealth();
+      if (state === "fatal") {
+        console.error("[relay-whatsapp] WhatsApp bridge entered fatal state");
+      }
+    };
 
     // Register message handler on the WhatsApp bridge
     this.bridge.onMessage((msg) => this.handleMessage(msg));
@@ -148,15 +206,81 @@ export class RelayWhatsAppBot {
     console.log(
       "[relay-whatsapp] WhatsApp bridge started — listening for self-chat messages",
     );
+
+    // ── Health heartbeat ────────────────────────────────────────
+    this.updateHealth();
+    this.healthInterval = setInterval(() => this.updateHealth(), HEALTH_HEARTBEAT_MS);
   }
 
   async stop(): Promise<void> {
+    // Stop health heartbeat
+    if (this.healthInterval) {
+      clearInterval(this.healthInterval);
+      this.healthInterval = null;
+    }
+    // Write offline status
+    this.updateHealth("offline");
+
     this.relay.disconnect();
-    await this.bridge.stop();
+    this.bridge.destroy();
     if (this.mediaHandler) {
       this.mediaHandler.destroy();
     }
     console.log("[relay-whatsapp] Bot stopped");
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // HEALTH MONITORING
+  // ══════════════════════════════════════════════════════════════
+
+  private getHealthStatus(): "healthy" | "degraded" | "offline" {
+    const bridgeOk = this.bridge.isConnected;
+    const relayOk = this.relay.isConnected;
+    if (bridgeOk && relayOk) return "healthy";
+    if (bridgeOk || relayOk) return "degraded";
+    return "offline";
+  }
+
+  private updateHealth(override?: "offline"): void {
+    if (!this.vault) return;
+    const status = override ?? this.getHealthStatus();
+    this.vault
+      .upsertRelayHealth("relay-whatsapp", {
+        harnessType: "whatsapp",
+        displayName: "WhatsApp Self-Chat Relay",
+        status,
+        capabilities: ["chat", "voice", "media", "vision"],
+        lastHeartbeat: new Date().toISOString(),
+      })
+      .catch((err) => {
+        console.warn("[relay-whatsapp] Failed to update health:", err instanceof Error ? err.message : err);
+      });
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // MESSAGE QUEUE (relay disconnect resilience)
+  // ══════════════════════════════════════════════════════════════
+
+  private drainPendingOutbound(): void {
+    if (this.pendingOutbound.length === 0 || this.draining) return;
+    this.draining = true;
+    console.log(`[relay-whatsapp] Draining ${this.pendingOutbound.length} queued messages`);
+    const queued = [...this.pendingOutbound];
+    this.pendingOutbound = [];
+    // Process sequentially to preserve order
+    (async () => {
+      try {
+        for (const item of queued) {
+          try {
+            await this.handleChat(item.content, item.sourceMsg);
+          } catch (err) {
+            console.error("[relay-whatsapp] Failed to process queued message:", err);
+          }
+        }
+      } finally {
+        this.draining = false;
+      }
+    })();
   }
 
   private async handleMessage(msg: WhatsAppMessage): Promise<void> {
@@ -1260,6 +1384,21 @@ export class RelayWhatsAppBot {
     content: string,
     sourceMsg?: WhatsAppMessage,
   ): Promise<void> {
+    // ── Queue if relay is disconnected ──────────────────────────
+    if (!this.relay.isConnected) {
+      if (this.pendingOutbound.length < MAX_PENDING_OUTBOUND) {
+        this.pendingOutbound.push({ content, sourceMsg });
+        await this.bridge.sendMessage(
+          "_Message queued — relay server is reconnecting. I'll process it when the connection is restored._",
+        );
+      } else {
+        await this.bridge.sendMessage(
+          "_Message queue full. Please wait for the relay to reconnect before sending more messages._",
+        );
+      }
+      return;
+    }
+
     this.processing = true;
     const requestId = `wa-chat-${Date.now()}`;
 
@@ -1435,33 +1574,28 @@ export class RelayWhatsAppBot {
     await this.sendChunked(formatted, sourceMsg);
   }
 
-  /** Send a reply quoting the original message. */
+  /** Send a reply quoting the original message. Retries once on failure. */
   private async sendReply(
     text: string,
     sourceMsg?: WhatsAppMessage,
   ): Promise<void> {
     const formatted = this.formatEnabled ? formatForWhatsApp(text) : text;
+    const opts = sourceMsg?.rawMessage ? { quoted: sourceMsg.rawMessage } : undefined;
 
-    if (sourceMsg?.rawMessage) {
-      const msgId = await this.bridge.sendMessage(formatted, {
-        quoted: sourceMsg.rawMessage,
-      });
-      if (msgId) {
-        this.lastSentMsgKey = {
-          remoteJid: this.guard.ownerJid,
-          id: msgId,
-          fromMe: true,
-        };
-      }
-    } else {
-      const msgId = await this.bridge.sendMessage(formatted);
-      if (msgId) {
-        this.lastSentMsgKey = {
-          remoteJid: this.guard.ownerJid,
-          id: msgId,
-          fromMe: true,
-        };
-      }
+    let msgId = await this.bridge.sendMessage(formatted, opts);
+
+    // Retry once after 2s if bridge send failed (transient socket state)
+    if (msgId === null) {
+      await new Promise((r) => setTimeout(r, 2000));
+      msgId = await this.bridge.sendMessage(formatted, opts);
+    }
+
+    if (msgId) {
+      this.lastSentMsgKey = {
+        remoteJid: this.guard.ownerJid,
+        id: msgId,
+        fromMe: true,
+      };
     }
   }
 

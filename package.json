@@ -1,11 +1,11 @@
 {
   "name": "agent-hq-monorepo",
+  "version": "0.5.0",
   "private": true,
   "workspaces": [
     "apps/*",
     "packages/*",
-    "plugins/*",
-    "packages/hq-cli"
+    "plugins/*"
   ],
   "scripts": {
     "dev": "turbo dev",
@@ -35,7 +35,8 @@
     "tasks:monitor": "bun run scripts/monitor-scheduled-tasks.ts",
     "tasks:follow": "bun run scripts/monitor-scheduled-tasks.ts --follow",
     "vault-pwa": "bun --cwd apps/hq-control-center run dev",
-    "vault-pwa:ws": "bun --cwd apps/hq-control-center run ws"
+    "vault-pwa:ws": "bun --cwd apps/hq-control-center run ws",
+    "native:build": "turbo build:native"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

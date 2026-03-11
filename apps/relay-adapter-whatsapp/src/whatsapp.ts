@@ -26,8 +26,21 @@ import { Boom } from "@hapi/boom";
 import pino from "pino";
 // @ts-ignore — no type declarations for qrcode-terminal
 import qrcode from "qrcode-terminal";
+import fs from "node:fs";
 import path from "node:path";
 import type { WhatsAppGuard } from "./guard.js";
+
+// ── Connection resilience constants ─────────────────────────────
+
+const WA_RECONNECT_INITIAL_MS = 3_000;
+const WA_RECONNECT_MAX_MS = 60_000;
+const WA_RECONNECT_BACKOFF_FACTOR = 2;
+const WA_MAX_RECONNECT_ATTEMPTS = 15;
+/** Known-good Baileys version fallback when network fetch fails. */
+const WA_FALLBACK_VERSION: [number, number, number] = [2, 3000, 0];
+
+export type WAConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting" | "fatal";
+export type ConnectionStateCallback = (state: WAConnectionState, detail?: string) => void;
 
 // ── Message types ────────────────────────────────────────────────
 
@@ -116,11 +129,18 @@ export class WhatsAppBridge {
   private updateCallback: MessageUpdateCallback | null = null;
   private sentMessageIds = new Set<string>();
   private logger: pino.Logger;
-  private reconnecting = false;
-  private connected = false;
   private getMessageForPoll:
     | ((key: proto.IMessageKey) => Promise<proto.IMessage | undefined>)
     | null = null;
+
+  // ── Connection state machine ──────────────────────────────────
+  private connectionState: WAConnectionState = "disconnected";
+  private reconnectAttempt = 0;
+  private reconnectDelay = WA_RECONNECT_INITIAL_MS;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Subscribe to connection state transitions (for health reporting). */
+  onConnectionStateChange: ConnectionStateCallback | null = null;
 
   constructor(config: WhatsAppBridgeConfig) {
     this.guard = config.guard;
@@ -143,13 +163,31 @@ export class WhatsAppBridge {
 
   /** Whether the WhatsApp connection is open. */
   get isConnected(): boolean {
-    return this.connected;
+    return this.connectionState === "connected";
+  }
+
+  /** Current connection state for health monitoring. */
+  get state(): WAConnectionState {
+    return this.connectionState;
   }
 
   /** Start the WhatsApp connection. Displays QR on first run. */
   async start(): Promise<void> {
+    this.setConnectionState("connecting");
     const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-    const { version } = await fetchLatestBaileysVersion();
+
+    // Fetch latest Baileys version — fall back to a known-good version on network error
+    let version: [number, number, number];
+    try {
+      const fetched = await fetchLatestBaileysVersion();
+      version = fetched.version as [number, number, number];
+    } catch (err) {
+      console.warn(
+        `[whatsapp] Failed to fetch latest Baileys version, using fallback v${WA_FALLBACK_VERSION.join(".")}:`,
+        err instanceof Error ? err.message : err,
+      );
+      version = WA_FALLBACK_VERSION;
+    }
 
     console.log(`[whatsapp] Connecting with Baileys v${version.join(".")}...`);
     console.log(
@@ -501,12 +539,37 @@ export class WhatsAppBridge {
 
   /** Gracefully disconnect. */
   async stop(): Promise<void> {
-    this.connected = false;
+    this.setConnectionState("disconnected");
+    this.clearReconnectTimer();
     if (this.sock) {
       this.sock.end(undefined);
       this.sock = null;
     }
     console.log("[whatsapp] Disconnected");
+  }
+
+  /** Hard cleanup — clears all timers and nulls the socket. Called from bot.stop(). */
+  destroy(): void {
+    this.clearReconnectTimer();
+    this.setConnectionState("disconnected");
+    if (this.sock) {
+      try { this.sock.end(undefined); } catch { /* ignore */ }
+      this.sock = null;
+    }
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private setConnectionState(state: WAConnectionState, detail?: string): void {
+    if (this.connectionState === state) return;
+    this.connectionState = state;
+    console.log(`[whatsapp] Connection state: ${state}${detail ? ` (${detail})` : ""}`);
+    this.onConnectionStateChange?.(state, detail);
   }
 
   // ══════════════════════════════════════════════════════════════════
@@ -537,35 +600,83 @@ export class WhatsAppBridge {
     }
 
     if (connection === "close") {
-      this.connected = false;
+      this.setConnectionState("reconnecting");
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-      // connectionReplaced (440/515): another device (e.g. WhatsApp Desktop) took the slot
       const isReplaced = statusCode === DisconnectReason.connectionReplaced;
+      const isBadSession = statusCode === DisconnectReason.badSession;
 
+      // ── Fatal: logged out — requires manual re-auth ──────────
       if (isLoggedOut) {
+        this.setConnectionState("fatal", "logged out");
         console.error(
           "[whatsapp] Logged out. Please delete auth_info/ and restart to re-authenticate.",
         );
         process.exit(1);
-      } else if (!this.reconnecting) {
-        // Back off longer when replaced by another client (WhatsApp Desktop conflict)
-        const delay = isReplaced ? 15_000 : 3_000;
-        console.log(
-          `[whatsapp] Connection closed (code: ${statusCode}${isReplaced ? " — replaced by another client" : ""}). Reconnecting in ${delay / 1000}s...`,
-        );
-        this.reconnecting = true;
-        setTimeout(() => {
-          this.reconnecting = false;
-          this.start().catch((err) => {
-            console.error("[whatsapp] Reconnection failed:", err);
-          });
-        }, delay);
       }
+
+      // ── Bad session: clear auth and re-auth with QR ──────────
+      if (isBadSession) {
+        console.warn("[whatsapp] Bad session detected — clearing auth state for fresh QR auth...");
+        try {
+          fs.rmSync(this.authDir, { recursive: true, force: true });
+          fs.mkdirSync(this.authDir, { recursive: true });
+        } catch (err) {
+          console.error("[whatsapp] Failed to clear auth dir:", err);
+        }
+        // Reset backoff for fresh auth attempt
+        this.reconnectAttempt = 0;
+        this.reconnectDelay = WA_RECONNECT_INITIAL_MS;
+      }
+
+      // ── Max attempts reached — give up ───────────────────────
+      if (this.reconnectAttempt >= WA_MAX_RECONNECT_ATTEMPTS) {
+        this.setConnectionState("fatal", `gave up after ${WA_MAX_RECONNECT_ATTEMPTS} attempts`);
+        console.error(
+          `[whatsapp] Reconnection failed after ${WA_MAX_RECONNECT_ATTEMPTS} attempts. Restart the process to try again.`,
+        );
+        return;
+      }
+
+      // ── Schedule reconnect with exponential backoff ──────────
+      // Use a longer initial delay when replaced by another client
+      if (isReplaced && this.reconnectAttempt === 0) {
+        this.reconnectDelay = 15_000;
+      }
+
+      this.reconnectAttempt++;
+      const delay = this.reconnectDelay;
+      const reason = isReplaced ? "replaced by another client" : `code ${statusCode}`;
+
+      console.log(
+        `[whatsapp] Connection closed (${reason}). Reconnecting in ${(delay / 1000).toFixed(1)}s... (attempt ${this.reconnectAttempt}/${WA_MAX_RECONNECT_ATTEMPTS})`,
+      );
+
+      this.clearReconnectTimer();
+      this.reconnectTimer = setTimeout(() => {
+        // Increase delay for next attempt (exponential backoff)
+        this.reconnectDelay = Math.min(
+          this.reconnectDelay * WA_RECONNECT_BACKOFF_FACTOR,
+          WA_RECONNECT_MAX_MS,
+        );
+        // Tear down old socket to prevent duplicate event listeners
+        if (this.sock) {
+          try { this.sock.end(undefined); } catch { /* ignore */ }
+          this.sock = null;
+        }
+        this.start().catch((err) => {
+          console.error("[whatsapp] Reconnection failed:", err);
+          // handleConnectionUpdate will be called again by Baileys on next close
+        });
+      }, delay);
     }
 
     if (connection === "open") {
-      this.connected = true;
+      // Reset all backoff state on successful connection
+      this.reconnectAttempt = 0;
+      this.reconnectDelay = WA_RECONNECT_INITIAL_MS;
+      this.clearReconnectTimer();
+      this.setConnectionState("connected");
       console.log("[whatsapp] Connected to WhatsApp — ready to receive messages");
     }
   }

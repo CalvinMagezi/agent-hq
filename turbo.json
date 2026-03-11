@@ -10,7 +10,6 @@
             ],
             "env": [
                 "OPENROUTER_API_KEY",
-                "BRAVE_SEARCH_API_KEY",
                 "DEFAULT_MODEL",
                 "VAULT_PATH"
             ]
@@ -27,6 +26,12 @@
             "dependsOn": [
                 "^build"
             ]
+        },
+        "build:native": {
+            "outputs": ["*.node"],
+            "cache": true,
+            "inputs": ["src/**/*.rs", "Cargo.toml", "Cargo.lock"]
         }
+
     }
 }

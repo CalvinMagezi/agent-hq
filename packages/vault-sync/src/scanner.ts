@@ -19,6 +19,7 @@ import {
   isMarkdownFile,
   computeContentHash,
   normalizeVaultPath,
+  hashFilesParallel,
 } from "./utils";
 
 export class FullScanner {
@@ -49,25 +50,44 @@ export class FullScanner {
       const trackedPaths = this.syncState.getAllPaths();
       const foundPaths = new Set<string>();
 
-      // Walk the vault directory
-      await this.walkDirectory(this.vaultPath, foundPaths, changes);
+      const candidates: Array<{ relativePath: string; absolutePath: string; mtime: number; size: number; existing: any }> = [];
 
-      // Detect deletions: paths in SyncState but not on disk
-      for (const trackedPath of trackedPaths) {
-        if (!foundPaths.has(trackedPath)) {
+      // 1. Walk the vault directory to find candidates for hashing
+      await this.collectCandidates(this.vaultPath, foundPaths, candidates);
+
+      // 2. Batch hash all candidates in parallel
+      if (candidates.length > 0) {
+        const absolutePaths = candidates.map(c => c.absolutePath);
+        const hashes = await hashFilesParallel(absolutePaths);
+
+        for (let i = 0; i < candidates.length; i++) {
+          const candidate = candidates[i]!;
+          const contentHash = hashes[i];
+
+          if (!contentHash) continue; // Skip if hash failed
+
+          // Skip if content hash is actually the same (mtime changed but content didn't)
+          if (candidate.existing && candidate.existing.contentHash === contentHash) {
+            continue;
+          }
+
+          const changeType = candidate.existing ? "modify" : "create";
           changes.push({
             changeId: 0,
-            path: trackedPath,
-            type: "delete",
-            contentHash: null,
-            size: null,
-            mtime: null,
+            path: candidate.relativePath,
+            type: changeType,
+            contentHash,
+            size: candidate.size,
+            mtime: candidate.mtime,
             detectedAt: Date.now(),
             source: "scan",
             deviceId: this.deviceId,
           });
         }
       }
+
+      // 3. Detect deletions: paths in SyncState but not on disk
+      this.detectDeletions(trackedPaths, foundPaths, changes);
 
       return changes;
     } finally {
@@ -76,85 +96,68 @@ export class FullScanner {
   }
 
   /**
-   * Recursively walk a directory, finding changed .md files.
+   * Detect deletions: paths in SyncState but not on disk
    */
-  private async walkDirectory(
+  private detectDeletions(trackedPaths: Set<string>, foundPaths: Set<string>, changes: FileChange[]): void {
+    for (const trackedPath of trackedPaths) {
+      if (!foundPaths.has(trackedPath)) {
+        changes.push({
+          changeId: 0,
+          path: trackedPath,
+          type: "delete",
+          contentHash: null,
+          size: null,
+          mtime: null,
+          detectedAt: Date.now(),
+          source: "scan",
+          deviceId: this.deviceId,
+        });
+      }
+    }
+  }
+
+  /**
+   * Recursively walk a directory, collecting candidate .md files for hashing.
+   */
+  private async collectCandidates(
     dirPath: string,
     foundPaths: Set<string>,
-    changes: FileChange[],
+    candidates: Array<{ relativePath: string; absolutePath: string; mtime: number; size: number; existing: any }>,
   ): Promise<void> {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dirPath, { withFileTypes: true });
     } catch {
-      return; // Permission denied or deleted directory
+      return;
     }
 
     for (const entry of entries) {
       const fullPath = path.join(dirPath, entry.name);
       const relativePath = normalizeVaultPath(fullPath, this.vaultPath);
 
-      // Skip ignored paths early
       if (shouldIgnorePath(relativePath, this.config.ignorePatterns)) continue;
 
       if (entry.isDirectory()) {
-        await this.walkDirectory(fullPath, foundPaths, changes);
+        await this.collectCandidates(fullPath, foundPaths, candidates);
       } else if (entry.isFile() && isMarkdownFile(entry.name)) {
         foundPaths.add(relativePath);
-        await this.checkFile(relativePath, fullPath, changes);
+        
+        // Fast pre-filter
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(fullPath);
+        } catch {
+          continue;
+        }
+
+        const mtime = stat.mtimeMs;
+        const size = stat.size;
+
+        if (this.syncState.hasChanged(relativePath, mtime, size)) {
+          const existing = this.syncState.getFileState(relativePath);
+          candidates.push({ relativePath, absolutePath: fullPath, mtime, size, existing });
+        }
       }
-    }
-  }
-
-  /**
-   * Check a single file against SyncState.
-   * Uses mtime + size as fast pre-filter, only hashes if they differ.
-   */
-  private async checkFile(
-    relativePath: string,
-    absolutePath: string,
-    changes: FileChange[],
-  ): Promise<void> {
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(absolutePath);
-    } catch {
-      return; // File disappeared
-    }
-
-    const mtime = stat.mtimeMs;
-    const size = stat.size;
-
-    // Fast check: has mtime or size changed?
-    if (!this.syncState.hasChanged(relativePath, mtime, size)) {
-      return; // No change
-    }
-
-    // Slow check: compute content hash
-    try {
-      const contentHash = await computeContentHash(absolutePath);
-      const existing = this.syncState.getFileState(relativePath);
-
-      // Skip if content hash is actually the same (mtime changed but content didn't)
-      if (existing && existing.contentHash === contentHash) {
-        return;
-      }
-
-      const changeType = existing ? "modify" : "create";
-
-      changes.push({
-        changeId: 0,
-        path: relativePath,
-        type: changeType,
-        contentHash,
-        size,
-        mtime,
-        detectedAt: Date.now(),
-        source: "scan",
-        deviceId: this.deviceId,
-      });
-    } catch {
-      // Hash computation failed (file locked, permission denied, etc.)
     }
   }
 }

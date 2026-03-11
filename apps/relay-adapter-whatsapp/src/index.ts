@@ -28,6 +28,7 @@
  *   MEDIA_AUTO_PROCESS    Auto-process received media with AI (default: true)
  */
 
+import path from "node:path";
 import { config as loadEnv } from "dotenv";
 import { WhatsAppGuard } from "./guard.js";
 import { WhatsAppBridge } from "./whatsapp.js";
@@ -128,6 +129,9 @@ const bridge = new WhatsAppBridge({
   linkPreviews: true,
 });
 
+// ── Vault path for health reporting ──────────────────────────────
+const vaultPath = process.env.VAULT_PATH ?? path.resolve(process.cwd(), "../../.vault");
+
 const bot = new RelayWhatsAppBot({
   guard,
   bridge,
@@ -140,6 +144,7 @@ const bot = new RelayWhatsAppBot({
   voiceHandler,
   mediaHandler,
   mediaAutoProcess,
+  vaultPath,
 });
 
 bot.start().catch((err) => {

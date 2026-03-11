@@ -7,6 +7,14 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Type } from "@sinclair/typebox";
+import {
+    createLocalContextTool,
+    createHeartbeatTool,
+    createMCPBridgeTool,
+    createSubmitResultTool,
+    createChatWithUserTool,
+    type AgentToolState,
+} from "./lib/agentTools.js";
 import { AgentAdapter } from "@repo/vault-client/agent-adapter";
 import dotenv from "dotenv";
 import * as fs from "fs";
@@ -43,6 +51,7 @@ import { TraceReporter } from "./lib/traceReporter.js";
 import { detectExecutionMode, parseExplicitMode, getModeConfig } from "./lib/executionModes.js";
 import { getFallbackChain, executeWithFallback, classifyError } from "./lib/modelFallback.js";
 import { createDefaultRegistry, createHQGatewayTools } from "@repo/hq-tools";
+import { SearchClient } from "@repo/vault-client/search";
 
 dotenv.config({ path: ".env.local" });
 
@@ -102,17 +111,21 @@ const adapter = new AgentAdapter(VAULT_PATH);
 // Initialize delegation tools with vault path
 initDelegationTools(VAULT_PATH);
 
+// Initialize SearchClient for hq-tools registry and prompt builder
+const searchClient = new SearchClient(VAULT_PATH);
+
 // Initialize prompt builder for context-enriched delegations
-initPromptBuilder(VAULT_PATH);
+initPromptBuilder(VAULT_PATH, searchClient);
 
 // Initialize HQ tool registry (2-tool gateway pattern — fixed context footprint)
-const hqToolRegistry = createDefaultRegistry();
 const hqGatewayContext = {
     vaultPath: VAULT_PATH,
     openrouterApiKey: OPENROUTER_API_KEY,
     geminiApiKey: GEMINI_API_KEY,
     googleWorkspaceCredentialsFile: GOOGLE_WORKSPACE_CREDENTIALS_FILE,
+    searchClient,
 };
+const hqToolRegistry = createDefaultRegistry(hqGatewayContext);
 
 // ── Task Classification ─────────────────────────────────────────────
 // Keywords that indicate the task is HQ-internal (not delegatable)
@@ -136,7 +149,7 @@ let currentJobId: string | null = null;
 let lastProcessedJobId: string | null = null;
 let lastJobStatus: string | null = null;
 let lastJobUpdatedAt: number | null = null;
-let rpcResult: any = null; // For RPC mode
+// rpcResult is now in toolState (lib/agentTools.ts)
 let heartbeatInterval: NodeJS.Timeout | null = null;
 let discordBot: DiscordBot | null = null;
 let chatSession: ChatSessionManager | null = null;
@@ -152,206 +165,19 @@ let backoffUntil = 0;
 // Helper to cast 'any' for excessive type instantiation issues
 const cast = <T>(value: any): T => value as T;
 
-
-// --- Custom Tools Definitions ---
-
-const LocalContextSchema = Type.Object({
-    action: Type.Union([Type.Literal("read"), Type.Literal("write")]),
-    content: Type.Optional(Type.String())
-});
-
-const LocalContextTool: AgentTool<typeof LocalContextSchema> = {
-    name: "local_context",
-    description: "Read or write to the local persistent memory file (agent-hq-context.md). Use this to remember things across sessions.",
-    parameters: LocalContextSchema,
-    label: "Local Context",
-    execute: async (toolCallId, args) => {
-        if (args.action === "read") {
-            if (!fs.existsSync(CONTEXT_FILE)) return { content: [{ type: "text", text: "No local context found." }], details: {} };
-            return { content: [{ type: "text", text: fs.readFileSync(CONTEXT_FILE, "utf-8") }], details: {} };
-        } else {
-            fs.writeFileSync(CONTEXT_FILE, args.content || "");
-            return { content: [{ type: "text", text: "Context updated." }], details: {} };
-        }
-    }
+// Shared mutable state for tools that need access to job context
+const toolState: AgentToolState = {
+    currentJobId: null,
+    rpcResult: null,
+    pendingUserResponse: null,
 };
 
-const HeartbeatSchema = Type.Object({
-    action: Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("append")]),
-    content: Type.Optional(Type.String({ description: "New content for 'write', or text to append for 'append'" }))
-});
-
-const HeartbeatTool: AgentTool<typeof HeartbeatSchema> = {
-    name: "heartbeat",
-    description: "Read, write, or append to the HQ Heartbeat note. This note is processed by a server-side cron every 2 minutes — any actionable content will be dispatched as a background job to an available worker. Use 'write' to replace the entire content, 'append' to add a task, or 'read' to check current content.",
-    parameters: HeartbeatSchema,
-    label: "Heartbeat",
-    execute: async (toolCallId, args) => {
-        try {
-            if (args.action === "read") {
-                const context = await adapter.getAgentContext();
-                const hb = context.find((n: any) => n.title === "Heartbeat");
-                return { content: [{ type: "text", text: hb ? hb.content : "No heartbeat note found." }], details: {} };
-            } else if (args.action === "write") {
-                await adapter.updateSystemNote({
-                    title: "Heartbeat",
-                    content: args.content || ""
-                });
-                return { content: [{ type: "text", text: "Heartbeat note updated." }], details: {} };
-            } else {
-                await adapter.appendToSystemNote({
-                    title: "Heartbeat",
-                    content: args.content || ""
-                });
-                return { content: [{ type: "text", text: "Appended to heartbeat note." }], details: {} };
-            }
-        } catch (error: any) {
-            return { content: [{ type: "text", text: `Heartbeat error: ${error.message}` }], details: { error } };
-        }
-    }
-};
-
-const MCPBridgeSchema = Type.Object({
-    toolName: Type.String(),
-    arguments: Type.Any()
-});
-
-const MCPBridgeTool: AgentTool<typeof MCPBridgeSchema> = {
-    name: "mcp_bridge",
-    description: "Call cloud-hosted MCP servers (Knowledge Graphs, Browser Tools) via the Convex MCP gateway.",
-    parameters: MCPBridgeSchema,
-    label: "MCP Bridge",
-    execute: async (toolCallId, args) => {
-        const mcpGatewayUrl = process.env.MCP_GATEWAY_URL || "";
-        const mcpGatewayToken = process.env.MCP_GATEWAY_TOKEN;
-        if (!mcpGatewayUrl || !mcpGatewayToken) {
-            return { content: [{ type: "text", text: "MCP Bridge not configured: set MCP_GATEWAY_URL and MCP_GATEWAY_TOKEN env vars." }], details: {} };
-        }
-        const mcpUrl = mcpGatewayUrl;
-        const authHeader = `Bearer ${mcpGatewayToken}`;
-
-        try {
-            const response = await fetch(mcpUrl, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": authHeader,
-                },
-                body: JSON.stringify({
-                    jsonrpc: "2.0",
-                    id: 1,
-                    method: "tools/call",
-                    params: {
-                        name: args.toolName,
-                        arguments: args.arguments,
-                    },
-                }),
-            });
-            const data: any = await response.json();
-            const resultText = JSON.stringify(data.result || data.error || data);
-            return { content: [{ type: "text", text: resultText }], details: { data } };
-        } catch (error: any) {
-            return { content: [{ type: "text", text: `MCP Error: ${error.message}` }], details: { error } };
-        }
-    }
-};
-
-const SubmitResultSchema = Type.Object({
-    result: Type.Any()
-});
-
-const SubmitResultTool: AgentTool<typeof SubmitResultSchema> = {
-    name: "submit_result",
-    description: "Submit the final result of an RPC job. Use this ONLY when the user asks for a direct return value (RPC mode).",
-    parameters: SubmitResultSchema,
-    label: "Submit Result",
-    execute: async (toolCallId, args) => {
-        if (currentJobId) {
-            rpcResult = args.result;
-            return { content: [{ type: "text", text: "Result submitted. You may now stop." }], details: {} };
-        }
-        return { content: [{ type: "text", text: "Error: No active job." }], details: {} };
-    }
-};
-
-// --- Interactive Chat Tool ---
-
-const ChatWithUserSchema = Type.Object({
-    message: Type.String({ description: "The message or question to ask the user" }),
-    waitForResponse: Type.Optional(Type.Boolean({ description: "Whether to wait for the user to respond before continuing" }))
-});
-
-let pendingUserResponse: string | null = null;
-
-const ChatWithUserTool: AgentTool<typeof ChatWithUserSchema> = {
-    name: "chat_with_user",
-    description: "Send a message to the user and optionally wait for a response. Use this to ask clarifying questions, confirm actions, or provide updates during long-running tasks. For interactive jobs, set waitForResponse=true to pause execution until the user replies.",
-    parameters: ChatWithUserSchema,
-    label: "Chat with User",
-    execute: async (toolCallId, args) => {
-        // Log the message
-        console.log(`[Agent -> User]: ${args.message}`);
-
-        // If we're in an interactive job and need to wait for a response
-        if (args.waitForResponse && currentJobId) {
-            // Update job status to waiting
-            await adapter.updateJobStatus({
-                jobId: currentJobId,
-                status: "waiting_for_user" as any,
-                conversationHistory: []
-            });
-
-            // Add to job logs
-            await adapter.addJobLog({
-                jobId: currentJobId,
-                type: "info",
-                content: `Agent: ${args.message}`,
-            });
-
-            // Wait for user response with polling
-            pendingUserResponse = null;
-            const startTime = Date.now();
-            const timeout = 30 * 60 * 1000; // 30 minute timeout
-
-            while (Date.now() - startTime < timeout) {
-                // Check for user response
-                const job = await adapter.getJob({ jobId: currentJobId });
-
-                if (job && job.status === "running" && job.pendingUserMessage) {
-                    pendingUserResponse = job.pendingUserMessage;
-                    // Clear the pending message
-                    await adapter.updateJobStatus({
-                        jobId: currentJobId,
-                        status: "running" as any,
-                        conversationHistory: job.conversationHistory
-                    });
-                    break;
-                }
-
-                // Wait 500ms before checking again
-                await new Promise(resolve => setTimeout(resolve, 500));
-            }
-
-            if (pendingUserResponse) {
-                return {
-                    content: [{ type: "text", text: pendingUserResponse }],
-                    details: { received: true, message: pendingUserResponse }
-                };
-            } else {
-                return {
-                    content: [{ type: "text", text: "No response received within timeout period." }],
-                    details: { timeout: true }
-                };
-            }
-        }
-
-        // Non-blocking message
-        return {
-            content: [{ type: "text", text: `Message sent to user: "${args.message}"` }],
-            details: { acknowledged: true }
-        };
-    }
-};
+// --- Custom Tools (extracted to lib/agentTools.ts) ---
+const LocalContextTool = createLocalContextTool(CONTEXT_FILE);
+const HeartbeatTool = createHeartbeatTool(adapter);
+const MCPBridgeTool = createMCPBridgeTool();
+const SubmitResultTool = createSubmitResultTool(toolState);
+const ChatWithUserTool = createChatWithUserTool(adapter, toolState);
 
 async function setupAgent() {
     // 1. Initialize System Identity
@@ -603,6 +429,7 @@ async function handleJob(job: any) {
     if (isBusy) return;
     isBusy = true;
     currentJobId = job._id;
+    toolState.currentJobId = job._id;
 
     // Update Discord presence and agent context
     await discordBot?.updatePresence("busy");
@@ -630,6 +457,7 @@ async function handleJob(job: any) {
             console.log(`⚡ Job already claimed by another worker, skipping.`);
             isBusy = false;
             currentJobId = null;
+            toolState.currentJobId = null;
             return;
         }
 
@@ -658,6 +486,7 @@ async function handleJob(job: any) {
             // Job will be marked as done when terminal exits
             isBusy = false;
             currentJobId = null;
+            toolState.currentJobId = null;
             return;
         }
 
@@ -1366,7 +1195,7 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
         await adapter.updateJobStatus({
             jobId: job._id,
             status: "done" as any,
-            result: rpcResult,
+            result: toolState.rpcResult,
             stats: jobStats,
         });
 
@@ -1465,7 +1294,9 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
         isBusy = false;
         currentJobId = null;
         currentSession = null;
-        rpcResult = null;
+        toolState.currentJobId = null;
+        toolState.rpcResult = null;
+        toolState.pendingUserResponse = null;
         setCurrentJob(null, null); // Clear delegation context
 
         // Update Discord presence and agent context back to idle

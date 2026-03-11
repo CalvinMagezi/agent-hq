@@ -61,6 +61,9 @@ yarn-error.log*
 # Vault (local Obsidian data — not tracked)
 .vault/
 
+# Claude Code project settings (machine-specific, contains personal config)
+.claude/
+
 # Custom commands (private, local-only Discord relay commands)
 **/custom-commands/
 
@@ -74,3 +77,8 @@ logs
 # Vault sync server — generated secrets and database (contain sensitive keys)
 sync-server.secret
 sync-server.db
+
+# Rust & NAPI build artifacts
+target/
+*.node
+

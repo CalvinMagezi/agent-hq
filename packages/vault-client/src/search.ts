@@ -9,6 +9,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "fs";
 import * as path from "path";
 import matter from "gray-matter";
+import { cosineSimilarity, batchCosineSimilarity } from "@repo/vault-native";
 
 export interface SearchHit {
   notePath: string;
@@ -167,7 +168,7 @@ export class SearchClient {
         rank: number;
       }>;
 
-    return rows.map((row) => {
+    return rows.filter((row) => row.path != null).map((row) => {
       const parts = row.path.split("/");
       const notebook = parts.length > 1 ? parts[1] ?? "Unknown" : "Unknown";
 
@@ -194,17 +195,21 @@ export class SearchClient {
     if (rows.length === 0) return [];
 
     const queryVec = new Float32Array(queryEmbedding);
-    const scored: Array<{ path: string; score: number }> = [];
+    const dim = queryVec.length;
 
-    for (const row of rows) {
+    // Pack all embeddings into a contiguous matrix for batch SIMD processing
+    const matrix = new Float32Array(rows.length * dim);
+    for (let i = 0; i < rows.length; i++) {
       const vec = new Float32Array(
-        row.embedding.buffer,
-        row.embedding.byteOffset,
-        row.embedding.byteLength / 4,
+        rows[i].embedding.buffer,
+        rows[i].embedding.byteOffset,
+        rows[i].embedding.byteLength / 4,
       );
-      const score = cosineSimilarity(queryVec, vec);
-      scored.push({ path: row.note_path, score });
+      matrix.set(vec, i * dim);
     }
+
+    const scores = batchCosineSimilarity(queryVec, matrix, dim);
+    const scored = rows.map((row, i) => ({ path: row.note_path, score: scores[i] }));
 
     scored.sort((a, b) => b.score - a.score);
     const topResults = scored.slice(0, limit);
@@ -382,19 +387,25 @@ export class SearchClient {
       )
       .all(relPath) as Array<{ note_path: string; embedding: Uint8Array }>;
 
-    const scored: Array<{ path: string; score: number }> = [];
+    if (rows.length === 0) return [];
 
-    for (const row of rows) {
+    const dim = sourceEmb.length;
+
+    // Pack all embeddings into a contiguous matrix for batch SIMD processing
+    const matrix = new Float32Array(rows.length * dim);
+    for (let i = 0; i < rows.length; i++) {
       const vec = new Float32Array(
-        row.embedding.buffer,
-        row.embedding.byteOffset,
-        row.embedding.byteLength / 4,
+        rows[i].embedding.buffer,
+        rows[i].embedding.byteOffset,
+        rows[i].embedding.byteLength / 4,
       );
-      const score = cosineSimilarity(sourceEmb, vec);
-      if (score >= threshold) {
-        scored.push({ path: row.note_path, score });
-      }
+      matrix.set(vec, i * dim);
     }
+
+    const scores = batchCosineSimilarity(sourceEmb, matrix, dim);
+    const scored = rows
+      .map((row, i) => ({ path: row.note_path, score: scores[i] }))
+      .filter((r) => r.score >= threshold);
 
     scored.sort((a, b) => b.score - a.score);
     const topResults = scored.slice(0, limit);
@@ -562,23 +573,3 @@ export class SearchClient {
   }
 }
 
-/**
- * Compute cosine similarity between two vectors.
- */
-export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  if (a.length !== b.length) return 0;
-
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-
-  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
-  if (denominator === 0) return 0;
-  return dotProduct / denominator;
-}

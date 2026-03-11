@@ -3,6 +3,19 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import matter from 'gray-matter'
 import { VAULT_PATH } from './vault'
+import { SearchClient } from '@repo/vault-client/search'
+
+// Lazy singleton — avoids opening DB on every import
+let _searchClient: SearchClient | null = null
+function getSearchClient(): SearchClient | null {
+  if (_searchClient) return _searchClient
+  try {
+    _searchClient = new SearchClient(VAULT_PATH)
+    return _searchClient
+  } catch {
+    return null
+  }
+}
 
 export interface PinnedNote {
   title: string
@@ -130,11 +143,28 @@ export const searchNotes = createServerFn({ method: 'GET' })
   .handler(async ({ data: query }): Promise<{ results: SearchHit[] }> => {
     if (!query.trim()) return { results: [] }
 
+    // Use FTS5 via SearchClient for fast, ranked search
+    const sc = getSearchClient()
+    if (sc) {
+      const hits = sc.keywordSearch(query, 30)
+      return {
+        results: hits.map((h: any) => ({
+          notePath: h.notePath,
+          title: h.title,
+          notebook: h.notebook,
+          snippet: h.snippet,
+          tags: h.tags,
+          relevance: h.relevance,
+          matchType: 'keyword' as const,
+        })),
+      }
+    }
+
+    // Fallback: simple grep walk if SearchClient unavailable (e.g. no search.db)
     const results: SearchHit[] = []
     const q = query.toLowerCase()
-    const ROOTS = ['Notebooks', '_system', '_logs']
+    const ROOTS = ['Notebooks', '_system']
     const MAX_RESULTS = 30
-    const MAX_CONTENT_BYTES = 8 * 1024
 
     const walk = (dir: string, notebook: string) => {
       if (results.length >= MAX_RESULTS) return
@@ -145,53 +175,21 @@ export const searchNotes = createServerFn({ method: 'GET' })
         if (entry.name.startsWith('.')) continue
         const fullPath = path.join(dir, entry.name)
         if (entry.isDirectory()) { walk(fullPath, notebook); continue }
-        const ext = path.extname(entry.name).toLowerCase()
-        const isText = ['.md', '.txt', '.ts', '.js', '.json', '.yaml', '.yml', '.sh', '.csv'].includes(ext)
-        if (!isText) continue
+        if (!entry.name.endsWith('.md')) continue
 
         const relPath = path.relative(VAULT_PATH, fullPath)
         let relevance = 0
-        let snippet = ''
-        let title = entry.name.replace(/\.md$/, '')
-        let tags: string[] = []
+        const title = entry.name.replace(/\.md$/, '')
 
-        if (entry.name.toLowerCase().includes(q)) relevance += 10
+        if (title.toLowerCase().includes(q)) relevance += 10
 
         try {
-          const stat = fs.statSync(fullPath)
-          if (stat.size <= 500 * 1024) {
-            const fd = fs.openSync(fullPath, 'r')
-            const buf = Buffer.alloc(Math.min(stat.size, MAX_CONTENT_BYTES))
-            const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0)
-            fs.closeSync(fd)
-            const head = buf.toString('utf-8', 0, bytesRead)
-
-            if (ext === '.md') {
-              const fmMatch = head.match(/^---\n([\s\S]*?)\n---/)
-              if (fmMatch) {
-                const fm = fmMatch[1]
-                const titleMatch = fm.match(/^title:\s*(.+)$/m)
-                if (titleMatch) title = titleMatch[1].trim().replace(/^['"]|['"]$/g, '')
-                const tagsMatch = fm.match(/^tags:\s*\[([^\]]*)\]/m)
-                if (tagsMatch) tags = tagsMatch[1].split(',').map(t => t.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
-              }
-            }
-
-            const lower = head.toLowerCase()
-            const idx = lower.indexOf(q)
-            if (idx !== -1) {
-              relevance += 5
-              const start = Math.max(0, idx - 60)
-              const end = Math.min(head.length, idx + q.length + 120)
-              snippet = head.slice(start, end).replace(/\n+/g, ' ').trim()
-              if (start > 0) snippet = '...' + snippet
-              if (end < head.length) snippet += '...'
-            }
-          }
+          const raw = fs.readFileSync(fullPath, 'utf-8').substring(0, 8192)
+          if (raw.toLowerCase().includes(q)) relevance += 5
         } catch { continue }
 
         if (relevance > 0) {
-          results.push({ notePath: relPath, title, notebook, snippet, tags, relevance, matchType: 'keyword' })
+          results.push({ notePath: relPath, title, notebook, snippet: '', tags: [], relevance, matchType: 'keyword' })
         }
       }
     }

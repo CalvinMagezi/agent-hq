@@ -17,6 +17,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { walkVaultFiles } from "@repo/vault-native";
 
 // ── CLI Args ──────────────────────────────────────────────────────────
 
@@ -46,32 +47,9 @@ interface TrainingExample {
 // ── Cartographer Extractor ────────────────────────────────────────────
 
 function collectMarkdownFiles(vaultPath: string, maxFiles = 2000): string[] {
-    const files: string[] = [];
-    const skipDirs = new Set(["_embeddings", ".git", "node_modules", ".obsidian"]);
-
-    function walk(dir: string): void {
-        if (files.length >= maxFiles) return;
-        let entries: fs.Dirent[];
-        try {
-            entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-            return;
-        }
-        for (const entry of entries) {
-            if (entry.name.startsWith(".")) continue;
-            const full = path.join(dir, entry.name);
-            const rel = path.relative(vaultPath, full);
-            if (entry.isDirectory()) {
-                if (skipDirs.has(entry.name)) continue;
-                walk(full);
-            } else if (entry.name.endsWith(".md")) {
-                files.push(rel);
-            }
-        }
-    }
-
-    walk(vaultPath);
-    return files;
+    const skipDirs = ["_embeddings", ".git", "node_modules", ".obsidian"];
+    const files = walkVaultFiles(vaultPath, skipDirs, "md");
+    return files.slice(0, maxFiles);
 }
 
 function extractWikilinks(content: string): string[] {

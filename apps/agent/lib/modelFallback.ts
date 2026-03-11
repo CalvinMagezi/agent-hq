@@ -43,24 +43,45 @@ export type ErrorClassification = "abort" | "retry";
  * - Chains are short (3 models max) to avoid latency accumulation
  */
 const FALLBACK_CHAINS: Record<string, string[]> = {
+    // ── Gemini 3.x tier (primary Gemini harness models) ──────────────
+    // Primary: OAuth free (1000 RPD) → cheap OpenRouter → mid OpenRouter → Pro OpenRouter
+    "gemini-3-flash-preview": [
+        "gemini-3-flash-preview",                   // OAuth, 1000 RPD free
+        "google/gemini-3.1-flash-lite-preview",     // OpenRouter, $0.25/1M (cheapest)
+        "google/gemini-3-flash-preview",            // OpenRouter, $0.50/1M
+        "google/gemini-3.1-pro-preview",            // OpenRouter, $2.00/1M (heavy use)
+    ],
+    // Heavy/explicit Pro chain
+    "gemini-3.1-pro-preview": [
+        "gemini-3.1-pro-preview",
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-pro-preview-customtools",
+        "claude-opus-4-6",
+    ],
+    // Lite chain (direct API only — CLI OAuth doesn't support it yet)
+    "gemini-3.1-flash-lite-preview": [
+        "gemini-3.1-flash-lite-preview",
+        "google/gemini-3.1-flash-lite-preview",
+        "google/gemini-3-flash-preview",
+    ],
+
     // ── Flash tier (fast, cheap) ──────────────────────────────────
     "gemini-2.5-flash": ["gemini-2.5-flash", "claude-sonnet-4-6", "gpt-4.1-mini"],
-    "claude-sonnet-4-6": ["claude-sonnet-4-6", "gemini-2.5-flash", "gpt-4.1-mini"],
-    "gpt-4.1-mini": ["gpt-4.1-mini", "gemini-2.5-flash", "claude-sonnet-4-6"],
+    "claude-sonnet-4-6": ["claude-sonnet-4-6", "gemini-3-flash-preview", "gpt-4.1-mini"],
+    "gpt-4.1-mini": ["gpt-4.1-mini", "gemini-3-flash-preview", "claude-sonnet-4-6"],
 
     // ── Pro tier (smart, capable) ─────────────────────────────────
     "gemini-2.5-pro": ["gemini-2.5-pro", "claude-opus-4-6", "gpt-5"],
-    "claude-opus-4-6": ["claude-opus-4-6", "gemini-2.5-pro", "gpt-5"],
-    "gpt-5": ["gpt-5", "claude-opus-4-6", "gemini-2.5-pro"],
+    "claude-opus-4-6": ["claude-opus-4-6", "gemini-3.1-pro-preview", "gpt-5"],
+    "gpt-5": ["gpt-5", "claude-opus-4-6", "gemini-3.1-pro-preview"],
 
     // ── Specialized ───────────────────────────────────────────────
-    "gemini-2.5-flash-lite": ["gemini-2.5-flash-lite", "gemini-2.5-flash"],
+    "gemini-2.5-flash-lite": ["gemini-2.5-flash-lite", "gemini-3-flash-preview"],
 
     // ── Worker tier (free/cheap models for background vault tasks) ─
-    // Tries local Ollama first (free), then cheap cloud fallbacks.
-    // Never reaches expensive frontier models.
-    "ollama/qwen3.5:9b": ["ollama/qwen3.5:9b", "gemini-2.5-flash-lite", "gemini-2.5-flash"],
-    "ollama/llama3.2:3b": ["ollama/llama3.2:3b", "gemini-2.5-flash-lite", "gemini-2.5-flash"],
+    // Tries local Ollama first (free), then cheap 3.x cloud fallbacks.
+    "ollama/qwen3.5:9b": ["ollama/qwen3.5:9b", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"],
+    "ollama/llama3.2:3b": ["ollama/llama3.2:3b", "gemini-3.1-flash-lite-preview", "gemini-3-flash-preview"],
 };
 
 // ── Error Classification ─────────────────────────────────────────────

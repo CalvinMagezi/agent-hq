@@ -16,7 +16,8 @@ export type InitStep =
   | "models"
   | "env"
   | "services"
-  | "cli";
+  | "cli"
+  | "mcp";
 
 export interface InitState {
   version: string;

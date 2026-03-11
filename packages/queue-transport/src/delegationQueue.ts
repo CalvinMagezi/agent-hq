@@ -4,24 +4,47 @@ import { delegationCodec } from "./codecs/delegationCodec";
 import { QueueConfig } from "./types";
 
 export class DelegationQueue {
-    private mainCli: FbmqCli;
+    private mainClis: Map<string, FbmqCli> = new Map();
     private stagedCli: FbmqCli;
+    private config: QueueConfig;
 
     constructor(config: QueueConfig, stagedQueueRoot: string) {
-        this.mainCli = new FbmqCli(config.queueRoot, config.fbmqBin);
+        this.config = config;
         this.stagedCli = new FbmqCli(stagedQueueRoot, config.fbmqBin);
     }
 
+    private async getHarnessCli(harnessType: string): Promise<FbmqCli> {
+        const type = (harnessType && harnessType !== "any") ? harnessType : "any";
+        if (!this.mainClis.has(type)) {
+            const root = type === "any" ? this.config.queueRoot : `${this.config.queueRoot}-${type}`;
+            const cli = new FbmqCli(root, this.config.fbmqBin);
+            await cli.init(true);
+            this.mainClis.set(type, cli);
+        }
+        return this.mainClis.get(type)!;
+    }
+
+    private getCliForPath(path: string): FbmqCli | null {
+        const clis = Array.from(this.mainClis.entries()).sort((a, b) => b[0].length - a[0].length);
+        for (const [type, cli] of clis) {
+            const expectedRoot = type === "any" ? this.config.queueRoot : `${this.config.queueRoot}-${type}`;
+            if (path.includes(expectedRoot)) {
+                return cli;
+            }
+        }
+        return this.mainClis.get("any") || null;
+    }
+
     async init(): Promise<void> {
-        await this.mainCli.init(true); // main uses priority
         await this.stagedCli.init(false); // staged uses no priority (FIFO)
+        await this.getHarnessCli("any");
     }
 
     async enqueue(task: DelegatedTask): Promise<string> {
         const { body, priority, correlationId, custom, ttl } = delegationCodec.serialize(task);
 
         const isStaged = task.dependsOn && task.dependsOn.length > 0;
-        const cli = isStaged ? this.stagedCli : this.mainCli;
+        const cli = isStaged ? this.stagedCli : await this.getHarnessCli(task.targetHarnessType);
 
         return cli.push(body, {
             priority: isStaged ? undefined : priority,
@@ -32,35 +55,49 @@ export class DelegationQueue {
     }
 
     async dequeue(targetHarnessType?: HarnessType): Promise<DelegatedTask | null> {
-        // We may need to pop and nack until we find a matching harness type.
-        // However, to prevent infinite loops, we should limit pop attempts.
-        // For simplicity, pop once, if it doesn't match, nack and return null.
-        // A better approach is multiple queues or tag filtering if fbmq supports it.
-        // But `fbmq pop` doesn't filter by tag natively in the MVP.
-        // We just pop and nack.
-        const claimedPath = await this.mainCli.pop();
-        if (!claimedPath) return null;
-
-        const rawBody = await this.mainCli.cat(claimedPath);
-        const headers = await this.mainCli.inspect(claimedPath);
-        const { custom, cleanBody } = FbmqCli.parseBodyCustom(rawBody);
-        headers.custom = { ...headers.custom, ...custom };
-        const task = delegationCodec.deserialize(claimedPath, cleanBody, headers);
-
-        if (targetHarnessType && targetHarnessType !== "any" && task.targetHarnessType !== targetHarnessType && task.targetHarnessType !== "any") {
-            await this.mainCli.nack(claimedPath);
-            return null;
+        const typesToTry = [];
+        if (targetHarnessType && targetHarnessType !== "any") {
+            typesToTry.push(targetHarnessType);
         }
+        typesToTry.push("any");
 
-        return task;
+        for (const type of typesToTry) {
+            const cli = await this.getHarnessCli(type);
+            const claimedPath = await cli.pop();
+
+            if (claimedPath) {
+                const rawBody = await cli.cat(claimedPath);
+                const headers = await cli.inspect(claimedPath);
+                const { custom, cleanBody } = FbmqCli.parseBodyCustom(rawBody);
+                headers.custom = { ...headers.custom, ...custom };
+                const task = delegationCodec.deserialize(claimedPath, cleanBody, headers);
+
+                return task;
+            }
+        }
+        return null;
+    }
+
+    async inspectPath(path: string) {
+        const cli = this.getCliForPath(path);
+        if (!cli) throw new Error("No FbmqCli found for path");
+        return cli.inspect(path);
+    }
+
+    async catPath(path: string) {
+        const cli = this.getCliForPath(path);
+        if (!cli) throw new Error("No FbmqCli found for path");
+        return cli.cat(path);
     }
 
     async complete(path: string): Promise<void> {
-        await this.mainCli.ack(path);
+        const cli = this.getCliForPath(path);
+        if (cli) await cli.ack(path);
     }
 
     async fail(path: string): Promise<void> {
-        await this.mainCli.nack(path);
+        const cli = this.getCliForPath(path);
+        if (cli) await cli.nack(path);
     }
 
     async promoteReady(completedTaskIds: Set<string>): Promise<void> {
@@ -104,7 +141,11 @@ export class DelegationQueue {
     }
 
     async depth(): Promise<number> {
-        return this.mainCli.depth();
+        let total = 0;
+        for (const cli of this.mainClis.values()) {
+            total += await cli.depth();
+        }
+        return total;
     }
 
     async stagedDepth(): Promise<number> {
@@ -112,11 +153,15 @@ export class DelegationQueue {
     }
 
     async reap(leaseSecs?: number): Promise<void> {
-        await this.mainCli.reap(leaseSecs);
+        for (const cli of this.mainClis.values()) {
+            await cli.reap(leaseSecs);
+        }
     }
 
     async purge(maxAgeSecs?: number): Promise<void> {
-        await this.mainCli.purge(maxAgeSecs);
+        for (const cli of this.mainClis.values()) {
+            await cli.purge(maxAgeSecs);
+        }
         await this.stagedCli.purge(maxAgeSecs);
     }
 }

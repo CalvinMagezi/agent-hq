@@ -1,5 +1,6 @@
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import type { BashSpawnContext } from "@mariozechner/pi-coding-agent";
+import { analyzeBashCommand } from "./lib/bashAnalyzer.js";
 
 export enum SecurityProfile {
     // Read-only access to safe resources
@@ -60,50 +61,7 @@ const FILE_WRITE_TOOLS = new Set([
     "edit",
 ]);
 
-// Dangerous bash patterns that always require approval or blocking
-export const DANGEROUS_BASH_PATTERNS: RegExp[] = [
-    // Destructive file operations
-    /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|--recursive|--force)\b/i,
-    /\brm\s+-[a-zA-Z]*f[a-zA-Z]*r\b/i,
-
-    // Multi-line injection attempts
-    /\n\s*rm\s+-/i,
-    /;\s*rm\s+-/i,
-    /&&\s*rm\s+-/i,
-    /\|\|\s*rm\s+-/i,
-
-    // Command substitution
-    /\$\(\s*rm\s+-/i,
-    /`\s*rm\s+-/i,
-
-    // Hex/octal encoding bypass prevention
-    /\\x[0-9a-f]{2}/i,
-    /\\[0-7]{3}/,
-
-    // IFS injection
-    /\$\{IFS\}/i,
-    /\$IFS/i,
-
-    // Privilege escalation
-    /\bsudo\b/i,
-    /\bchmod\s+777\b/,
-
-    // Git force operations
-    /\bgit\s+push\s+--force\b/i,
-    /\bgit\s+push\s+-f\b/i,
-    /\bgit\s+reset\s+--hard\b/i,
-
-    // Database operations
-    /\bdrop\s+table\b/i,
-    /\bdelete\s+from\b/i,
-    /\btruncate\s+/i,
-
-    // Disk operations
-    /\bmkfs\b/i,
-    /\bdd\s+if=/i,
-    /\b>\s*\/dev\/sd/i,
-];
-
+// Semantic bash guard is used instead of regex definitions
 // Env vars that should never be leaked to child processes
 const SENSITIVE_ENV_VARS = [
     "OPENROUTER_API_KEY",
@@ -156,12 +114,11 @@ export function createSecuritySpawnHook(
         // Block dangerous patterns for non-admin, non-guarded profiles
         // (GUARDED handles this via approval flow in ToolGuardian instead)
         if (profile === SecurityProfile.MINIMAL || profile === SecurityProfile.STANDARD) {
-            for (const pattern of DANGEROUS_BASH_PATTERNS) {
-                if (pattern.test(ctx.command)) {
-                    throw new Error(
-                        `Security Error: Dangerous command blocked by spawn hook (${profile} profile): ${ctx.command.substring(0, 100)}`
-                    );
-                }
+            const analysis = analyzeBashCommand(ctx.command);
+            if (analysis.isDangerous) {
+                throw new Error(
+                    `Security Error: Dangerous command blocked by spawn hook (${profile} profile). Reason: ${analysis.reason}. Command: ${ctx.command.substring(0, 100)}`
+                );
             }
         }
 
@@ -186,10 +143,9 @@ function assessRisk(toolName: string, args: unknown): RiskLevel {
 
     // Check bash/shell for dangerous patterns
     if (toolName === "bash" || toolName === "shell") {
-        for (const pattern of DANGEROUS_BASH_PATTERNS) {
-            if (pattern.test(argsStr)) {
-                return "critical";
-            }
+        const analysis = analyzeBashCommand(argsStr);
+        if (analysis.isDangerous) {
+            return "critical";
         }
         return "medium";
     }
@@ -270,15 +226,26 @@ export class ToolGuardian {
                 }
 
                 // Path sandboxing for file writes
-                if (guardian.allowedPaths && guardian.allowedPaths.length > 0 && FILE_WRITE_TOOLS.has(tool.name)) {
+                if (FILE_WRITE_TOOLS.has(tool.name)) {
                     const argsObj = args as Record<string, any>;
                     const targetPath = argsObj?.file || argsObj?.path || argsObj?.filePath;
                     if (targetPath) {
                         const pathModule = require("path");
                         const resolvedTarget = pathModule.resolve(targetPath);
-                        const isAllowed = guardian.allowedPaths.some(p => resolvedTarget.startsWith(pathModule.resolve(p)));
-                        if (!isAllowed) {
-                            throw new Error(`Security Error: Path ${resolvedTarget} is outside allowed directories.`);
+
+                        // First check allowlist if provided
+                        if (guardian.allowedPaths && guardian.allowedPaths.length > 0) {
+                            const isAllowed = guardian.allowedPaths.some(p => resolvedTarget.startsWith(pathModule.resolve(p)));
+                            if (!isAllowed) {
+                                throw new Error(`Security Error: Path ${resolvedTarget} is outside allowed directories.`);
+                            }
+                        }
+
+                        // Then check explicit blocklist (filesystem policy)
+                        const { loadFilesystemPolicy, validatePathAgainstPolicy } = require("./lib/filesystemPolicy");
+                        const policy = loadFilesystemPolicy();
+                        if (!validatePathAgainstPolicy(resolvedTarget, policy)) {
+                            throw new Error(`PolicyViolation: Path ${resolvedTarget} is explicitly blocked by filesystem policy.`);
                         }
                     }
                 }

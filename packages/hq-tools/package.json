@@ -7,13 +7,26 @@
   "exports": {
     ".": "./src/index.ts",
     "./gateway": "./src/gateway.ts",
-    "./registry": "./src/registry.ts"
+    "./registry": "./src/registry.ts",
+    "./mcp": "./src/mcp.ts",
+    "./agents": "./agents",
+    "./teams": "./teams"
+  },
+  "bin": {
+    "hq-mcp": "./src/mcp.ts"
   },
   "scripts": {
     "test": "bun test"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@resvg/resvg-js": "^2.6.0",
-    "@sinclair/typebox": "^0.32.0"
+    "@sinclair/typebox": "^0.32.0",
+    "gray-matter": "^4.0.3",
+    "js-yaml": "^4.1.1",
+    "zod": "3.24.4"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9"
   }
 }

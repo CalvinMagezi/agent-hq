@@ -59,9 +59,21 @@ export class VaultAPI {
     }
   }
 
-  /** Search notes using keyword search (semantic if search index available) */
+  /** Search notes using FTS5 keyword search via SearchClient (falls back to grep if unavailable) */
   async searchNotes(query: string, limit: number = 5): Promise<ConvexNote[]> {
     try {
+      // Prefer FTS5 search via SearchClient — much faster and more relevant
+      if (this.search) {
+        const hits = this.search.keywordSearch(query, limit);
+        return hits.map((h: any) => ({
+          noteId: h.notePath,
+          title: h.title,
+          content: h.snippet,
+          tags: h.tags,
+          notebook: h.notebook,
+        }));
+      }
+      // Fallback to grep-style search if SearchClient unavailable
       const results = await this.vault.searchNotes(query, limit);
       return results.map((r) => ({
         noteId: r.noteId,

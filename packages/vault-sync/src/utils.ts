@@ -6,12 +6,19 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+import { hashFile as nativeHashFile, hashFilesParallel as nativeHashFilesParallel } from "@repo/vault-native";
 
 /** Compute SHA-256 content hash of a file. */
 export async function computeContentHash(filePath: string): Promise<string> {
-  const content = fs.readFileSync(filePath);
-  return crypto.createHash("sha256").update(content).digest("hex");
+  return nativeHashFile(filePath);
 }
+
+/** Compute SHA-256 content hashes of multiple files in parallel. */
+export async function hashFilesParallel(filePaths: string[]): Promise<string[]> {
+  return nativeHashFilesParallel(filePaths);
+}
+
+
 
 /** Compute SHA-256 hash of a string. */
 export function hashString(content: string): string {

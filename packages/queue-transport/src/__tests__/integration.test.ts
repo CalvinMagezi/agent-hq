@@ -392,10 +392,15 @@ describe("DelegationQueue", () => {
 
   test("promoteReady moves tasks with met deps to main", async () => {
     // Drain both queues first
-    let msg = await queue.dequeue();
+    let msg = await queue.dequeue("claude-code");
     while (msg) {
       await queue.complete(msg._filePath);
-      msg = await queue.dequeue();
+      msg = await queue.dequeue("claude-code");
+    }
+    let msgAny = await queue.dequeue("any");
+    while (msgAny) {
+      await queue.complete(msgAny._filePath);
+      msgAny = await queue.dequeue("any");
     }
 
     // Stage a task with dependency on "dep-1"
@@ -406,8 +411,8 @@ describe("DelegationQueue", () => {
     // Promote with dep-1 completed
     await queue.promoteReady(new Set(["dep-1"]));
 
-    // Task should now be in main queue
-    const dequeued = await queue.dequeue();
+    // Task should now be in main queue for claude-code
+    const dequeued = await queue.dequeue("claude-code");
     expect(dequeued).not.toBeNull();
     expect(dequeued!.taskId).toBe("task-promote");
     await queue.complete(dequeued!._filePath);

@@ -70,7 +70,7 @@ describe("modelFallback", () => {
         test("pro tier models have pro fallbacks", () => {
             const chain = getFallbackChain("claude-opus-4-6");
             expect(chain.primary).toBe("claude-opus-4-6");
-            expect(chain.fallbacks).toContain("gemini-2.5-pro");
+            expect(chain.fallbacks).toContain("gemini-3.1-pro-preview");
             expect(chain.fallbacks).toContain("gpt-5");
         });
 

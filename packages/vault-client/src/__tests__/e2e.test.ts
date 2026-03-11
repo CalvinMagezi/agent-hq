@@ -133,9 +133,14 @@ describe("End-to-End Integration (fbmq)", () => {
     const jobDoneFiles = fs.readdirSync(jobDoneDir).filter(f => f.endsWith(".md"));
     expect(jobDoneFiles.length).toBe(1);
 
-    const delegDoneDir = path.join(vaultPath, "_fbmq/delegation/done");
-    const delegDoneFiles = fs.readdirSync(delegDoneDir).filter(f => f.endsWith(".md"));
-    expect(delegDoneFiles.length).toBe(2); // research-1 + code-1
+    const claudeDoneDir = path.join(vaultPath, "_fbmq/delegation-claude-code/done");
+    const geminiDoneDir = path.join(vaultPath, "_fbmq/delegation-gemini-cli/done");
+
+    let totalDone = 0;
+    if (fs.existsSync(claudeDoneDir)) totalDone += fs.readdirSync(claudeDoneDir).filter(f => f.endsWith(".md")).length;
+    if (fs.existsSync(geminiDoneDir)) totalDone += fs.readdirSync(geminiDoneDir).filter(f => f.endsWith(".md")).length;
+
+    expect(totalDone).toBe(2); // research-1 + code-1
   });
 
   test("priority ordering: critical jobs processed before normal", async () => {

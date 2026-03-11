@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **VaultClient**: Shared package for filesystem-based data access (replaces cloud backend)
 - **Terminal Chat**: CLI chat interface (`bun run chat`)
 - **Local Daemon**: Background cron workflows (`bun run daemon`)
+- **HQ-MCP Server**: Unified MCP gateway for all HQ tools (`bun packages/hq-tools/src/mcp.ts`)
 
 Package manager: **Bun** (v1.1.0+)
 
@@ -313,6 +314,25 @@ DISCORD_BOT_TOKEN_OPENCODE=  # Optional: OpenCode bot token
 DISCORD_BOT_TOKEN_GEMINI=    # Optional: Gemini CLI bot token
 ```
 
+### HQ-MCP Server (Unified Gateway)
+Exposes all HQ tools (vault search, notes, image gen, google workspace, diagrams, agents/teams, TTS) via a single MCP server with 2 tools: `hq_discover` + `hq_call`.
+
+**Config** (`claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "agent-hq": {
+      "command": "bun",
+      "args": ["run", "/path/to/repo/packages/hq-tools/src/mcp.ts"],
+      "env": {
+        "VAULT_PATH": "/path/to/repo/.vault",
+        "OPENROUTER_API_KEY": "..."
+      }
+    }
+  }
+}
+```
+
 ## Key Conventions
 
 ### Filenames
@@ -366,6 +386,7 @@ await adapter.addJobLog(jobId, "info", "Processing...");
 ## Important Notes
 
 - The `packages/convex/` directory is archived legacy code — do not use or modify
+- `packages/vault-mcp/` has been removed — all vault tools are now in `packages/hq-tools/` via the unified MCP gateway (`packages/hq-tools/src/mcp.ts`)
 - The `.vault/_embeddings/` directory is gitignored (contains `search.db` for FTS5/embeddings and `sync.db` for file change tracking)
 - Job claiming uses atomic `fs.renameSync` — safe for concurrent workers
 - Frontmatter is parsed with `gray-matter` — all data files use YAML frontmatter

@@ -6,9 +6,9 @@
  * Telegram HTML formatting, inline keyboards for harness selection.
  */
 
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, statSync } from "fs";
 import { execSync } from "child_process";
-import { basename } from "path";
+import { basename, join, resolve } from "path";
 import { LocalHarness } from "./localHarness.js";
 import { RelayClient } from "@repo/agent-relay-protocol";
 import type {
@@ -33,6 +33,9 @@ const MAX_CHUNK_SIZE = 4000;
 
 /** Typing indicator keepalive (Telegram typing expires ~5s). */
 const TYPING_KEEPALIVE_MS = 4_000;
+
+/** Vault root relative to CWD. */
+const VAULT_ROOT = ".vault";
 
 /** Convert any audio file to OGG Opus buffer for Telegram sendVoice. */
 function convertToOgg(inputPath: string): Buffer {
@@ -95,6 +98,7 @@ export class RelayTelegramBot {
   private activeJobLabel: string | null = null;
   private activeJobResultDelivered = false;
   private activeTaskIds = new Set<string>();
+  private activeJobSourceMsgId: number | null = null;
 
   /** Track last received/sent messages for !delete, !edit */
   private lastReceivedMsgId: number | null = null;
@@ -180,6 +184,9 @@ export class RelayTelegramBot {
 
     // Track last received message
     this.lastReceivedMsgId = msg.id;
+
+    // React with 👀 to acknowledge receipt
+    this.bridge.reactToMessage(msg.id, "👀").catch(() => { /* non-critical */ });
 
     // Voice note handling
     if (msg.isVoiceNote) {
@@ -279,7 +286,7 @@ export class RelayTelegramBot {
       console.log(`[relay-telegram] Intent: ${intent}, harness: ${harness}, role: ${role}`);
 
       if (intent !== "general" && !this.modelOverride) {
-        await this.handleDelegation(content, harness, role);
+        await this.handleDelegation(content, harness, role, msg);
       } else {
         await this.handleChat(content, msg);
       }
@@ -332,15 +339,44 @@ export class RelayTelegramBot {
         const fname = mediaFilename ?? "unknown";
         const caption = msg.content ? `\nCaption: "${msg.content}"` : "";
 
+        // Save document to vault uploads
+        let vaultRef = "";
+        if (mediaBuffer && mediaSize && mediaSize > 0) {
+          try {
+            const uploadsDir = join(VAULT_ROOT, "_jobs", "uploads");
+            mkdirSync(uploadsDir, { recursive: true });
+            const safeName = `tg-upload-${Date.now()}-${fname.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+            const uploadPath = join(uploadsDir, safeName);
+            writeFileSync(uploadPath, mediaBuffer);
+            // Write a vault note with frontmatter
+            const noteContent = [
+              "---",
+              "noteType: upload",
+              "source: telegram",
+              `filename: ${safeName}`,
+              `size: ${mediaSize}`,
+              `receivedAt: ${new Date().toISOString()}`,
+              "---",
+              "",
+              `File saved from Telegram: ${fname}`,
+            ].join("\n");
+            writeFileSync(join(uploadsDir, safeName.replace(/\.[^.]+$/, ".md")), noteContent);
+            vaultRef = `\n\n[Document saved to vault: ${uploadPath}]`;
+            console.log(`[relay-telegram] Saved upload to ${uploadPath}`);
+          } catch (e) {
+            console.error("[relay-telegram] Failed to save upload to vault:", e);
+          }
+        }
+
         if (this.mediaAutoProcess && this.mediaHandler && mediaMimeType) {
-          const extracted = this.mediaHandler.extractDocumentText(mediaBuffer, mediaMimeType);
+          const extracted = this.mediaHandler.extractDocumentText(mediaBuffer!, mediaMimeType, fname);
           if (extracted.startsWith("(Binary")) {
-            await this.handleChat(`[Document: ${fname} (${sizeStr})]${caption}\n\n${extracted}`, msg);
+            await this.handleChat(`[Document: ${fname} (${sizeStr})]${caption}\n\n${extracted}${vaultRef}`, msg);
           } else {
-            await this.handleChat(`[Document: ${fname} (${sizeStr})]${caption}\n\nContent:\n${extracted}`, msg);
+            await this.handleChat(`[Document: ${fname} (${sizeStr})]${caption}\n\nContent:\n${extracted}${vaultRef}`, msg);
           }
         } else {
-          await this.sendReply(`Document received: ${fname} (${sizeStr})${caption}`, msg);
+          await this.sendReply(`Document received: ${fname} (${sizeStr})${caption}${vaultRef}`, msg);
         }
         break;
       }
@@ -452,7 +488,32 @@ export class RelayTelegramBot {
         return;
       }
 
-      case "status":
+      case "export": {
+        if (!argStr) {
+          await this.bridge.sendMessage(
+            "Usage: <code>!export &lt;relative-vault-path&gt;</code>\n" +
+            "Example: <code>!export Notebooks/Projects/report.md</code>",
+          );
+          return;
+        }
+        // Resolve relative to vault root or CWD
+        const exportPath = argStr.startsWith("/")
+          ? argStr
+          : resolve(VAULT_ROOT, argStr);
+        await this.bridge.sendDocumentFromPath(exportPath, `📎 ${basename(exportPath)}`);
+        return;
+      }
+
+      case "pin": {
+        if (!this.lastSentMsgId) {
+          await this.bridge.sendMessage("No recent bot message to pin.");
+          return;
+        }
+        await this.bridge.pinMessage(this.lastSentMsgId);
+        return;
+      }
+
+      case "diagram":
       case "hq":
         if (this.activeJobId) {
           const label = this.activeJobLabel ?? "task";
@@ -627,34 +688,37 @@ export class RelayTelegramBot {
       case "commands":
         await this.bridge.sendMessage(
           "<b>Telegram HQ Commands</b>\n\n" +
+          "<i>Slash commands (<code>/cmd</code>) and bang commands (<code>!cmd</code>) are interchangeable.</i>\n\n" +
           "<b>Harness</b>\n" +
-          "<code>!harness</code> \u2014 Show harness picker\n" +
-          "<code>!harness claude</code> \u2014 Pin to Claude Code\n" +
-          "<code>!harness opencode</code> \u2014 Pin to OpenCode\n" +
-          "<code>!harness gemini</code> \u2014 Pin to Gemini CLI\n" +
-          "<code>!harness auto</code> \u2014 Auto-route by intent\n\n" +
+          "<code>!harness</code> — Show harness picker\n" +
+          "<code>!harness claude</code> — Pin to Claude Code\n" +
+          "<code>!harness opencode</code> — Pin to OpenCode\n" +
+          "<code>!harness gemini</code> — Pin to Gemini CLI\n" +
+          "<code>!harness auto</code> — Auto-route by intent\n\n" +
           "<b>Chat</b>\n" +
-          "<code>!reset</code> \u2014 Start new conversation\n" +
-          "<code>!model &lt;name&gt;</code> \u2014 Set model by ID\n" +
-          "<code>!opus</code> / <code>!sonnet</code> / <code>!haiku</code> \u2014 Quick Claude switch\n\n" +
+          "<code>!reset</code> — Start new conversation\n" +
+          "<code>!model &lt;name&gt;</code> — Set model by ID\n" +
+          "<code>!opus</code> / <code>!sonnet</code> / <code>!haiku</code> — Quick Claude switch\n\n" +
           "<b>HQ</b>\n" +
-          "<code>!status</code> \u2014 Agent / active task status\n" +
-          "<code>!memory</code> \u2014 Show memory\n" +
-          "<code>!search &lt;query&gt;</code> \u2014 Search vault\n" +
-          "<code>!threads</code> \u2014 List conversation threads\n\n" +
+          "<code>!status</code> — Agent / active task status\n" +
+          "<code>!memory</code> — Show memory\n" +
+          "<code>!search &lt;query&gt;</code> — Search vault\n" +
+          "<code>!threads</code> — List conversation threads\n" +
+          "<code>!export &lt;vault-path&gt;</code> — Send vault file as document\n\n" +
           "<b>Media</b>\n" +
-          "<code>!media [on|off]</code> \u2014 Toggle AI media processing\n\n" +
+          "<code>!media [on|off]</code> — Toggle AI media processing\n\n" +
           "<b>Interactive</b>\n" +
-          "<code>!poll Q | Opt1 | Opt2</code> \u2014 Create a poll\n" +
-          "<code>!location &lt;lat&gt; &lt;lng&gt;</code> \u2014 Send location\n\n" +
+          "<code>!poll Q | Opt1 | Opt2</code> — Create a poll\n" +
+          "<code>!location &lt;lat&gt; &lt;lng&gt;</code> — Send location\n\n" +
           "<b>Message Ops</b>\n" +
-          "<code>!delete</code> \u2014 Delete last bot message\n" +
-          "<code>!edit &lt;text&gt;</code> \u2014 Edit last bot message\n\n" +
+          "<code>!delete</code> — Delete last bot message\n" +
+          "<code>!edit &lt;text&gt;</code> — Edit last bot message\n" +
+          "<code>!pin</code> — Pin last bot message\n\n" +
           "<b>Settings</b>\n" +
-          "<code>!voice [on|off]</code> \u2014 Toggle voice note replies\n" +
-          "<code>!format [on|off]</code> \u2014 Toggle HTML formatting\n" +
-          "<code>!sessions</code> \u2014 List active harness sessions\n" +
-          "<code>!help</code> \u2014 This message",
+          "<code>!voice [on|off]</code> — Toggle voice note replies\n" +
+          "<code>!format [on|off]</code> — Toggle HTML formatting\n" +
+          "<code>!sessions</code> — List active harness sessions\n" +
+          "<code>!help</code> — This message",
         );
         return;
 
@@ -823,6 +887,9 @@ export class RelayTelegramBot {
       enrichedContent = `[Replying to: "${preview}"]\n\n${content}`;
     }
 
+    // ⏳ signal processing started
+    if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "⏳").catch(() => {});
+
     let typingInterval: ReturnType<typeof setInterval> | null = null;
     try {
       await this.bridge.sendChatAction("typing");
@@ -839,11 +906,13 @@ export class RelayTelegramBot {
         },
         onResult: (_session, result) => {
           if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
+          if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "✅").catch(() => {});
           const formatted = this.formatEnabled ? formatForTelegram(result) : result;
           this.sendChunked(formatted).catch(console.error);
         },
         onFailed: (_session, error) => {
           if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
+          if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "❌").catch(() => {});
           console.error(`[relay-telegram] Session ${sessionId} failed: ${error}`);
           this.bridge
             .sendMessage(`<i>${label} failed: ${error}</i>`)
@@ -852,6 +921,7 @@ export class RelayTelegramBot {
       });
     } catch (err) {
       if (typingInterval) clearInterval(typingInterval);
+      if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "❌").catch(() => {});
       console.error(`[relay-telegram] Orchestrator error for session ${sessionId}:`, err);
       await this.bridge.sendMessage(
         `<i>${label} error: ${err instanceof Error ? err.message : String(err)}</i>`,
@@ -910,6 +980,7 @@ export class RelayTelegramBot {
     content: string,
     harness: "gemini-cli" | "claude-code" | "opencode" | "any",
     role?: string,
+    sourceMsg?: TelegramMessage,
   ): Promise<void> {
     this.processing = true;
     const hLabel =
@@ -917,6 +988,10 @@ export class RelayTelegramBot {
         : harness === "claude-code" ? "Claude Code"
           : harness === "opencode" ? "OpenCode"
             : "HQ";
+
+    // ⏳ signal delegation started
+    if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "⏳").catch(() => {});
+    this.activeJobSourceMsgId = sourceMsg?.id ?? null;
 
     try {
       await this.bridge.sendMessage(`<i>Routing to ${hLabel}...</i>`);
@@ -971,6 +1046,7 @@ export class RelayTelegramBot {
           this.activeJobId = null;
           this.activeJobLabel = null;
           this.activeTaskIds.clear();
+          this.activeJobSourceMsgId = null;
           this.processing = false;
           await this.bridge.sendMessage(`<i>${hLabel} didn't respond in time. Answering directly...</i>`);
           await this.handleChat(content);
@@ -978,9 +1054,13 @@ export class RelayTelegramBot {
       }, 10 * 60 * 1000);
     } catch (err) {
       console.error("[relay-telegram] Delegation setup error:", err);
+      if (this.activeJobSourceMsgId) {
+        this.bridge.reactToMessage(this.activeJobSourceMsgId, "❌").catch(() => {});
+      }
       this.activeJobId = null;
       this.activeJobLabel = null;
       this.activeTaskIds.clear();
+      this.activeJobSourceMsgId = null;
       this.processing = false;
       await this.bridge.sendMessage(`<i>${hLabel} unavailable \u2014 answering directly...</i>`);
       await this.handleChat(content);
@@ -1024,9 +1104,13 @@ export class RelayTelegramBot {
           const result = await this.fetchTaskResult(taskId);
           if (result) {
             this.activeJobResultDelivered = true;
+            if (this.activeJobSourceMsgId) {
+              this.bridge.reactToMessage(this.activeJobSourceMsgId, "✅").catch(() => {});
+            }
             this.activeJobId = null;
             this.activeJobLabel = null;
             this.activeTaskIds.clear();
+            this.activeJobSourceMsgId = null;
             this.processing = false;
             await this.sendChunked(result);
           }
@@ -1043,9 +1127,13 @@ export class RelayTelegramBot {
           const result = await this.fetchJobResult(fileJobId);
           if (result) {
             this.activeJobResultDelivered = true;
+            if (this.activeJobSourceMsgId) {
+              this.bridge.reactToMessage(this.activeJobSourceMsgId, "✅").catch(() => {});
+            }
             this.activeJobId = null;
             this.activeJobLabel = null;
             this.activeTaskIds.clear();
+            this.activeJobSourceMsgId = null;
             this.processing = false;
             await this.sendChunked(result);
           }
@@ -1059,9 +1147,13 @@ export class RelayTelegramBot {
           !this.activeJobResultDelivered
         ) {
           this.activeJobResultDelivered = true;
+          if (this.activeJobSourceMsgId) {
+            this.bridge.reactToMessage(this.activeJobSourceMsgId, "❌").catch(() => {});
+          }
           this.activeJobId = null;
           this.activeJobLabel = null;
           this.activeTaskIds.clear();
+          this.activeJobSourceMsgId = null;
           this.processing = false;
           await this.bridge.sendMessage("<i>The delegated task failed. Try again or rephrase.</i>");
         }
@@ -1126,6 +1218,9 @@ export class RelayTelegramBot {
       const preview = sourceMsg.replyContent.slice(0, 200);
       enrichedContent = `[Replying to: "${preview}"]\n\n${content}`;
     }
+
+    // ⏳ signal processing started
+    if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "⏳").catch(() => {});
 
     let typingInterval: ReturnType<typeof setInterval> | null = null;
     try {
@@ -1217,6 +1312,7 @@ export class RelayTelegramBot {
         } else {
           await this.sendFormattedResponse(responseText, sourceMsg);
         }
+        if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "✅").catch(() => {});
       } else {
         console.warn("[relay-telegram] Empty response from relay");
         await this.bridge.sendMessage(
@@ -1226,6 +1322,7 @@ export class RelayTelegramBot {
     } catch (err) {
       console.error("[relay-telegram] Chat error:", err);
       if (typingInterval) { clearInterval(typingInterval); typingInterval = null; }
+      if (sourceMsg) this.bridge.reactToMessage(sourceMsg.id, "❌").catch(() => {});
       await this.bridge.sendMessage(
         `Error: ${err instanceof Error ? err.message : String(err)}`,
       );

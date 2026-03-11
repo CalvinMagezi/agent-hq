@@ -28,6 +28,12 @@ export interface ModelSpecs {
 }
 
 const MODEL_SPECS: Record<string, ModelSpecs> = {
+    // ── Gemini 3.x (OAuth free tier — primary target) ────────────────
+    "gemini-3-flash-preview": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    "gemini-3.1-flash-lite-preview": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    "gemini-3.1-pro-preview": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    "gemini-3.1-pro-preview-customtools": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
+    // ── Gemini 2.5 (kept for backward compat) ───────────────────────
     "gemini-2.5-flash": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
     "gemini-2.5-flash-lite": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },
     "gemini-2.5-pro": { contextWindow: 1048576, maxOutputTokens: 65536, provider: "google" },

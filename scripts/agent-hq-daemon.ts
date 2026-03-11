@@ -23,6 +23,21 @@ import { SearchClient } from "@repo/vault-client/search";
 import { calculateCost } from "@repo/vault-client/pricing";
 import { createMemorySystem } from "@repo/vault-memory";
 import { notify, notifyIfMeaningful } from "./notificationService.js";
+import { driftAwareInterval } from "./lib/scheduler.js";
+import type { DaemonContext } from "./daemon/context.js";
+import { processHeartbeat as _processHeartbeat } from "./daemon/heartbeat.js";
+import { refreshNewsPulse as _refreshNewsPulse } from "./daemon/newsPulse.js";
+import { processNoteLinking as _processNoteLinking, processTopicMOCs as _processTopicMOCs } from "./daemon/noteLinking.js";
+import {
+  expireApprovals as _expireApprovals,
+  healthCheck as _healthCheck,
+  relayHealthCheck as _relayHealthCheck,
+  processEmbeddings as _processEmbeddings,
+  forgetWeakMemories as _forgetWeakMemories,
+  consolidateMemory as _consolidateMemory,
+  cleanupStaleJobs as _cleanupStaleJobs,
+  cleanupDelegationArtifacts as _cleanupDelegationArtifacts,
+} from "./daemon/healthAndCleanup.js";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -54,6 +69,38 @@ console.log(`[daemon] Press Ctrl+C to stop.`);
 
 // ─── Memory System (Ollama/qwen3.5:9b) ──────────────────────────────
 const memorySystem = createMemorySystem(VAULT_PATH);
+
+// ─── Build DaemonContext (shared across all task modules) ────────────
+// Forward-declared; `localTimestamp` and `recordTaskRun` are defined below.
+// The context is fully initialized after those functions are defined.
+let _daemonCtx: DaemonContext | null = null;
+
+function getDaemonCtx(): DaemonContext {
+  if (!_daemonCtx) {
+    _daemonCtx = {
+      vault, search, memorySystem, vaultPath: VAULT_PATH,
+      openrouterApiKey: OPENROUTER_API_KEY,
+      embeddingModel: EMBEDDING_MODEL,
+      localTimestamp, recordTaskRun, recordDailyActivity,
+      notify, notifyIfMeaningful,
+    };
+  }
+  return _daemonCtx;
+}
+
+// ─── Task wrappers (delegate to extracted modules with context) ──────
+const expireApprovals = () => _expireApprovals(getDaemonCtx());
+const processHeartbeat = () => _processHeartbeat(getDaemonCtx());
+const healthCheck = () => _healthCheck(getDaemonCtx());
+const relayHealthCheck = () => _relayHealthCheck(getDaemonCtx());
+const processEmbeddings = () => _processEmbeddings(getDaemonCtx());
+const forgetWeakMemories = () => _forgetWeakMemories(getDaemonCtx());
+const consolidateMemory = () => _consolidateMemory(getDaemonCtx());
+const cleanupStaleJobs = () => _cleanupStaleJobs(getDaemonCtx());
+const cleanupDelegationArtifacts = () => _cleanupDelegationArtifacts(getDaemonCtx());
+const refreshNewsPulse = () => _refreshNewsPulse(getDaemonCtx());
+const processNoteLinking = () => _processNoteLinking(getDaemonCtx());
+const processTopicMOCs = () => _processTopicMOCs(getDaemonCtx());
 
 // ─── Startup Validation ─────────────────────────────────────────────
 
@@ -141,18 +188,18 @@ async function writeCronSchedule(): Promise<void> {
 
   // ── Daemon tasks ──
   const daemonRows = [
-    { interval: "Every 30s",  task: "promote-delegation",     description: "Move completed delegation tasks to done" },
-    { interval: "Every 1min", task: "expire-approvals",        description: "Expire human-in-the-loop approvals past deadline" },
-    { interval: "Every 5min", task: "heartbeat",               description: "Process HEARTBEAT.md for actionable tasks" },
-    { interval: "Every 5min", task: "health-check",            description: "Detect stuck jobs & offline workers, alert on issues" },
-    { interval: "Every 5min", task: "relay-health",            description: "Check relay bot connectivity" },
-    { interval: "Every 30min",task: "memory-consolidation",    description: "Consolidate cross-harness memories via Ollama qwen3.5:9b" },
-    { interval: "Every 30min",task: "embeddings",              description: "Embed new/modified vault notes into FTS5 + vector index" },
-    { interval: "Every 1hr",  task: "stale-cleanup",           description: "Delete jobs >7 days old" },
-    { interval: "Every 1hr",  task: "delegation-cleanup",      description: "Purge stale delegation signals and oversized result files" },
-    { interval: "Every 2hr",  task: "note-linking",            description: "Add semantic Related Notes sections to all embedded notes" },
-    { interval: "Every 12hr", task: "topic-mocs",              description: "Auto-generate Maps of Content per tag cluster" },
-    { interval: "Daily 8pm",  task: "daily-brief",             description: "Send end-of-day summary to Telegram with all task activity" },
+    { interval: "Every 30s", task: "promote-delegation", description: "Move completed delegation tasks to done" },
+    { interval: "Every 1min", task: "expire-approvals", description: "Expire human-in-the-loop approvals past deadline" },
+    { interval: "Every 5min", task: "heartbeat", description: "Process HEARTBEAT.md for actionable tasks" },
+    { interval: "Every 5min", task: "health-check", description: "Detect stuck jobs & offline workers, alert on issues" },
+    { interval: "Every 5min", task: "relay-health", description: "Check relay bot connectivity" },
+    { interval: "Every 30min", task: "memory-consolidation", description: "Consolidate cross-harness memories via Ollama qwen3.5:9b" },
+    { interval: "Every 30min", task: "embeddings", description: "Embed new/modified vault notes into FTS5 + vector index" },
+    { interval: "Every 1hr", task: "stale-cleanup", description: "Delete jobs >7 days old" },
+    { interval: "Every 1hr", task: "delegation-cleanup", description: "Purge stale delegation signals and oversized result files" },
+    { interval: "Every 2hr", task: "note-linking", description: "Add semantic Related Notes sections to all embedded notes" },
+    { interval: "Every 12hr", task: "topic-mocs", description: "Auto-generate Maps of Content per tag cluster" },
+    { interval: "Daily 8pm", task: "daily-brief", description: "Send end-of-day summary to Telegram with all task activity" },
   ];
 
   // ── Claude Code scheduled tasks — load from SKILL.md files ──
@@ -300,1056 +347,9 @@ async function writeDaemonStatus(): Promise<void> {
   }
 }
 
-// ─── Task: Expire Stale Approvals (every 1 min) ─────────────────────
-
-async function expireApprovals(): Promise<void> {
-  const pendingDir = path.join(VAULT_PATH, "_approvals/pending");
-  if (!fs.existsSync(pendingDir)) return;
-
-  const files = fs
-    .readdirSync(pendingDir)
-    .filter((f) => f.endsWith(".md"));
-  const now = Date.now();
-  let expired = 0;
-
-  for (const file of files) {
-    try {
-      const filePath = path.join(pendingDir, file);
-      const raw = fs.readFileSync(filePath, "utf-8");
-      const matter = await import("gray-matter").then((m) => m.default);
-      const { data } = matter(raw);
-
-      if (data.expiresAt && new Date(data.expiresAt).getTime() < now) {
-        await vault.resolveApproval(data.approvalId, "rejected", "system", "Expired");
-        expired++;
-      }
-    } catch {
-      // Skip malformed files
-    }
-  }
-
-  if (expired > 0) {
-    console.log(`[approvals] Expired ${expired} stale approval(s)`);
-  }
-}
-
-// ─── Task: Process Heartbeat (every 2 min) ───────────────────────────
-
-const HEARTBEAT_STATE_PATH = path.join(VAULT_PATH, "_system/heartbeat-state.json");
-const ACTIVE_HOURS = { start: 8, end: 24 }; // Only dispatch user tasks during these hours (local time)
-const HEARTBEAT_WRITE_INTERVAL_MS = 10 * 60 * 1000; // Only write lastProcessed every 10 min when idle
-
-interface HeartbeatState {
-  lastChecks: Record<string, number>;
-  lastStatus: "ok" | "alert";
-  alerts: string[];
-}
-
-function loadHeartbeatState(): HeartbeatState {
-  try {
-    if (fs.existsSync(HEARTBEAT_STATE_PATH)) {
-      return JSON.parse(fs.readFileSync(HEARTBEAT_STATE_PATH, "utf-8"));
-    }
-  } catch { /* use defaults */ }
-  return { lastChecks: {}, lastStatus: "ok", alerts: [] };
-}
-
-function saveHeartbeatState(state: HeartbeatState): void {
-  fs.writeFileSync(HEARTBEAT_STATE_PATH, JSON.stringify(state, null, 2), "utf-8");
-}
-
-function isActiveHours(): boolean {
-  const hour = new Date().getHours();
-  return hour >= ACTIVE_HOURS.start && hour < ACTIVE_HOURS.end;
-}
-
-/** Rotating health checks — each cycle runs the most overdue check */
-function runRotatingCheck(state: HeartbeatState): { check: string; result: string; isAlert: boolean } | null {
-  const checks: Record<string, () => { result: string; isAlert: boolean }> = {
-    jobs: () => {
-      const pending = countFiles(path.join(VAULT_PATH, "_jobs/pending"));
-      const running = countFiles(path.join(VAULT_PATH, "_jobs/running"));
-      const failed = countFiles(path.join(VAULT_PATH, "_jobs/failed"));
-      const isAlert = running > 10 || failed > 20;
-      return {
-        result: `pending=${pending} running=${running} failed=${failed}`,
-        isAlert,
-      };
-    },
-    workers: () => {
-      const sessionsDir = path.join(VAULT_PATH, "_agent-sessions");
-      if (!fs.existsSync(sessionsDir)) return { result: "no sessions dir", isAlert: false };
-      const files = fs.readdirSync(sessionsDir).filter(f => f.startsWith("worker-") && f.endsWith(".md"));
-      return { result: `${files.length} worker session(s)`, isAlert: false };
-    },
-    relay: () => {
-      const healthDir = path.join(VAULT_PATH, "_delegation/relay-health");
-      if (!fs.existsSync(healthDir)) return { result: "no relay health dir", isAlert: false };
-      const files = fs.readdirSync(healthDir).filter(f => f.endsWith(".md"));
-      return { result: `${files.length} relay(s) tracked`, isAlert: false };
-    },
-    disk: () => {
-      const embeddingsDir = path.join(VAULT_PATH, "_embeddings");
-      let dbSize = "n/a";
-      if (fs.existsSync(embeddingsDir)) {
-        const dbFile = path.join(embeddingsDir, "search.db");
-        if (fs.existsSync(dbFile)) {
-          const stat = fs.statSync(dbFile);
-          dbSize = `${(stat.size / 1024 / 1024).toFixed(1)}MB`;
-        }
-      }
-      return { result: `embeddings db=${dbSize}`, isAlert: false };
-    },
-  };
-
-  // Find the most overdue check
-  const now = Date.now();
-  let oldestCheck: string | null = null;
-  let oldestTime = Infinity;
-
-  for (const name of Object.keys(checks)) {
-    const lastRun = state.lastChecks[name] ?? 0;
-    if (lastRun < oldestTime) {
-      oldestTime = lastRun;
-      oldestCheck = name;
-    }
-  }
-
-  if (!oldestCheck) return null;
-
-  try {
-    const { result, isAlert } = checks[oldestCheck]();
-    state.lastChecks[oldestCheck] = now;
-    return { check: oldestCheck, result, isAlert };
-  } catch (err) {
-    state.lastChecks[oldestCheck] = now;
-    return { check: oldestCheck, result: `error: ${err}`, isAlert: true };
-  }
-}
-
-function countFiles(dir: string): number {
-  if (!fs.existsSync(dir)) return 0;
-  return fs.readdirSync(dir).filter(f => f.endsWith(".md")).length;
-}
-
-async function processHeartbeat(): Promise<void> {
-  const heartbeatPath = path.join(VAULT_PATH, "_system/HEARTBEAT.md");
-  if (!fs.existsSync(heartbeatPath)) return;
-
-  try {
-    const matter = await import("gray-matter").then((m) => m.default);
-    const raw = fs.readFileSync(heartbeatPath, "utf-8");
-    const { data, content } = matter(raw);
-
-    // Look for pending actions section
-    const actionsMatch = content.match(
-      /## Pending Actions\s*\n([\s\S]*?)(?=\n##|$)/,
-    );
-
-    let actionsProcessed = 0;
-    let updatedContent = content.trim();
-
-    if (actionsMatch && isActiveHours()) {
-      const actionsText = actionsMatch[1].trim();
-      if (actionsText !== "_No pending actions._" && actionsText) {
-        // Extract individual tasks (lines starting with - or *)
-        const pendingTasks = actionsText
-          .split("\n")
-          .filter((line) => /^[-*]\s+/.test(line))
-          .map((line) => line.replace(/^[-*]\s+/, "").trim())
-          .filter(Boolean);
-
-        // Create a background job for each task
-        for (const task of pendingTasks) {
-          const jobId = await vault.createJob({
-            instruction: task,
-            type: "background",
-            priority: 40,
-            securityProfile: "standard",
-          });
-          console.log(`[heartbeat] Created job ${jobId}: ${task.substring(0, 60)}...`);
-          actionsProcessed++;
-        }
-
-        // Clear the pending actions
-        if (actionsProcessed > 0) {
-          updatedContent = updatedContent.replace(
-            /## Pending Actions\s*\n[\s\S]*?(?=\n##|$)/,
-            "## Pending Actions\n\n_No pending actions._\n",
-          );
-        }
-      }
-    } else if (actionsMatch && !isActiveHours()) {
-      const actionsText = actionsMatch[1].trim();
-      if (actionsText !== "_No pending actions._" && actionsText) {
-        console.log(`[heartbeat] Pending actions deferred — outside active hours (${ACTIVE_HOURS.start}:00-${ACTIVE_HOURS.end}:00)`);
-      }
-    }
-
-    // Run a rotating health check
-    const state = loadHeartbeatState();
-    const checkResult = runRotatingCheck(state);
-
-    if (checkResult) {
-      const { check, result, isAlert } = checkResult;
-      if (isAlert) {
-        state.alerts.push(`[${localTimestamp()}] ${check}: ${result}`);
-        // Keep only last 10 alerts
-        if (state.alerts.length > 10) state.alerts = state.alerts.slice(-10);
-        state.lastStatus = "alert";
-        console.log(`[heartbeat] ALERT ${check}: ${result}`);
-      } else {
-        state.lastStatus = "ok";
-      }
-      saveHeartbeatState(state);
-    }
-
-    // Update the Alerts section in the heartbeat file
-    if (state.alerts.length > 0) {
-      const alertsSection = "## Alerts\n\n" + state.alerts.map(a => `- ${a}`).join("\n") + "\n";
-      if (updatedContent.includes("## Alerts")) {
-        updatedContent = updatedContent.replace(
-          /## Alerts\s*\n[\s\S]*?(?=\n##|$)/,
-          alertsSection,
-        );
-      } else {
-        updatedContent = updatedContent.trimEnd() + "\n\n" + alertsSection;
-      }
-    } else if (updatedContent.includes("## Alerts")) {
-      // Remove alerts section when no alerts
-      updatedContent = updatedContent.replace(/\n*## Alerts\s*\n[\s\S]*?(?=\n##|$)/, "");
-    }
-
-    // Early exit: skip writing if idle and recently written
-    if (actionsProcessed === 0) {
-      const last = data.lastProcessed ? new Date(data.lastProcessed).getTime() : 0;
-      if (Date.now() - last < HEARTBEAT_WRITE_INTERVAL_MS && !checkResult?.isAlert) {
-        return; // HEARTBEAT_OK — nothing to update
-      }
-    }
-
-    // Write back with clean content (no newline accumulation)
-    data.lastProcessed = localTimestamp();
-    data.status = state.lastStatus;
-    fs.writeFileSync(heartbeatPath, matter.stringify(updatedContent.trim(), data), "utf-8");
-
-    if (actionsProcessed > 0) {
-      console.log(`[heartbeat] Processed ${actionsProcessed} action(s)`);
-    }
-  } catch (err) {
-    console.error("[heartbeat] Error:", err);
-  }
-}
-
-// ─── Task: Health Check (every 5 min) ────────────────────────────────
-
-async function healthCheck(): Promise<void> {
-  const now = Date.now();
-
-  // Check for stuck jobs (running > STUCK_JOB_HOURS)
-  const runningDir = path.join(VAULT_PATH, "_jobs/running");
-  if (fs.existsSync(runningDir)) {
-    const files = fs
-      .readdirSync(runningDir)
-      .filter((f) => f.endsWith(".md"));
-
-    for (const file of files) {
-      try {
-        const filePath = path.join(runningDir, file);
-        const matter = await import("gray-matter").then((m) => m.default);
-        const { data } = matter(fs.readFileSync(filePath, "utf-8"));
-
-        const updatedAt = data.updatedAt ?? data.createdAt;
-        if (updatedAt) {
-          const elapsed = now - new Date(updatedAt).getTime();
-          if (elapsed > STUCK_JOB_HOURS * 3600 * 1000) {
-            await vault.updateJobStatus(data.jobId, "failed", {
-              result: `Job stuck for ${Math.round(elapsed / 3600000)}h, marked as failed by health check`,
-            });
-            console.log(`[health] Failed stuck job: ${data.jobId}`);
-            await notify(
-              `⚠️ <b>Health Alert</b>: Job <code>${data.jobId}</code> was stuck for ${Math.round(elapsed / 3600000)}h and has been marked failed.`,
-              `stuck-job:${data.jobId}`
-            );
-          }
-        }
-      } catch {
-        // Skip
-      }
-    }
-  }
-
-  // Check for offline workers
-  const sessionsDir = path.join(VAULT_PATH, "_agent-sessions");
-  if (fs.existsSync(sessionsDir)) {
-    const files = fs
-      .readdirSync(sessionsDir)
-      .filter((f) => f.endsWith(".md"));
-
-    for (const file of files) {
-      try {
-        const filePath = path.join(sessionsDir, file);
-        const matter = await import("gray-matter").then((m) => m.default);
-        const raw = fs.readFileSync(filePath, "utf-8");
-        const { data, content } = matter(raw);
-
-        if (data.status === "online" && data.lastHeartbeat) {
-          const elapsed = now - new Date(data.lastHeartbeat).getTime();
-          if (elapsed > OFFLINE_WORKER_SECONDS * 1000) {
-            data.status = "offline";
-            fs.writeFileSync(filePath, matter.stringify(content.trim(), data), "utf-8");
-            console.log(`[health] Worker ${data.workerId} marked offline`);
-          }
-        }
-      } catch {
-        // Skip
-      }
-    }
-  }
-}
-
-// ─── Task: Relay Health Check (every 5 min) ──────────────────────────
-
-async function relayHealthCheck(): Promise<void> {
-  const now = Date.now();
-  const relays = await vault.getRelayHealthAll();
-
-  for (const relay of relays) {
-    if (relay.lastHeartbeat) {
-      const elapsed = now - new Date(relay.lastHeartbeat).getTime();
-
-      let newStatus = relay.status;
-      if (elapsed > RELAY_STALE_SECONDS * 2 * 1000) {
-        newStatus = "offline";
-      } else if (elapsed > RELAY_STALE_SECONDS * 1000) {
-        newStatus = "degraded";
-      }
-
-      if (newStatus !== relay.status) {
-        await vault.upsertRelayHealth(relay.relayId, { status: newStatus });
-        console.log(
-          `[relay-health] ${relay.displayName}: ${relay.status} -> ${newStatus}`,
-        );
-      }
-    }
-  }
-
-  // Time out stale claimed tasks
-  const claimedDir = path.join(VAULT_PATH, "_delegation/claimed");
-  if (fs.existsSync(claimedDir)) {
-    const files = fs
-      .readdirSync(claimedDir)
-      .filter((f) => f.endsWith(".md"));
-    const matter = await import("gray-matter").then((m) => m.default);
-
-    for (const file of files) {
-      try {
-        const filePath = path.join(claimedDir, file);
-        const { data } = matter(fs.readFileSync(filePath, "utf-8"));
-
-        if (data.claimedAt && data.deadlineMs) {
-          const elapsed = now - new Date(data.claimedAt).getTime();
-          if (elapsed > data.deadlineMs) {
-            await vault.updateTaskStatus(data.taskId, "timeout");
-            console.log(`[relay-health] Task ${data.taskId} timed out`);
-          }
-        }
-      } catch {
-        // Skip
-      }
-    }
-  }
-}
-
-// ─── Task: Embedding Processor (every 10 min) ───────────────────────
-
-async function processEmbeddings(): Promise<void> {
-  if (!OPENROUTER_API_KEY) {
-    return; // Skip if no API key
-  }
-
-  const pendingNotes = await vault.getNotesForEmbedding("pending", 10);
-  if (pendingNotes.length === 0) return;
-
-  console.log(`[embeddings] Processing ${pendingNotes.length} note(s)...`);
-
-  for (const note of pendingNotes) {
-    try {
-      // Mark as processing
-      await vault.updateNote(note._filePath, undefined, {
-        embeddingStatus: "processing",
-      });
-
-      // Generate embedding via OpenRouter
-      const text = `${note.title}\n\n${note.content}`.substring(0, 8000);
-      const response = await fetch(
-        "https://openrouter.ai/api/v1/embeddings",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: EMBEDDING_MODEL,
-            input: text,
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error(`Embedding API error: ${response.status}`);
-      }
-
-      const result = (await response.json()) as {
-        data: Array<{ embedding: number[] }>;
-      };
-      const embedding = result.data[0]?.embedding;
-
-      if (!embedding) {
-        throw new Error("No embedding returned");
-      }
-
-      // Store embedding in search index
-      search.storeEmbedding(note._filePath, embedding, EMBEDDING_MODEL);
-
-      // Also index for FTS
-      search.indexNote(note._filePath, note.title, note.content, note.tags);
-
-      // Update frontmatter
-      await vault.updateNote(note._filePath, undefined, {
-        embeddingStatus: "embedded",
-        embeddedAt: new Date().toISOString(),
-        embeddingModel: EMBEDDING_MODEL,
-      });
-
-      console.log(`[embeddings] Embedded: ${note.title}`);
-    } catch (err) {
-      await vault.updateNote(note._filePath, undefined, {
-        embeddingStatus: "failed",
-      });
-      console.error(`[embeddings] Failed: ${note.title}:`, err);
-    }
-  }
-}
-
-// ─── Task: Memory Forgetting Cycle (every 24 hr) ─────────────────────
-// Implements "Synaptic Homeostasis": decay low-importance old memories,
-// prune those that have fallen below the relevance threshold.
-// This prevents noise accumulation and keeps signal/noise ratio high.
-
-async function forgetWeakMemories(): Promise<void> {
-  try {
-    const result = memorySystem.forgetter.runCycle();
-    if (result.decayed > 0 || result.pruned > 0) {
-      console.log(`[memory-decay] Decayed ${result.decayed}, pruned ${result.pruned} memories. DB now: ${result.statsAfter.total} total`);
-    }
-  } catch (err) {
-    console.error("[daemon] Memory forgetting cycle failed:", err);
-  }
-}
-
-// ─── Task: News Pulse (every 1 hr) ───────────────────────────────────
-// Fetches the top headlines from trusted RSS feeds and writes a compact
-// "Current News Pulse" section to _system/HEARTBEAT.md so all agents
-// have ambient awareness of current events without burning context.
-// Runs every 15 minutes. Each feed contributes up to 3 headlines.
-
-const NEWS_PULSE_FEEDS = [
-  // Global news (verified fresh, free RSS)
-  { url: "https://www.theguardian.com/world/rss", label: "Guardian" },
-  { url: "https://www.aljazeera.com/xml/rss/all.xml", label: "Al Jazeera" },
-  { url: "https://feeds.bbci.co.uk/news/world/rss.xml", label: "BBC" },
-  // Tech
-  { url: "https://techcrunch.com/feed/", label: "TechCrunch" },
-  { url: "https://www.theverge.com/rss/index.xml", label: "The Verge" },
-  { url: "https://www.wired.com/feed/rss", label: "Wired" },
-  { url: "https://news.ycombinator.com/rss", label: "HN" },
-  { url: "https://simonwillison.net/atom/everything/", label: "Simon Willison" },
-  // Africa / Business
-  { url: "https://techcabal.com/feed/", label: "TechCabal" },
-  // AI / Research
-  { url: "https://www.technologyreview.com/feed/", label: "MIT Tech Review" },
-];
-
-/**
- * Strip characters that could be used for prompt injection or markdown manipulation.
- * RSS titles from untrusted feeds are written into HEARTBEAT.md which all agents read.
- */
-function sanitizePulseText(raw: string): string {
-  return raw
-    .replace(/\r?\n|\r/g, " ")           // no newlines — would break markdown structure
-    .replace(/#{1,6}\s/g, "")            // no markdown headings
-    .replace(/`{1,3}[^`]*`{1,3}/g, "")  // no code blocks/inline code
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // collapse existing links to label only
-    .replace(/[*_~|\\]/g, "")           // no emphasis, strikethrough, table, escape chars
-    .replace(/\s{2,}/g, " ")            // collapse whitespace
-    .trim()
-    .slice(0, 100);
-}
-
-/** Validate a URL is a safe https link before embedding in markdown. */
-function isSafeUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" || parsed.protocol === "http:";
-  } catch {
-    return false;
-  }
-}
-
-async function refreshNewsPulse(): Promise<void> {
-  const heartbeatPath = path.join(VAULT_PATH, "_system/HEARTBEAT.md");
-  if (!fs.existsSync(heartbeatPath)) return;
-
-  const PULSE_MARKER = "<!-- agent-hq-news-pulse -->";
-  const now = new Date().toUTCString();
-
-  // Fetch all feeds concurrently (parallel, not sequential)
-  const feedResults = await Promise.allSettled(
-    NEWS_PULSE_FEEDS.map(async (feed) => {
-      const res = await fetch(feed.url, {
-        headers: { "User-Agent": "AgentHQ-Pulse/1.0" },
-        signal: AbortSignal.timeout(8_000),
-      });
-      if (!res.ok) return { label: feed.label, items: [] as string[] };
-      const xml = await res.text();
-      const isAtom = /<feed[\s>]/.test(xml);
-      const blockTag = isAtom ? "entry" : "item";
-      const blockRegex = new RegExp(`<${blockTag}>[\\s\\S]*?<\\/${blockTag}>`, "gi");
-
-      const items: string[] = [];
-      for (const match of xml.matchAll(blockRegex)) {
-        if (items.length >= 3) break;
-        const block = match[0];
-        const rawTitle = block.match(/<title[^>]*>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i)?.[1]
-          ?.replace(/<[^>]+>/g, "")
-          .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-          .replace(/&quot;/g, '"').replace(/&#8217;/g, "'").replace(/&#8216;/g, "'")
-          .replace(/&#8220;/g, "\u201C").replace(/&#8221;/g, "\u201D").replace(/&#[0-9]+;/g, "") || "";
-        const rawLink = isAtom
-          ? (block.match(/\shref=["']([^"']+)["']/i)?.[1] || "")
-          : (block.match(/<link[^>]*>([^<]+)<\/link>/i)?.[1]?.trim() || "");
-
-        const title = sanitizePulseText(rawTitle);
-        if (!title || !rawLink || !isSafeUrl(rawLink)) continue;
-        const link = rawLink.slice(0, 300);
-        items.push(`- **[${feed.label}]** [${title}](${link})`);
-      }
-      return { label: feed.label, items };
-    })
-  );
-
-  const lines: string[] = feedResults
-    .filter((r): r is PromiseFulfilledResult<{ label: string; items: string[] }> => r.status === "fulfilled")
-    .flatMap((r) => r.value.items);
-
-  if (lines.length === 0) return;
-
-  const pulseSection = `${PULSE_MARKER}\n## Current News Pulse\n_Updated: ${now}_\n\n${lines.join("\n")}\n`;
-
-  try {
-    const existing = fs.readFileSync(heartbeatPath, "utf-8");
-    let updated: string;
-    if (existing.includes(PULSE_MARKER)) {
-      // Replace from the marker to end-of-file (pulse is always last section)
-      const escapedMarker = PULSE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      updated = existing.replace(new RegExp(`${escapedMarker}[\\s\\S]*$`), pulseSection);
-    } else {
-      updated = existing.trimEnd() + "\n\n" + pulseSection;
-    }
-    fs.writeFileSync(heartbeatPath, updated, "utf-8");
-    console.log(`[news-pulse] Updated HEARTBEAT.md with ${lines.length} headline(s)`);
-  } catch (err) {
-    console.error("[news-pulse] Failed to update HEARTBEAT.md:", err);
-  }
-}
-
-// ─── Task: Memory Consolidation (every 30 min) ───────────────────────
-
-async function consolidateMemory(): Promise<void> {
-  try {
-    const insight = await memorySystem.consolidator.runCycle();
-    if (insight) {
-      await memorySystem.consolidator.refreshMemoryFile();
-      await notifyIfMeaningful(
-        "memory-consolidation",
-        "new cross-harness connections found",
-        true,
-        () => `🧠 <b>Memory consolidation</b> complete — new insight recorded in Notebooks/Memories/`
-      );
-    }
-  } catch (err) {
-    console.error("[daemon] Memory consolidation failed:", err);
-  }
-}
-
-// ─── Task: Stale Job Cleanup (every 1 hr) ────────────────────────────
-
-async function cleanupStaleJobs(): Promise<void> {
-  const now = Date.now();
-  const maxAge = STALE_JOB_DAYS * 24 * 3600 * 1000;
-  let cleaned = 0;
-
-  try {
-    // fbmq: reap jobs stuck in processing > 2 hours (7200s)
-    await vault.jobQueue.reap(7200);
-    // fbmq: purge done/failed messages older than maxAge
-    await vault.jobQueue.purge(STALE_JOB_DAYS * 24 * 3600);
-    cleaned++;
-  } catch (err) {
-    console.error("[cleanup] fbmq job queue cleanup failed:", err);
-  }
-
-  // Clean old log files
-  const logsDir = path.join(VAULT_PATH, "_logs");
-  if (fs.existsSync(logsDir)) {
-    const dateDirs = fs.readdirSync(logsDir, { withFileTypes: true });
-    for (const d of dateDirs) {
-      if (d.isDirectory()) {
-        const dirPath = path.join(logsDir, d.name);
-        const stat = fs.statSync(dirPath);
-        if (now - stat.mtimeMs > maxAge) {
-          fs.rmSync(dirPath, { recursive: true });
-          cleaned++;
-        }
-      }
-    }
-  }
-
-  if (cleaned > 0) {
-    console.log(`[cleanup] FBMQ reap/purge completed and removed ${cleaned} stale item(s)`);
-  }
-}
-
-// ─── Task: Delegation Artifact Cleanup (every 1 hr) ─────────────────
-
-async function cleanupDelegationArtifacts(): Promise<void> {
-  const now = Date.now();
-  const signalMaxAge = 60 * 60 * 1000;     // 1 hour — signals should be consumed fast
-  const resultMaxAge = 7 * 24 * 3600 * 1000; // 7 days — same as job files
-  let cleaned = 0;
-
-  try {
-    // fbmq delegation queues cleanup
-    await vault.delegationQueue.reap(7200);
-    await vault.delegationQueue.purge(7 * 24 * 3600);
-    cleaned++;
-  } catch (err) {
-    console.error("[delegation-cleanup] fbmq delegation queue cleanup failed:", err);
-  }
-
-  // Clean up stale cancellation signals
-  const signalsDir = path.join(VAULT_PATH, "_delegation/signals");
-  if (fs.existsSync(signalsDir)) {
-    for (const file of fs.readdirSync(signalsDir).filter(f => f.endsWith(".md"))) {
-      try {
-        const filePath = path.join(signalsDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > signalMaxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch { /* skip */ }
-    }
-  }
-
-  // Clean up old result overflow files
-  const resultsDir = path.join(VAULT_PATH, "_delegation/results");
-  if (fs.existsSync(resultsDir)) {
-    for (const file of fs.readdirSync(resultsDir).filter(f => f.endsWith(".md"))) {
-      try {
-        const filePath = path.join(resultsDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > resultMaxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch { /* skip */ }
-    }
-  }
-
-  // Clean up stale live output files (relay crashed mid-task and never deleted)
-  const liveDir = path.join(VAULT_PATH, "_delegation/live");
-  if (fs.existsSync(liveDir)) {
-    for (const file of fs.readdirSync(liveDir).filter(f => f.endsWith(".md"))) {
-      try {
-        const filePath = path.join(liveDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > signalMaxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch { /* skip */ }
-    }
-  }
-
-  if (cleaned > 0) {
-    console.log(`[delegation-cleanup] Removed ${cleaned} stale artifact(s)`);
-  }
-}
-
-// ─── Task: Note Linking (every 2 hr) ─────────────────────────────────
-
-const SIMILARITY_THRESHOLD = 0.75;
-const MAX_LINKS_PER_NOTE = 5;
-const TAG_BONUS_PER_SHARED = 0.05;
-const TAG_BONUS_CAP = 0.15;
-const GRAPH_LINK_MARKER = "<!-- agent-hq-graph-links -->";
-
-interface EmbeddedNote {
-  absPath: string;
-  relPath: string;
-  title: string;
-  tags: string[];
-  contentHash: string;
-}
-
-interface NoteLink {
-  relPath: string;
-  title: string;
-  score: number;
-  type: string;
-}
-
-async function processNoteLinking(): Promise<void> {
-  const stats = search.getStats();
-  if (stats.embeddingCount < 2) return;
-
-  console.log(
-    `[linking] Processing note links across ${stats.embeddingCount} embedded notes...`,
-  );
-
-  const notebooksDir = path.join(VAULT_PATH, "Notebooks");
-  if (!fs.existsSync(notebooksDir)) return;
-
-  const matter = await import("gray-matter").then((m) => m.default);
-
-  // Step 1: Scan all embedded notes
-  const embeddedNotes: EmbeddedNote[] = [];
-
-  const scanDir = (dir: string) => {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        scanDir(fullPath);
-      } else if (entry.name.endsWith(".md")) {
-        try {
-          const raw = fs.readFileSync(fullPath, "utf-8");
-          const { data } = matter(raw);
-          if (data.embeddingStatus === "embedded") {
-            const relPath = path.relative(VAULT_PATH, fullPath);
-            // Strip the managed section before hashing so link updates don't trigger re-linking
-            const contentForHash = raw.replace(
-              new RegExp(`${escapeRegex(GRAPH_LINK_MARKER)}[\\s\\S]*$`),
-              "",
-            );
-            embeddedNotes.push({
-              absPath: fullPath,
-              relPath,
-              title: path.basename(entry.name, ".md"),
-              tags: data.tags ?? [],
-              contentHash: Bun.hash(contentForHash).toString(36),
-            });
-          }
-        } catch {
-          // Skip
-        }
-      }
-    }
-  };
-
-  scanDir(notebooksDir);
-
-  // Step 2: Identify dirty notes (changed since last linked or never linked)
-  const dirtyNotes = embeddedNotes.filter((note) => {
-    const state = search.getLinkState(note.relPath);
-    if (!state) return true;
-    return state.contentHash !== note.contentHash;
-  });
-
-  if (dirtyNotes.length === 0) {
-    console.log("[linking] No notes need relinking.");
-    return;
-  }
-
-  console.log(
-    `[linking] ${dirtyNotes.length} of ${embeddedNotes.length} note(s) need relinking...`,
-  );
-
-  // Build tag index for bonus scoring
-  const tagIndex = new Map<string, string[]>();
-  for (const note of embeddedNotes) {
-    for (const tag of note.tags) {
-      const existing = tagIndex.get(tag) ?? [];
-      existing.push(note.relPath);
-      tagIndex.set(tag, existing);
-    }
-  }
-
-  // Step 3: Find similar notes and compute final scores
-  const pendingUpdates = new Map<
-    string,
-    { links: NoteLink[]; tags: string[] }
-  >();
-
-  for (const note of dirtyNotes) {
-    const similar = search.findSimilarNotes(
-      note.relPath,
-      MAX_LINKS_PER_NOTE * 2,
-      SIMILARITY_THRESHOLD,
-    );
-
-    // Apply tag bonus
-    const scored: NoteLink[] = similar.map((hit) => {
-      const targetNote = embeddedNotes.find((n) => n.relPath === hit.notePath);
-      let tagBonus = 0;
-      if (targetNote) {
-        const sharedTags = note.tags.filter((t) =>
-          targetNote.tags.includes(t),
-        );
-        tagBonus = Math.min(
-          sharedTags.length * TAG_BONUS_PER_SHARED,
-          TAG_BONUS_CAP,
-        );
-      }
-      return {
-        relPath: hit.notePath,
-        title: hit.title,
-        score: hit.relevance + tagBonus,
-        type: tagBonus > 0 ? "semantic+tags" : "semantic",
-      };
-    });
-
-    scored.sort((a, b) => b.score - a.score);
-    const topLinks = scored.slice(0, MAX_LINKS_PER_NOTE);
-
-    if (topLinks.length > 0) {
-      pendingUpdates.set(note.relPath, { links: topLinks, tags: note.tags });
-    }
-  }
-
-  // Step 4: Enforce bidirectionality — for every A→B, also queue B→A
-  const bidirectionalUpdates = new Map(pendingUpdates);
-
-  for (const [sourcePath, { links }] of pendingUpdates) {
-    for (const link of links) {
-      let targetEntry = bidirectionalUpdates.get(link.relPath);
-      if (!targetEntry) {
-        const targetNote = embeddedNotes.find(
-          (n) => n.relPath === link.relPath,
-        );
-        targetEntry = { links: [], tags: targetNote?.tags ?? [] };
-        bidirectionalUpdates.set(link.relPath, targetEntry);
-      }
-      const alreadyLinked = targetEntry.links.some(
-        (l) => l.relPath === sourcePath,
-      );
-      if (!alreadyLinked) {
-        const sourceNote = embeddedNotes.find(
-          (n) => n.relPath === sourcePath,
-        );
-        targetEntry.links.push({
-          relPath: sourcePath,
-          title: sourceNote?.title ?? path.basename(sourcePath, ".md"),
-          score: link.score,
-          type: link.type,
-        });
-      }
-    }
-  }
-
-  // Step 5: Write wikilinks into note bodies and update frontmatter
-  let updated = 0;
-  for (const [notePath, { links }] of bidirectionalUpdates) {
-    try {
-      const absPath = path.join(VAULT_PATH, notePath);
-      if (!fs.existsSync(absPath)) continue;
-
-      const raw = fs.readFileSync(absPath, "utf-8");
-      const { data, content } = matter(raw);
-
-      // Build the Related Notes section with wikilinks
-      const relatedSection = buildRelatedSection(links);
-
-      // Replace or append the managed section
-      let newContent: string;
-      if (content.includes(GRAPH_LINK_MARKER)) {
-        newContent = content.replace(
-          new RegExp(`${escapeRegex(GRAPH_LINK_MARKER)}[\\s\\S]*$`),
-          relatedSection,
-        );
-      } else {
-        newContent = content.trimEnd() + "\n\n" + relatedSection;
-      }
-
-      // Also update frontmatter relatedNotes for non-Obsidian consumers
-      data.relatedNotes = links.map((l) => `[[${l.title}]]`);
-      data.updatedAt = new Date().toISOString();
-
-      fs.writeFileSync(
-        absPath,
-        matter.stringify(newContent.trim(), data),
-        "utf-8",
-      );
-
-      // Record state so we skip this note next cycle (unless content changes)
-      const contentForHash = fs
-        .readFileSync(absPath, "utf-8")
-        .replace(
-          new RegExp(`${escapeRegex(GRAPH_LINK_MARKER)}[\\s\\S]*$`),
-          "",
-        );
-      search.setLinkState(notePath, Bun.hash(contentForHash).toString(36));
-
-      // Store links in SQLite for analysis
-      search.removeGraphLinks(notePath);
-      for (const link of links) {
-        search.addGraphLink(notePath, link.relPath, link.score, link.type);
-      }
-
-      updated++;
-    } catch (err) {
-      console.error(`[linking] Error updating ${notePath}:`, err);
-    }
-  }
-
-  if (updated > 0) {
-    console.log(`[linking] Updated links for ${updated} note(s)`);
-    await notifyIfMeaningful(
-      "note-linking",
-      `${updated} note(s) updated`,
-      updated >= 5, // only notify when it's meaningful (5+ notes relinked)
-      (s) => `🔗 <b>Note Linking</b> complete — ${s} with new semantic connections in your vault.`
-    );
-  }
-}
-
-function buildRelatedSection(links: NoteLink[]): string {
-  const lines = [GRAPH_LINK_MARKER, "## Related Notes", ""];
-
-  for (const link of links) {
-    const scoreLabel = (link.score * 100).toFixed(0);
-    const typeIndicator = link.type.includes("tags") ? " #" : "";
-    lines.push(
-      `- [[${link.title}]]${typeIndicator} _(${scoreLabel}% similar)_`,
-    );
-  }
-
-  lines.push(""); // trailing newline
-  return lines.join("\n");
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// ─── Task: Topic MOC Generation (every 12 hr) ───────────────────────
-
-const MOC_LINK_MARKER = "<!-- agent-hq-moc-links -->";
-const MIN_NOTES_FOR_MOC = 3;
-const SKIP_TAGS = new Set([
-  "auto-generated",
-  "daily-digest",
-  "weekly-analysis",
-  "moc",
-]);
-
-async function processTopicMOCs(): Promise<void> {
-  const matter = await import("gray-matter").then((m) => m.default);
-  const mocDir = path.join(VAULT_PATH, "_moc");
-  if (!fs.existsSync(mocDir)) {
-    fs.mkdirSync(mocDir, { recursive: true });
-  }
-
-  const tagCounts = search.getAllTags();
-  let created = 0;
-  let updated = 0;
-
-  for (const [tag, count] of tagCounts) {
-    if (count < MIN_NOTES_FOR_MOC || SKIP_TAGS.has(tag)) continue;
-
-    const notePaths = search.getTaggedNotePaths(tag);
-    if (notePaths.length < MIN_NOTES_FOR_MOC) continue;
-
-    const safeName = tag.replace(/[/\\:*?"<>|]/g, "-");
-    const titleCase =
-      tag.charAt(0).toUpperCase() + tag.slice(1).replace(/-/g, " ");
-    const mocPath = path.join(mocDir, `Topic - ${safeName}.md`);
-
-    // Build wikilinks section
-    const wikilinks = notePaths
-      .map((p) => {
-        const title = path.basename(p, ".md");
-        return `- [[${title}]]`;
-      })
-      .join("\n");
-
-    const managedSection = `${MOC_LINK_MARKER}\n### Linked Notes\n\n${wikilinks}\n`;
-
-    if (!fs.existsSync(mocPath)) {
-      // Create new MOC
-      const frontmatter = {
-        tags: ["moc", tag],
-        autoGenerated: true,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      const content = [
-        `# ${titleCase}`,
-        "",
-        "```dataview",
-        `TABLE noteType, tags, updatedAt`,
-        `FROM "Notebooks"`,
-        `WHERE contains(tags, "${tag}")`,
-        `SORT updatedAt DESC`,
-        "```",
-        "",
-        managedSection,
-      ].join("\n");
-
-      fs.writeFileSync(
-        mocPath,
-        matter.stringify(content, frontmatter),
-        "utf-8",
-      );
-      created++;
-    } else {
-      // Update existing MOC's managed section
-      const raw = fs.readFileSync(mocPath, "utf-8");
-      const { data, content } = matter(raw);
-
-      let newContent: string;
-      if (content.includes(MOC_LINK_MARKER)) {
-        newContent = content.replace(
-          new RegExp(`${escapeRegex(MOC_LINK_MARKER)}[\\s\\S]*$`),
-          managedSection,
-        );
-      } else {
-        newContent = content.trimEnd() + "\n\n" + managedSection;
-      }
-
-      data.updatedAt = new Date().toISOString();
-      fs.writeFileSync(
-        mocPath,
-        matter.stringify(newContent.trim(), data),
-        "utf-8",
-      );
-      updated++;
-    }
-  }
-
-  if (created + updated > 0) {
-    console.log(`[moc] Created ${created}, updated ${updated} topic MOC(s)`);
-    await notifyIfMeaningful(
-      "topic-mocs",
-      `${created} created, ${updated} updated`,
-      true,
-      (s) => `📚 <b>MOC pages</b> updated — ${s}\nOpen <i>_moc/</i> in Obsidian to browse.`
-    );
-  }
-}
+// ─── Tasks ──────────────────────────────────────────────────────────
+// Task implementations extracted to scripts/daemon/ modules.
+// Wrapper functions defined above (after getDaemonCtx) delegate to them.
 
 // ─── Task: Daily End-of-Day Brief (every 24hr, fires at ~8pm EAT) ────
 
@@ -1788,7 +788,27 @@ const tasks: {
       },
       lastRun: 0,
     },
+    // ─── Team Optimizer (every 7 days) ──────────────────────────────────
+    {
+      name: "team-optimizer",
+      intervalMs: 7 * 24 * 60 * 60 * 1000, // weekly
+      fn: async () => {
+        try {
+          // Lazy import to avoid loading hq-tools at startup
+          const { scheduledOptimizationCycle } = await import("../packages/hq-tools/src/teamOptimizer.js");
+          const { initPerformanceTracker } = await import("../packages/hq-tools/src/performanceTracker.js");
+          const teamsDir = path.resolve(VAULT_PATH, "..", "Documents/GitHub/agent-hq/packages/hq-tools/teams");
+          initPerformanceTracker(VAULT_PATH);
+          await scheduledOptimizationCycle(teamsDir);
+          console.log("[team-optimizer] Weekly optimization cycle complete — pending-optimizations written if data available");
+        } catch (err) {
+          console.warn("[team-optimizer] Skipped (hq-tools not built or insufficient data):", err instanceof Error ? err.message : err);
+        }
+      },
+      lastRun: 0,
+    },
   ];
+
 
 async function runScheduler(): Promise<void> {
   // ── Vault Workers (opt-in via VAULT_WORKERS_ENABLED=true) ──────────
@@ -1917,7 +937,7 @@ async function runScheduler(): Promise<void> {
   await writeDaemonStatus();
 
   // Main loop — check every 30 seconds (safety-net polling fallback)
-  setInterval(async () => {
+  driftAwareInterval(async () => {
     const now = Date.now();
     let statusDirty = false;
     for (const task of tasks) {
@@ -1942,7 +962,7 @@ async function runScheduler(): Promise<void> {
   const claudeCronTasks = loadClaudeScheduledTasks();
   console.log(`[claude-cron] ${claudeCronTasks.length} task(s) registered`);
 
-  setInterval(async () => {
+  driftAwareInterval(async () => {
     const now = new Date();
     const currentMinute = Math.floor(Date.now() / 60_000);
     for (const task of claudeCronTasks) {

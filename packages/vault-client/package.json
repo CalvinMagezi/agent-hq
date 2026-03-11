@@ -22,8 +22,10 @@
   "dependencies": {
     "gray-matter": "^4.0.3",
     "better-sqlite3": "^11.7.0",
+    "@repo/vault-native": "workspace:*",
     "@repo/queue-transport": "workspace:*"
   },
+
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12"
   }

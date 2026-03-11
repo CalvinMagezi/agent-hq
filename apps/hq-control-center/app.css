@@ -401,3 +401,93 @@ body {
   max-width: 320px;
   word-break: break-word;
 }
+
+/* Code block copy button */
+.code-block-wrapper {
+  position: relative;
+  margin: 0.5em 0 1em;
+}
+
+.code-block-wrapper:hover .code-copy-btn {
+  opacity: 1;
+}
+
+.code-block-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 2px 10px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  z-index: 1;
+  pointer-events: none;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+  z-index: 2;
+}
+
+.code-copy-btn:hover {
+  color: var(--accent-green);
+  border-color: var(--accent-green);
+}
+
+/* Message arrival animation */
+.glass {
+  backdrop-filter: blur(12px) saturate(180%);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+}
+
+@keyframes msg-arrive {
+  0% { 
+    opacity: 0; 
+    transform: translateY(12px) scale(0.98); 
+  }
+  100% { 
+    opacity: 1; 
+    transform: translateY(0) scale(1); 
+  }
+}
+
+.msg-new {
+  animation: msg-arrive 0.4s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+/* Thinking indicator bounce */
+@keyframes thinking-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  40% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+
+.thinking-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(2) { animation-delay: 0.15s; }
+.thinking-dot:nth-child(3) { animation-delay: 0.3s; }

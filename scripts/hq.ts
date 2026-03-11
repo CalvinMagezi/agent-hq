@@ -14,254 +14,25 @@ import * as path from "path";
 import * as os from "os";
 import { execSync, spawnSync } from "child_process";
 
-// ─── Paths ────────────────────────────────────────────────────────────────────
+import {
+  REPO_ROOT, RELAY_DIR, HQ_DIR, SCRIPTS_DIR, LAUNCH_AGENTS,
+  WA_DIR, TG_DIR, RELAY_SERVER_DIR, WA_AUTH_DIR,
+  AGENT_DAEMON, RELAY_DAEMON, RELAY_SERVER_DAEMON,
+  DAEMON_LOG, DAEMON_PID, RELAY_LOCK,
+  c, sh, isAlive, sleep,
+  ok, fail, warn, info, dim, section,
+  agentPid, relayPid, whatsappPid, relayServerPid,
+  uptime, resolveTargets, serviceInfo, killProcessTree, findAllInstances, killAllInstances,
+  type ServiceTarget,
+} from "./hq/shared.js";
 
-const REPO_ROOT = path.resolve(import.meta.dir, "..");
-const AGENT_DIR = path.join(REPO_ROOT, "apps/discord-relay");  // kept for relay lock
-const RELAY_DIR = path.join(REPO_ROOT, "apps/discord-relay");
-const HQ_DIR = path.join(REPO_ROOT, "apps/agent");
-const SCRIPTS_DIR = import.meta.dir;
-const LAUNCH_AGENTS = path.join(os.homedir(), "Library/LaunchAgents");
-
-const WA_DIR = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
-const TG_DIR = path.join(REPO_ROOT, "apps/relay-adapter-telegram");
-const RELAY_SERVER_DIR = path.join(REPO_ROOT, "packages/agent-relay-server");
-const WA_AUTH_DIR = path.join(WA_DIR, "auth_info");
-
-const AGENT_DAEMON = "com.agent-hq.agent";
-const RELAY_DAEMON = "com.agent-hq.discord-relay";
-const WA_DAEMON = "com.agent-hq.whatsapp";
-const TG_DAEMON = "com.agent-hq.telegram";
-const RELAY_SERVER_DAEMON = "com.agent-hq.relay-server";
-
-const AGENT_LOG = path.join(os.homedir(), "Library/Logs/hq-agent.log");
-const AGENT_ERR = path.join(os.homedir(), "Library/Logs/hq-agent.error.log");
-const RELAY_LOG = path.join(os.homedir(), "Library/Logs/discord-relay.log");
-const RELAY_ERR = path.join(os.homedir(), "Library/Logs/discord-relay.error.log");
-const WA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.log");
-const WA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.error.log");
-const TG_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.log");
-const TG_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.error.log");
-const RELAY_SERVER_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.log");
-const RELAY_SERVER_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.error.log");
-const VAULT_SYNC_DIR = path.join(REPO_ROOT, "packages/vault-sync-server");
-const VAULT_SYNC_DAEMON = "com.agent-hq.vault-sync";
-const VAULT_SYNC_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-vault-sync.log");
-const VAULT_SYNC_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-vault-sync.error.log");
-const ICLOUD_BRIDGE_DAEMON = "com.agent-hq.icloud-bridge";
-const ICLOUD_BRIDGE_LOG = path.join(os.homedir(), "Library/Logs/com.agent-hq.icloud-bridge.log");
-const DAEMON_LOG = path.join(os.homedir(), "Library/Logs/hq-daemon.log");
-const DAEMON_PID = path.join(os.homedir(), "Library/Logs/hq-daemon.pid");
-
-const PWA_DIR = path.join(REPO_ROOT, "apps/hq-control-center");
-const PWA_DAEMON = "com.agent-hq.pwa";
-const PWA_WS_DAEMON = "com.agent-hq.pwa-ws";
-const PWA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-pwa.log");
-const PWA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-pwa.error.log");
-const PWA_WS_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-pwa-ws.log");
-const PWA_WS_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-pwa-ws.error.log");
-
-const RELAY_LOCK = path.join(RELAY_DIR, ".discord-relay/bot.lock");
-
-// ─── ANSI colours ─────────────────────────────────────────────────────────────
-
-const c = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  dim: "\x1b[2m",
-  green: "\x1b[32m",
-  red: "\x1b[31m",
-  yellow: "\x1b[33m",
-  cyan: "\x1b[36m",
-  gray: "\x1b[90m",
-};
-
-// Strip ANSI codes for length calculation
-const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-
-// ─── Shell helpers ────────────────────────────────────────────────────────────
-
-function sh(cmd: string): string {
-  try {
-    return execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-  } catch { return ""; }
-}
-
-function isAlive(pid: string): boolean {
-  if (!/^\d+$/.test(pid)) return false;
-  return sh(`kill -0 ${pid} 2>/dev/null; echo $?`) === "0";
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-// ─── Output helpers ───────────────────────────────────────────────────────────
-
-const ok = (msg: string) => console.log(`${c.green}✅${c.reset}  ${msg}`);
-const fail = (msg: string) => console.log(`${c.red}❌${c.reset}  ${msg}`);
-const warn = (msg: string) => console.log(`${c.yellow}⚠️ ${c.reset}  ${msg}`);
-const info = (msg: string) => console.log(`${c.cyan}ℹ️ ${c.reset}  ${msg}`);
-const dim = (msg: string) => console.log(`${c.gray}${msg}${c.reset}`);
-
-function section(title: string) {
-  console.log(`\n${c.bold}── ${title} ──${c.reset}`);
-}
-
-// ─── Daemon / process helpers ─────────────────────────────────────────────────
-
-function daemonPid(daemon: string): string | null {
-  const line = sh(`launchctl list 2>/dev/null | grep "${daemon}"`);
-  if (!line) return null;
-  const pid = line.trim().split(/\s+/)[0];
-  return pid && pid !== "-" && isAlive(pid) ? pid : null;
-}
-
-function agentPid(): string | null { return daemonPid(AGENT_DAEMON); }
-
-function relayPid(): string | null {
-  // Try lock file first (most reliable)
-  if (fs.existsSync(RELAY_LOCK)) {
-    const pid = fs.readFileSync(RELAY_LOCK, "utf-8").trim();
-    if (pid && isAlive(pid)) return pid;
-  }
-  return daemonPid(RELAY_DAEMON);
-}
-
-function whatsappPid(): string | null { return daemonPid(WA_DAEMON); }
-function telegramPid(): string | null { return daemonPid(TG_DAEMON); }
-function relayServerPid(): string | null { return daemonPid(RELAY_SERVER_DAEMON); }
-function vaultSyncPid(): string | null { return daemonPid(VAULT_SYNC_DAEMON); }
-function icloudBridgePid(): string | null { return daemonPid(ICLOUD_BRIDGE_DAEMON); }
-function pwaPid(): string | null { return daemonPid(PWA_DAEMON); }
-function pwaWsPid(): string | null { return daemonPid(PWA_WS_DAEMON); }
-
-function uptime(pid: string): string {
-  return sh(`ps -o etime= -p ${pid} 2>/dev/null`).trim() || "?";
-}
-
-type ServiceTarget = "agent" | "relay" | "whatsapp" | "telegram" | "relay-server" | "vault-sync" | "icloud-bridge" | "pwa" | "pwa-ws";
-
-function resolveTargets(target?: string): ServiceTarget[] {
-  if (!target || target === "all") return ["agent", "relay", "relay-server", "vault-sync", "icloud-bridge", "whatsapp", "telegram", "pwa", "pwa-ws"];
-  if (target === "agent") return ["agent"];
-  if (target === "relay") return ["relay"];
-  if (target === "whatsapp" || target === "wa") return ["whatsapp"];
-  if (target === "telegram" || target === "tg") return ["telegram"];
-  if (target === "relay-server") return ["relay-server"];
-  if (target === "vault-sync" || target === "vs") return ["vault-sync"];
-  if (target === "icloud-bridge" || target === "ib") return ["icloud-bridge"];
-  if (target === "pwa") return ["pwa"];
-  if (target === "pwa-ws") return ["pwa-ws"];
-  warn(`Unknown target "${target}" — expected agent, relay, whatsapp, telegram, relay-server, vault-sync, icloud-bridge, pwa, pwa-ws or all`);
-  return [];
-}
-
-/** Map a service target to its daemon label, PID, labels, and log paths. */
-function serviceInfo(t: ServiceTarget) {
-  switch (t) {
-    case "agent":
-      return { daemon: AGENT_DAEMON, pid: agentPid, label: "HQ Agent", dir: HQ_DIR, log: AGENT_LOG, err: AGENT_ERR };
-    case "relay":
-      return { daemon: RELAY_DAEMON, pid: relayPid, label: "Discord Relay", dir: RELAY_DIR, log: RELAY_LOG, err: RELAY_ERR };
-    case "whatsapp":
-      return { daemon: WA_DAEMON, pid: whatsappPid, label: "WhatsApp", dir: WA_DIR, log: WA_LOG, err: WA_ERR };
-    case "telegram":
-      return { daemon: TG_DAEMON, pid: telegramPid, label: "Telegram", dir: TG_DIR, log: TG_LOG, err: TG_ERR };
-    case "relay-server":
-      return { daemon: RELAY_SERVER_DAEMON, pid: relayServerPid, label: "Relay Server", dir: RELAY_SERVER_DIR, log: RELAY_SERVER_LOG, err: RELAY_SERVER_ERR };
-    case "vault-sync":
-      return { daemon: VAULT_SYNC_DAEMON, pid: vaultSyncPid, label: "Vault Sync", dir: VAULT_SYNC_DIR, log: VAULT_SYNC_LOG, err: VAULT_SYNC_ERR };
-    case "icloud-bridge":
-      return { daemon: ICLOUD_BRIDGE_DAEMON, pid: icloudBridgePid, label: "iCloud Bridge", dir: SCRIPTS_DIR, log: ICLOUD_BRIDGE_LOG, err: ICLOUD_BRIDGE_LOG };
-    case "pwa":
-      return { daemon: PWA_DAEMON, pid: pwaPid, label: "HQ Web PWA", dir: PWA_DIR, log: PWA_LOG, err: PWA_ERR };
-    case "pwa-ws":
-      return { daemon: PWA_WS_DAEMON, pid: pwaWsPid, label: "HQ PWA WS", dir: PWA_DIR, log: PWA_WS_LOG, err: PWA_WS_ERR };
-  }
-}
-
-/**
- * Find all PIDs matching a pgrep pattern, kill their children first,
- * then kill them. Returns the count of processes killed.
- */
-function killProcessTree(pid: string, label: string): number {
-  let killed = 0;
-  // Find and kill children recursively
-  const children = sh(`pgrep -P ${pid} 2>/dev/null`).split("\n").filter(Boolean);
-  for (const child of children) {
-    killed += killProcessTree(child, `${label} child`);
-  }
-  // Kill the process itself
-  if (isAlive(pid)) {
-    sh(`kill -9 ${pid} 2>/dev/null`);
-    info(`Killed ${label} (PID ${pid})`);
-    killed++;
-  }
-  return killed;
-}
-
-/**
- * Find ALL instances of a service by scanning process table.
- * Returns unique PIDs matching the service's working directory or entry script.
- */
-function findAllInstances(target: ServiceTarget): string[] {
-  const svc = serviceInfo(target);
-  const pids = new Set<string>();
-
-  // Method 1: pgrep by command matching the app directory
-  for (const pid of sh(`pgrep -f "${svc.dir}" 2>/dev/null`).split("\n").filter(Boolean)) {
-    // Exclude our own hq.ts process
-    const cmdline = sh(`ps -o command= -p ${pid} 2>/dev/null`);
-    if (cmdline && !cmdline.includes("hq.ts") && !cmdline.includes("scripts/hq")) {
-      pids.add(pid);
-    }
-  }
-
-  // Method 2: lsof to find processes with cwd in the app directory
-  for (const line of sh(`lsof +D "${svc.dir}" -t 2>/dev/null`).split("\n").filter(Boolean)) {
-    const cmdline = sh(`ps -o command= -p ${line} 2>/dev/null`);
-    if (cmdline && !cmdline.includes("hq.ts") && !cmdline.includes("scripts/hq")) {
-      pids.add(line);
-    }
-  }
-
-  return [...pids];
-}
-
-/**
- * Aggressively stop all instances of a target service.
- * Kills daemon PID + children, then sweeps for any remaining instances.
- */
-async function killAllInstances(target: ServiceTarget): Promise<number> {
-  const svc = serviceInfo(target);
-  let killed = 0;
-
-  // 1. Stop via launchctl
-  sh(`launchctl stop "${svc.daemon}" 2>/dev/null`);
-
-  // 2. Kill the primary daemon PID and its entire process tree
-  const primaryPid = svc.pid();
-  if (primaryPid) {
-    killed += killProcessTree(primaryPid, `${svc.label} (primary)`);
-  }
-
-  // 3. Sweep for any remaining instances (duplicates, orphans, zombies)
-  await sleep(300);
-  const remaining = findAllInstances(target);
-  for (const pid of remaining) {
-    if (isAlive(pid)) {
-      killed += killProcessTree(pid, `${svc.label} (stale instance)`);
-    }
-  }
-
-  // 4. Final pkill sweep as a safety net
-  // Use the entry script pattern (index.ts or src/index.ts)
-  const entryPattern = target === "relay-server" ? `${svc.dir}/src/index.ts` : `${svc.dir}/index.ts`;
-  sh(`pkill -9 -f "bun.*${entryPattern}" 2>/dev/null`);
-  sh(`pkill -9 -f "node.*${entryPattern}" 2>/dev/null`);
-
-  return killed;
+// hq mcp [status|remove]
+async function cmdMcp(sub?: string): Promise<void> {
+  const { mcpStatus, mcpInstall, mcpRemove } = await import("./hq/mcpInstaller.js");
+  const nonInteractive = process.argv.includes("--non-interactive");
+  if (sub === "status" || sub === "--status") await mcpStatus(REPO_ROOT);
+  else if (sub === "remove" || sub === "--remove") await mcpRemove(REPO_ROOT);
+  else await mcpInstall(REPO_ROOT, nonInteractive);
 }
 
 // ─── Commands ─────────────────────────────────────────────────────────────────
@@ -1327,7 +1098,7 @@ async function cmdTools(nonInteractive = false): Promise<void> {
       }
     }
 
-    // Write Obsidian MCP server to ~/.gemini/settings.json
+    // Write HQ MCP server to ~/.gemini/settings.json
     section("Gemini MCP Config");
     const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
     let settings: Record<string, unknown> = {};
@@ -1335,20 +1106,27 @@ async function cmdTools(nonInteractive = false): Promise<void> {
       try { settings = JSON.parse(fs.readFileSync(settingsFile, "utf-8")); } catch { }
     }
     const mcpServers = (settings.mcpServers as Record<string, unknown> ?? {});
-    if (!mcpServers.obsidian) {
-      mcpServers.obsidian = {
-        command: "npx",
-        args: ["-y", "@mauricio.wolff/mcp-obsidian", vaultPath],
-        description: "Obsidian vault access (notes, jobs, delegation)",
-        trust: true,
-      };
-      settings.mcpServers = mcpServers;
-      fs.mkdirSync(geminiDir, { recursive: true });
-      fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), "utf-8");
-      ok(`Written ~/.gemini/settings.json with Obsidian MCP server`);
-    } else {
-      ok("Obsidian MCP server already in ~/.gemini/settings.json");
-    }
+    
+    // Add HQ MCP server
+    const mcpScript = path.join(REPO_ROOT, "packages/hq-tools/src/mcp.ts");
+    const { resolveCredentials } = await import("./hq/mcpInstaller.js");
+    const { openrouterApiKey } = resolveCredentials(REPO_ROOT);
+    
+    mcpServers["agent-hq"] = {
+      command: "bun",
+      args: ["run", mcpScript],
+      env: {
+        VAULT_PATH: vaultPath,
+        OPENROUTER_API_KEY: openrouterApiKey,
+        SECURITY_PROFILE: "standard"
+      },
+      trust: true,
+    };
+    
+    settings.mcpServers = mcpServers;
+    fs.mkdirSync(geminiDir, { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2), "utf-8");
+    ok(`Updated ~/.gemini/settings.json with Agent HQ MCP server`);
   }
 
   // ── 3. OpenCode ──────────────────────────────────────────────────────────
@@ -1370,6 +1148,218 @@ async function cmdTools(nonInteractive = false): Promise<void> {
   console.log();
 }
 
+// hq agent [harness]
+// Spawn a fully contextualized agent session with vault context + governance
+async function cmdAgent(harness: string = "hq"): Promise<void> {
+  const VAULT_PATH = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+
+  // ── HQ harness: already fully contextualized via relay ───────────────────
+  if (harness === "hq") {
+    spawnSync(process.execPath, [path.join(REPO_ROOT, "scripts/agent-hq-chat.ts")], {
+      stdio: "inherit",
+      env: { ...process.env, RELAY_SERVER: "1", VAULT_PATH },
+    });
+    return;
+  }
+
+  // ── Read vault context ────────────────────────────────────────────────────
+  const readVault = (file: string) => {
+    try { return fs.readFileSync(path.join(VAULT_PATH, file), "utf-8"); } catch { return ""; }
+  };
+
+  const soul = readVault("_system/SOUL.md");
+  const memory = readVault("_system/MEMORY.md");
+  const prefs = readVault("_system/PREFERENCES.md");
+
+  // Read up to 5 pinned notes
+  const pinnedSnippets: string[] = [];
+  try {
+    const notebookDirs = ["Notebooks/Projects", "Notebooks/Memories", "Notebooks"];
+    for (const dir of notebookDirs) {
+      const full = path.join(VAULT_PATH, dir);
+      if (!fs.existsSync(full)) continue;
+      for (const f of fs.readdirSync(full).filter(f => f.endsWith(".md")).slice(0, 10)) {
+        const content = fs.readFileSync(path.join(full, f), "utf-8");
+        if (content.includes("pinned: true")) {
+          pinnedSnippets.push(`- **${f.replace(".md", "")}**: ${content.slice(0, 300).replace(/\n/g, " ").trim()}`);
+          if (pinnedSnippets.length >= 5) break;
+        }
+      }
+      if (pinnedSnippets.length >= 5) break;
+    }
+  } catch { /* ignore */ }
+
+  // ── Build context string ──────────────────────────────────────────────────
+  const context = `# Agent-HQ: Vault Context & Governance
+
+## Identity
+${soul || "You are a helpful AI assistant."}
+
+## Memory
+${memory || "(no memory yet)"}
+
+## Preferences
+${prefs || "(no preferences set)"}
+
+${pinnedSnippets.length ? `## Pinned Notes\n${pinnedSnippets.join("\n")}\n` : ""}
+
+## Governance — Security Profile: STANDARD
+
+You are operating as part of the Agent-HQ ecosystem with STANDARD security.
+
+### Rules
+- **Never** delete files, force-push git, drop databases, or run irreversible scripts without an approval.
+- **Never** expose or log API keys or secrets from env vars.
+- For risky operations, write an approval request FIRST and wait before proceeding.
+
+### Approval Request Format
+When you need approval for a risky action, write this file and WAIT:
+
+File path: ${VAULT_PATH}/_approvals/pending/approval-{timestamp}-{hash}.md
+
+\`\`\`yaml
+---
+approvalId: approval-{timestamp}-{hash}
+title: Short description of the action
+description: What you want to do and why
+toolName: bash
+riskLevel: low|medium|high|critical
+status: pending
+createdAt: {ISO timestamp}
+timeoutMinutes: 10
+---
+\`\`\`
+
+Then poll ${VAULT_PATH}/_approvals/resolved/ every 10 seconds. Proceed only when the file appears there with \`status: approved\`.
+
+### Memory Management
+To persist a fact: append a new line to ${VAULT_PATH}/_system/MEMORY.md under the appropriate section.
+
+### Vault Path
+Your vault is at: ${VAULT_PATH}
+`;
+
+  // ── Inject context per harness ────────────────────────────────────────────
+  const workDir = process.cwd();
+
+  info(`Launching ${harness} with vault context from ${VAULT_PATH}`);
+  console.log();
+
+  switch (harness) {
+    case "claude": {
+      // Claude Code reads CLAUDE.md from cwd. Prepend vault context under a marker.
+      const claudeMdPath = path.join(workDir, "CLAUDE.md");
+      const existing = fs.existsSync(claudeMdPath) ? fs.readFileSync(claudeMdPath, "utf-8") : "";
+      const START = "<!-- agent-hq:start -->";
+      const END = "<!-- agent-hq:end -->";
+      const block = `${START}\n${context}\n${END}`;
+      const newContent = existing.includes(START)
+        ? existing.replace(new RegExp(`${START}[\\s\\S]*?${END}`), block)
+        : `${block}\n\n${existing}`;
+      fs.writeFileSync(claudeMdPath, newContent);
+      spawnSync("claude", [], { stdio: "inherit", cwd: workDir });
+      // Remove injected block on exit to avoid polluting project CLAUDE.md permanently
+      if (fs.existsSync(claudeMdPath)) {
+        const current = fs.readFileSync(claudeMdPath, "utf-8");
+        fs.writeFileSync(claudeMdPath, current.replace(new RegExp(`${START}[\\s\\S]*?${END}\n*`), "").trim() + (existing ? "\n" : ""));
+      }
+      break;
+    }
+
+    case "codex":
+    case "gemini":
+    case "opencode": {
+      // Codex, Gemini, and OpenCode all read AGENTS.md from cwd automatically
+      const agentsMdPath = path.join(workDir, "AGENTS.md");
+      const existingAgents = fs.existsSync(agentsMdPath) ? fs.readFileSync(agentsMdPath, "utf-8") : "";
+      const START = "<!-- agent-hq:start -->";
+      const END = "<!-- agent-hq:end -->";
+      const block = `${START}\n${context}\n${END}`;
+      const newAgents = existingAgents.includes(START)
+        ? existingAgents.replace(new RegExp(`${START}[\\s\\S]*?${END}`), block)
+        : `${block}\n\n${existingAgents}`;
+      fs.writeFileSync(agentsMdPath, newAgents);
+      spawnSync(harness, [], { stdio: "inherit", cwd: workDir });
+      // Clean up injected block
+      if (fs.existsSync(agentsMdPath)) {
+        const current = fs.readFileSync(agentsMdPath, "utf-8");
+        const cleaned = current.replace(new RegExp(`${START}[\\s\\S]*?${END}\n*`), "").trim();
+        cleaned ? fs.writeFileSync(agentsMdPath, cleaned + "\n") : fs.unlinkSync(agentsMdPath);
+      }
+      break;
+    }
+
+    default:
+      fail(`Unknown harness: ${harness}. Valid: hq, claude, codex, gemini, opencode`);
+      process.exit(1);
+  }
+}
+
+// hq tools vscode
+// Build and install the Agent-HQ VS Code extension
+async function cmdVsCode(): Promise<void> {
+  console.log(`\n${c.bold}━━━ VS Code Extension ━━━${c.reset}\n`);
+
+  const extDir = path.resolve(REPO_ROOT, "apps/vscode-extension");
+  if (!fs.existsSync(extDir)) {
+    fail("apps/vscode-extension not found — is this the agent-hq repo?");
+    process.exit(1);
+  }
+
+  const codePaths = [
+    "code",
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+    "/usr/local/bin/code",
+  ];
+  const codeBin = codePaths.find(p => !!sh(`"${p}" --version 2>/dev/null | head -1`));
+  if (!codeBin) {
+    fail("VS Code CLI not found — add it via: Command Palette → 'Shell Command: Install code command in PATH'");
+    process.exit(1);
+  }
+  const codeV = sh(`"${codeBin}" --version 2>/dev/null | head -1`);
+  ok(`VS Code: ${codeV}`);
+
+  info("Installing npm dependencies...");
+  spawnSync("npm", ["install", "--prefix", extDir, "--quiet"], { stdio: "inherit" });
+
+  info("Compiling TypeScript...");
+  const tsc = spawnSync("npx", ["--prefix", extDir, "tsc", "-p", path.join(extDir, "tsconfig.json")], {
+    stdio: "inherit",
+    cwd: extDir,
+  });
+  if (tsc.status !== 0) {
+    fail("TypeScript compilation failed");
+    process.exit(1);
+  }
+  ok("Compiled");
+
+  info("Packaging extension...");
+  const vsce = spawnSync("npx", ["--prefix", extDir, "vsce", "package", "--no-dependencies", "--out", path.join(extDir, "agent-hq-0.2.0.vsix")], {
+    stdio: "inherit",
+    cwd: extDir,
+  });
+  if (vsce.status !== 0) {
+    fail("Packaging failed");
+    process.exit(1);
+  }
+  ok("Packaged: agent-hq-0.1.0.vsix");
+
+  info("Installing in VS Code...");
+  const vsixPath = path.join(extDir, "agent-hq-0.2.0.vsix");
+  const install = spawnSync(codeBin, ["--install-extension", vsixPath, "--force"], {
+    stdio: "inherit",
+  });
+  if (install.status !== 0) {
+    fail("Installation failed — install manually: code --install-extension apps/vscode-extension/agent-hq-0.1.0.vsix");
+    process.exit(1);
+  }
+  ok("Agent-HQ extension installed!");
+
+  console.log(`\n${c.bold}Ready.${c.reset} Open VS Code and press ${c.bold}Cmd+Shift+A${c.reset} to open the chat.\n`);
+  console.log(`  Switch harnesses:  ${c.bold}Cmd+Shift+H${c.reset}`);
+  console.log(`  Or via palette:    ${c.bold}Agent-HQ: Open Chat${c.reset} / ${c.bold}Agent-HQ: Switch Harness${c.reset}\n`);
+}
+
 function confirmInstall(prompt: string): boolean {
   // Pass prompt as a positional argument to avoid bash interpolation injection
   try {
@@ -1389,7 +1379,10 @@ async function cmdSetup(): Promise<void> {
   const dirs = [
     "_system",
     "_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed",
-    "_delegation/pending", "_delegation/claimed", "_delegation/completed",
+    "_delegation/pending",
+    "_delegation/pending/claude-code", "_delegation/pending/opencode",
+    "_delegation/pending/gemini-cli", "_delegation/pending/any",
+    "_delegation/claimed", "_delegation/completed",
     "_delegation/relay-health",
     "_threads/active", "_threads/archived",
     "_approvals/pending", "_approvals/resolved",
@@ -1429,7 +1422,7 @@ async function cmdSetup(): Promise<void> {
   }
 
   // .gitkeep files
-  for (const dir of ["_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed", "_delegation/pending", "_delegation/claimed", "_delegation/completed", "_threads/active", "_threads/archived", "_logs"]) {
+  for (const dir of ["_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed", "_delegation/pending", "_delegation/pending/claude-code", "_delegation/pending/opencode", "_delegation/pending/gemini-cli", "_delegation/pending/any", "_delegation/claimed", "_delegation/completed", "_threads/active", "_threads/archived", "_logs"]) {
     const gk = path.join(VAULT_PATH, dir, ".gitkeep");
     if (!fs.existsSync(gk)) fs.writeFileSync(gk, "", "utf-8");
   }
@@ -1561,6 +1554,14 @@ async function cmdInit(argv: string[]): Promise<void> {
   }
 
   if (!state.isDone("env")) state.markDone("env");
+  
+  // ── Step 7.5: HQ MCP Server ──────────────────────────────────────────────────
+  if (!state.isDone("mcp")) {
+    section("MCP Server");
+    const { mcpInstall } = await import("./hq/mcpInstaller.js");
+    await mcpInstall(REPO_ROOT, nonInteractive);
+    state.markDone("mcp");
+  }
 
   // ── Step 8: Background services ───────────────────────────────────────────────
   if (!state.isDone("services")) {
@@ -1729,7 +1730,15 @@ ${c.bold}FIRST-TIME SETUP${c.reset}
   hq init --non-interactive     Unattended setup — safe for agent execution
   hq tools                      Install & authenticate Claude/Gemini/OpenCode CLIs
   hq tools --non-interactive    Auto-install all tools silently
+  hq tools vscode               Build & install the Agent-HQ VS Code extension
+
+  hq agent [harness]            Spawn a vault-contextualized agent session
+                                  Harnesses: hq (default), claude, codex, gemini, opencode
+                                  Injects SOUL/MEMORY/PREFERENCES + governance rules
   hq setup                      Scaffold vault directories and system files only
+  hq mcp                        Auto-install HQ MCP server to all detected AI agents
+  hq mcp status                 Check MCP installation status across agents
+  hq mcp remove                 Remove HQ MCP server from all agent configs
   hq install-cli                Symlink hq to ~/.local/bin/hq (add to PATH)
 
 ${c.bold}CHAT${c.reset}
@@ -1887,8 +1896,15 @@ switch (cmd) {
   case "install-cli":
     await cmdInstallCli(); break;
 
+  case "agent": case "a":
+    await cmdAgent(arg1 || "hq"); break;
+
   case "tools": case "t":
+    if (arg1 === "vscode") { await cmdVsCode(); break; }
     await cmdTools(process.argv.includes("--non-interactive")); break;
+
+  case "mcp":
+    await cmdMcp(arg1); break;
 
   case "setup":
     await cmdSetup(); break;

@@ -19,11 +19,15 @@ async function ensureMarkedConfigured() {
     marked.use({
         renderer: {
             code(token: any) {
+                const langLabel = token.lang || ''
+                const escaped = JSON.stringify(token.text)
+                let highlighted: string
                 try {
-                    return highlighter.codeToHtml(token.text, { lang: token.lang || 'text', theme: 'vitesse-dark' })
+                    highlighted = highlighter.codeToHtml(token.text, { lang: token.lang || 'text', theme: 'vitesse-dark' })
                 } catch {
-                    return `<pre><code>${token.text}</code></pre>`
+                    highlighted = `<pre><code>${token.text}</code></pre>`
                 }
+                return `<div class="code-block-wrapper">${langLabel ? `<div class="code-block-header">${langLabel}</div>` : ''}<button class="code-copy-btn" onclick="navigator.clipboard.writeText(${escaped}).then(function(){this.textContent='Copied!';var b=this;setTimeout(function(){b.textContent='Copy'},1500)}.bind(this))">Copy</button>${highlighted}</div>`
             },
             heading(token: any) {
                 return `<h${token.depth} class="md-heading md-h${token.depth}">${token.text}</h${token.depth}>`

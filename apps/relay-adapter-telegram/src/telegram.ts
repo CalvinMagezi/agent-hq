@@ -10,6 +10,8 @@
  */
 
 import { Bot, type Context, InputFile, InlineKeyboard } from "grammy";
+import fs from "node:fs";
+import path from "node:path";
 import type { TelegramGuard } from "./guard.js";
 
 // ─── Message types ───────────────────────────────────────────────
@@ -144,14 +146,23 @@ export class TelegramBridge {
       await next();
     });
 
-    // Text messages
+    // Text messages — also intercepts /command → !command
     this.bot.on("message:text", async (ctx) => {
       const replyId = ctx.message.reply_to_message?.message_id;
+      let text = ctx.message.text;
+
+      // Convert native Telegram /commands to !commands
+      if (text.startsWith("/")) {
+        const slashCmd = text.slice(1);
+        // Strip @botname suffix if present (e.g. /help@MyBot)
+        text = "!" + slashCmd.replace(/@\w+$/, "");
+      }
+
       const msg: TelegramMessage = {
         id: ctx.message.message_id,
         chatId: ctx.chat.id,
         userId: ctx.from.id,
-        content: ctx.message.text,
+        content: text,
         timestamp: ctx.message.date,
         replyToMessageId: replyId,
         replyContent: replyId !== undefined ? this.messageCache.get(replyId) : undefined,
@@ -374,7 +385,25 @@ export class TelegramBridge {
     // Start long polling
     console.log("[telegram] Starting bot with long polling...");
     this.bot.start({
-      onStart: () => console.log("[telegram] Bot is running!"),
+      onStart: async () => {
+        console.log("[telegram] Bot is running!");
+        // Register native Telegram slash commands for autocomplete
+        try {
+          await this.bot.api.setMyCommands([
+            { command: "help",     description: "Show all commands" },
+            { command: "reset",    description: "Start new conversation" },
+            { command: "status",   description: "Agent and active task status" },
+            { command: "memory",   description: "Show vault memory" },
+            { command: "search",   description: "Search the vault" },
+            { command: "harness",  description: "Switch AI harness (claude/gemini/opencode)" },
+            { command: "export",   description: "Send a vault file as document" },
+            { command: "sessions", description: "Show active harness sessions" },
+          ]);
+          console.log("[telegram] Slash commands registered");
+        } catch (err) {
+          console.warn("[telegram] Failed to register slash commands:", err);
+        }
+      },
       drop_pending_updates: true,
     });
   }
@@ -468,6 +497,60 @@ export class TelegramBridge {
       return msg.message_id;
     } catch (err) {
       console.error("[telegram] Send document failed:", err);
+      return null;
+    }
+  }
+
+  /**
+   * Send a file from a local path as a Telegram document.
+   * Guards against files >20MB (Telegram's bot upload limit).
+   */
+  async sendDocumentFromPath(filePath: string, caption?: string): Promise<number | null> {
+    const chatId = this.chatId;
+    if (!chatId) return null;
+
+    try {
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        await this.sendMessage(`File not found: <code>${filePath}</code>`);
+        return null;
+      }
+
+      const MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+      if (stat.size > MAX_BYTES) {
+        const sizeMB = (stat.size / (1024 * 1024)).toFixed(1);
+        await this.sendMessage(
+          `Cannot send <code>${path.basename(filePath)}</code>: ` +
+          `file is ${sizeMB} MB (Telegram limit is 20 MB)`,
+        );
+        return null;
+      }
+
+      await this.sendChatAction("upload_document");
+      const buffer = fs.readFileSync(filePath);
+      return await this.sendDocument(buffer, path.basename(filePath), caption);
+    } catch (err) {
+      console.error("[telegram] sendDocumentFromPath failed:", err);
+      return null;
+    }
+  }
+
+  /** Send a GIF animation (e.g. diagram output). */
+  async sendAnimation(buffer: Buffer, caption?: string): Promise<number | null> {
+    const chatId = this.chatId;
+    if (!chatId) return null;
+
+    try {
+      const msg = await this.bot.api.sendAnimation(
+        chatId,
+        new InputFile(buffer, "animation.gif"),
+        { caption, parse_mode: "HTML" },
+      );
+      return msg.message_id;
+    } catch (err) {
+      console.error("[telegram] Send animation failed:", err);
       return null;
     }
   }
@@ -573,6 +656,40 @@ export class TelegramBridge {
       await this.bot.api.answerCallbackQuery(queryId, { text });
     } catch (err) {
       console.error("[telegram] Answer callback query failed:", err);
+    }
+  }
+
+  /**
+   * Set an emoji reaction on a message.
+   * @param messageId — the message to react to
+   * @param emoji — Unicode emoji supported by Telegram reactions
+   */
+  async reactToMessage(messageId: number, emoji: string): Promise<void> {
+    const chatId = this.chatId;
+    if (!chatId) return;
+
+    try {
+      await this.bot.api.raw.setMessageReaction({
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: "emoji", emoji: emoji as "👍" }],
+      });
+    } catch {
+      // Non-critical — reactions may not be available in all chat types
+    }
+  }
+
+  /** Pin a message in the current chat. */
+  async pinMessage(messageId: number): Promise<void> {
+    const chatId = this.chatId;
+    if (!chatId) return;
+
+    try {
+      await this.bot.api.pinChatMessage(chatId, messageId, {
+        disable_notification: true,
+      });
+    } catch (err) {
+      console.error("[telegram] Pin message failed:", err);
     }
   }
 

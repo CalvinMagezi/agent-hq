@@ -1,0 +1,16 @@
+{
+  "name": "@repo/relay-adapter-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./voice": "./src/voice.ts",
+    "./orchestrator": "./src/orchestrator.ts",
+    "./localHarness": "./src/localHarness.ts",
+    "./sessionOrchestrator": "./src/sessionOrchestrator.ts",
+    "./media": "./src/media.ts",
+    "./formatter": "./src/formatter.ts"
+  },
+  "dependencies": {}
+}

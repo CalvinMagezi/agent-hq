@@ -1,0 +1,18 @@
+[package]
+edition = "2021"
+name = "vault-native"
+version = "0.0.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Default enable napi4 feature, see https://napi.rs/docs/feature-flags.html for you want to use higher version of napi.
+napi = { version = "2.12.2", default-features = false, features = ["napi8", "async"] }
+napi-derive = "2.12.2"
+sha2 = "0.10.8"
+rayon = "1.8.1"
+walkdir = "2.4.0"
+
+[build-dependencies]
+napi-build = "2.0.1"

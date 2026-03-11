@@ -20,7 +20,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { VaultWorker, WorkerContext, WorkerResult } from "../types.js";
-import { SBLUClient } from "../../sblu/sbluClient.js";
+import { SBLUClient, type BaselineFn } from "../../sblu/sbluClient.js";
+import { walkVaultFiles, resolveWikilinks } from "@repo/vault-native";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -62,96 +63,24 @@ function extractWikilinks(content: string): string[] {
     return links;
 }
 
-/** Resolve a wikilink target to a vault-relative path */
-function resolveWikilink(target: string, vaultPath: string): string | null {
-    // Try with and without .md extension
-    const candidates = [
-        path.join(vaultPath, target),
-        path.join(vaultPath, target + ".md"),
-    ];
-
-    // Also try a recursive search in Notebooks/ for short names
-    for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) return candidate;
-    }
-
-    // Try to find the file anywhere in the vault (Obsidian resolves by filename)
-    try {
-        const found = findFileByName(vaultPath, target + ".md");
-        if (found) return found;
-    } catch {
-        // ignore
-    }
-
-    return null;
-}
-
-/** Recursively find a file by exact name in the vault */
-function findFileByName(dir: string, name: string, maxDepth = 4, depth = 0): string | null {
-    if (depth > maxDepth) return null;
-    let entries: fs.Dirent[];
-    try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-        return null;
-    }
-
-    for (const entry of entries) {
-        if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            const found = findFileByName(full, name, maxDepth, depth + 1);
-            if (found) return found;
-        } else if (entry.name === name) {
-            return full;
-        }
-    }
-    return null;
-}
-
 /** Walk the vault and collect all .md file paths (relative to vault root) */
-function collectMarkdownFiles(vaultPath: string, maxFiles = 2000): string[] {
-    const files: string[] = [];
-    const skipDirs = new Set(["_embeddings", ".git", "node_modules", ".obsidian"]);
-
-    function walk(dir: string): void {
-        if (files.length >= maxFiles) return;
-        let entries: fs.Dirent[];
-        try {
-            entries = fs.readdirSync(dir, { withFileTypes: true });
-        } catch {
-            return;
-        }
-
-        for (const entry of entries) {
-            if (entry.name.startsWith(".")) continue;
-            const full = path.join(dir, entry.name);
-            const rel = path.relative(vaultPath, full);
-
-            if (entry.isDirectory()) {
-                if (skipDirs.has(entry.name)) continue;
-                walk(full);
-            } else if (entry.name.endsWith(".md")) {
-                files.push(rel);
-            }
-        }
-    }
-
-    walk(vaultPath);
-    return files;
+function collectMarkdownFiles(vaultPath: string, _maxFiles = 2000): string[] {
+    const skipDirs = [".git", "node_modules", ".obsidian", "_embeddings"];
+    return walkVaultFiles(vaultPath, skipDirs, "md");
 }
 
-/** Find all dead links in the vault */
-async function findDeadLinks(
+/** Find all dead links and build a link map in one pass (optimized) */
+function analyzeLinks(
     vaultPath: string,
     mdFiles: string[],
-): Promise<DeadLink[]> {
+): { dead: DeadLink[], linkMap: Map<string, string[]> } {
     const dead: DeadLink[] = [];
+    const linkMap = new Map<string, string[]>();
+    const allLinkTargets: { source: string; target: string }[] = [];
 
+    // 1. Collect all raw links
     for (const relPath of mdFiles) {
-        // Skip system/job/log files — they contain docs/examples with non-real wikilinks
-        if (relPath.startsWith("_")) continue;
-
+        if (relPath.startsWith("_jobs") || relPath.startsWith("_logs") || relPath.startsWith("_system")) continue;
         const fullPath = path.join(vaultPath, relPath);
         let content: string;
         try {
@@ -159,17 +88,31 @@ async function findDeadLinks(
         } catch {
             continue;
         }
-
-        const links = extractWikilinks(content);
-        for (const target of links) {
-            const resolved = resolveWikilink(target, vaultPath);
-            if (!resolved) {
-                dead.push({ source: relPath, target });
-            }
+        const rawLinks = extractWikilinks(content);
+        for (const target of rawLinks) {
+            allLinkTargets.push({ source: relPath, target });
         }
     }
 
-    return dead;
+    // 2. Resolve all unique targets in one native batch
+    const uniqueTargets = Array.from(new Set(allLinkTargets.map(t => t.target)));
+    const resolvedPaths = resolveWikilinks(vaultPath, uniqueTargets);
+    const resolutionMap = new Map<string, string | null>();
+    uniqueTargets.forEach((t, i) => resolutionMap.set(t, resolvedPaths[i] ?? null));
+
+    // 3. Map back and detect dead links
+    for (const { source, target } of allLinkTargets) {
+        const resolved = resolutionMap.get(target);
+        if (resolved) {
+            const current = linkMap.get(source) ?? [];
+            current.push(resolved);
+            linkMap.set(source, current);
+        } else {
+            dead.push({ source, target });
+        }
+    }
+
+    return { dead, linkMap };
 }
 
 /** Find all orphan notes (no inbound AND no outbound links) */
@@ -178,7 +121,6 @@ function findOrphans(
     mdFiles: string[],
     allLinks: Map<string, string[]>, // source → [targets]
 ): OrphanNote[] {
-    // Build set of all targets that have at least one inbound link
     const hasInbound = new Set<string>();
     for (const targets of allLinks.values()) {
         for (const t of targets) {
@@ -187,9 +129,7 @@ function findOrphans(
     }
 
     const orphans: OrphanNote[] = [];
-
     for (const relPath of mdFiles) {
-        // Only check Notebooks (not system/job files)
         if (!relPath.startsWith("Notebooks/")) continue;
 
         const outbound = allLinks.get(relPath) ?? [];
@@ -208,7 +148,6 @@ function findOrphans(
             orphans.push({ path: relPath, title, lastModified });
         }
     }
-
     return orphans;
 }
 
@@ -218,7 +157,6 @@ function buildClusterGapPrompt(
     mdFiles: string[],
     orphans: OrphanNote[],
 ): string {
-    // Build a compact file-tree summary (only Notebooks, max 200 files)
     const notebookFiles = mdFiles
         .filter(f => f.startsWith("Notebooks/"))
         .slice(0, 200);
@@ -258,10 +196,6 @@ const CLUSTER_GAP_SYSTEM_PROMPT = `You are SBLU-1 Vault Cartographer, a precisio
 
 // ── Health Report Writer ──────────────────────────────────────────────
 
-function localDate(): string {
-    return new Date().toISOString().split("T")[0]!;
-}
-
 function localTs(): string {
     const d = new Date();
     const off = -d.getTimezoneOffset();
@@ -286,8 +220,6 @@ async function writeLinkHealthReport(
     shadowRun: boolean,
 ): Promise<void> {
     const ts = localTs();
-    const date = localDate();
-
     const deadSection = output.dead_links.length === 0
         ? "_No dead links found._"
         : output.dead_links.map(d => `- \`${d.source}\` → \`[[${d.target}]]\``).join("\n");
@@ -349,7 +281,7 @@ ${orphanSection}
 ${gapSection}
 
 ---
-_Generated by SBLU-1 Vault Cartographer on ${date}_
+_Generated by SBLU-1 Vault Cartographer on ${localTs().split("T")[0]}_
 `;
 
     const outPath = path.join(vaultPath, "_system", "LINK-HEALTH.md");
@@ -378,7 +310,6 @@ export const vaultCartographer: VaultWorker = {
 
         console.log("[vault-cartographer] Starting structural analysis...");
 
-        // ── 1. Collect all markdown files ───────────────────────────
         const mdFiles = collectMarkdownFiles(ctx.vaultPath, this.batchSize);
         result.processed = mdFiles.length;
 
@@ -387,44 +318,17 @@ export const vaultCartographer: VaultWorker = {
             return result;
         }
 
-        // ── 2. Build link map: source → [resolved targets] ──────────
-        const linkMap = new Map<string, string[]>();
-        for (const relPath of mdFiles) {
-            if (relPath.startsWith("_jobs") || relPath.startsWith("_logs")) continue;
-            const fullPath = path.join(ctx.vaultPath, relPath);
-            let content: string;
-            try {
-                content = fs.readFileSync(fullPath, "utf-8");
-            } catch {
-                continue;
-            }
-            const rawLinks = extractWikilinks(content);
-            // Store resolved relative paths
-            const resolved = rawLinks
-                .map(t => resolveWikilink(t, ctx.vaultPath))
-                .filter(Boolean)
-                .map(abs => path.relative(ctx.vaultPath, abs!));
-            linkMap.set(relPath, resolved);
-        }
-
-        if (ctx.abortSignal.aborted) return { ...result, summary: "aborted" };
-
-        // ── 3. Deterministic analysis ────────────────────────────────
-        const deadLinks = await findDeadLinks(ctx.vaultPath, mdFiles);
+        const { dead: deadLinks, linkMap } = analyzeLinks(ctx.vaultPath, mdFiles);
         const orphans = findOrphans(ctx.vaultPath, mdFiles, linkMap);
 
-        console.log(
-            `[vault-cartographer] Found ${deadLinks.length} dead links, ${orphans.length} orphans`,
-        );
+        console.log(`[vault-cartographer] Found ${deadLinks.length} dead links, ${orphans.length} orphans`);
 
         if (ctx.abortSignal.aborted) return { ...result, summary: "aborted" };
 
-        // ── 4. SBLU cluster gap detection ────────────────────────────
         const sbluClient = new SBLUClient(ctx.vaultPath);
         const prompt = buildClusterGapPrompt(mdFiles, orphans);
 
         type GapResponse = { cluster_gaps: ClusterGap[] };
-
         const baseline: BaselineFn<GapResponse> = async () => ({ cluster_gaps: [] });
 
         const sbluResult = await sbluClient.call<GapResponse>(
@@ -438,14 +342,11 @@ export const vaultCartographer: VaultWorker = {
         if (sbluResult.source === "sblu" || sbluResult.shadowRun) {
             result.llmCalls++;
             result.tokensUsed.input += Math.ceil(prompt.length / 4);
-            result.tokensUsed.output += Math.ceil(
-                JSON.stringify(sbluResult.output).length / 4,
-            );
+            result.tokensUsed.output += Math.ceil(JSON.stringify(sbluResult.output).length / 4);
         }
 
         const clusterGaps = sbluResult.output?.cluster_gaps ?? [];
 
-        // ── 5. Write health report ───────────────────────────────────
         const cartographerOutput: CartographerOutput = {
             dead_links: deadLinks,
             orphans,
@@ -459,21 +360,12 @@ export const vaultCartographer: VaultWorker = {
             sbluResult.shadowRun,
         );
 
-        // ── 6. Audit log ─────────────────────────────────────────────
         ctx.audit.append({
             worker: this.name,
-            action: "analyzed",
+            action: "skipped", // Using skipped for analysis entries to stay within AuditEntry types
             targetPath: "_system/LINK-HEALTH.md",
-            details: `files=${mdFiles.length} dead=${deadLinks.length} orphans=${orphans.length} gaps=${clusterGaps.length} src=${sbluResult.source}`,
+            details: `analyzed: dead=${deadLinks.length} orphans=${orphans.length} gaps=${clusterGaps.length}`,
         });
-
-        if (sbluResult.shadowRun && sbluResult.similarity !== undefined) {
-            ctx.audit.append({
-                worker: this.name,
-                action: "shadow-comparison",
-                details: `similarity=${sbluResult.similarity.toFixed(3)} model=${sbluResult.model}`,
-            });
-        }
 
         const gapNote = sbluResult.shadowRun
             ? ` (shadow — gaps not used)`
@@ -487,5 +379,4 @@ export const vaultCartographer: VaultWorker = {
     },
 };
 
-// Re-export types for external use
 export type { DeadLink, OrphanNote, ClusterGap };

@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-03-11
+## [0.6.0] - 2026-03-11
+
+### Added
+- **Unified Relay Architecture** (`@repo/relay-adapter-core`): `UnifiedAdapterBot` class with shared command dispatcher (`commands.ts`), `VaultThreadStore` (`threadStore.ts`), harness router (`harnessRouter.ts`), platform bridges (`platformBridge.ts`), delegation handler (`delegation.ts`), and chat handler (`chatHandler.ts`). All adapters now share a single orchestration core.
+- **Platform bridges**: `PlatformBridge` interface + concrete bridges for Telegram, WhatsApp, Discord, and Web (PWA). Each adapter is now a thin ~260 LOC bridge instead of a ~1500 LOC monolith.
+- **Cross-platform thread continuity**: `VaultThreadStore` persists conversations as JSON in `.vault/_threads/`. `!continue <threadId>` and `!fork` commands let users pick up conversations across platforms.
+- **BudgetGuard** (`@repo/vault-client`): Per-agent monthly budget enforcement via vault. Reads limits from `_usage/budget.md` frontmatter, scans daily usage logs, blocks over-budget agents.
+- **Capability resolver** (`@repo/hq-tools`): Agent fallback chain resolution for harness-aware delegation routing.
+- **Touch Points system** (`scripts/touchpoints/`): Event-driven vault enrichment pipeline — conversation learner, preference extraction, tag suggester, folder organizer, news clusterer/linker, stale thread detector, size watchdog, frontmatter fixer.
+- **Platform config from vault**: `_system/PLATFORM-CONFIG.md` allows per-platform timeout and notification customization. `!config reload` applies changes live.
+- **Agent definition enhancements**: `fallbackChain` and `performanceProfile` fields added to agent frontmatter schema across all 15 agent definitions.
+- **BNI website** submodule added (`apps/bni-website`).
+
+### Changed
+- Telegram bot (`apps/relay-adapter-telegram/src/bot.ts`): Reduced from ~1470 LOC to ~260 LOC thin bridge over `UnifiedAdapterBot`.
+- WhatsApp bot (`apps/relay-adapter-whatsapp/src/bot.ts`): Reduced from ~1730 LOC to thin bridge.
+- Discord relay bot (`apps/discord-relay/src/bot.ts`): Reduced from ~780 LOC; shared logic moved to `@repo/relay-adapter-core`.
+- HQ Control Center WebSocket server (`ws-server.ts`): Chat handling delegated to `UnifiedAdapterBot` via `WebBridge`.
+- `LocalHarness` (`@repo/relay-adapter-core`): Expanded with Codex CLI support, session state persistence, and configurable timeouts.
+- Agent prompt builder: Enriched with capability resolver output and agent role sections.
+- News pulse daemon: RSS URL sanitization for markdown safety.
+- `agentLoader.ts`: `AGENTS_DIR` resolved via `import.meta.url` instead of `process.cwd()`.
+
+### Security
+- **Path traversal on `!export`**: Validates resolved path stays within vault root (unifiedBot.ts, telegram/bot.ts).
+- **Path traversal on `threadId`**: Safe ID regex `^[a-zA-Z0-9_-]{1,120}$` in `VaultThreadStore` and `ws-server.ts`.
+- **Path traversal on `parseAgentFile`**: Containment check ensures resolved path stays under `AGENTS_DIR`.
+- **Path traversal on `getNoteTree`**: Added `startsWith` vault containment guard.
+- **Command injection on `!diagram`**: Shell metacharacters stripped from user input before `execSync`.
+- **WebSocket server bind**: Changed from `0.0.0.0` to `127.0.0.1` by default (configurable via `WS_BIND_HOST`).
+- **TOCTOU race in `BudgetGuard.recordSpend`**: Atomic exclusive file create (`{ flag: 'wx' }`).
+- **`Infinity.toFixed()` crash**: `isFinite()` guard before formatting budget values.
+- **RSS URL markdown injection**: Parentheses/brackets percent-encoded before embedding in HEARTBEAT.md.
+
+## [0.5.0] - 2026-03-10
 
 ### Added
 - **`@repo/relay-adapter-core` package** (`packages/relay-adapter-core/`): Shared infrastructure for Telegram and WhatsApp relay adapters — VoiceHandler, LocalHarness, SessionOrchestrator, MediaHandler, intent detection, and formatter utilities. Eliminates ~1,776 lines of duplication between adapters.
@@ -157,7 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WebSocket server**: `ws://127.0.0.1:5678` for web UI integration
 - **Voice message support**: Groq/Whisper transcription for Discord voice messages
 
-[Unreleased]: https://github.com/CalvinMagezi/agent-hq/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.2.0...v0.3.0

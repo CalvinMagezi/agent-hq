@@ -19,7 +19,7 @@ import type { HQTool, HQContext } from "../registry.js";
 export const SKILLS_DIR = path.resolve(process.cwd(), "packages/hq-tools/skills");
 
 // Skills auto-injected into agent context without requiring explicit load_skill
-export const AUTO_LOAD_SKILLS = ["obsidian", "code-mapper", "google-workspace", "voice"];
+export const AUTO_LOAD_SKILLS = ["obsidian", "code-mapper", "google-workspace", "voice", "browser"];
 
 interface SkillMeta {
   name: string;

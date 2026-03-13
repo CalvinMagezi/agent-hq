@@ -92,7 +92,7 @@ function TreeNode({
 
 export function PinnedCard({ note, isSelected, onClick, onUnpin }: { note: PinnedNote; isSelected: boolean; onClick?: () => void; onUnpin?: (path: string) => void }) {
     return (
-        <div className="relative group flex-shrink-0" style={{ width: '112px' }}>
+        <div className="relative group" style={{ width: '112px' }}>
             <Link
                 to="/vault/$"
                 params={{ _splat: note.path }}
@@ -271,10 +271,7 @@ function VaultLayout() {
                     <div className="text-[9px] font-mono tracking-widest uppercase mb-1.5 px-3 flex items-center gap-1.5" style={{ color: 'var(--accent-amber)' }}>
                         <span>📌</span> Pinned
                     </div>
-                    <div
-                        className="flex flex-row gap-2 px-3 pb-1 overflow-x-auto"
-                        style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
-                    >
+                    <div className="flex flex-wrap gap-2 px-3 pb-1">
                         {pinned.map((n) => (
                             <PinnedCard key={n.path} note={n} isSelected={activePath === n.path} onClick={closeSidebar} onUnpin={handleUnpin} />
                         ))}

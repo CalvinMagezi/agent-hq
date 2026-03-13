@@ -5,7 +5,9 @@
  * instead of only reading the static MEMORY.md file.
  *
  * No LLM needed for basic queries — pure SQLite filtering.
- * Optional: Ollama-powered semantic ranking for topic-matched results.
+ * Differential pattern separation: when two memories share 3+ topic tags,
+ * the unique "delta" is extracted via Ollama in the background (cached in DB),
+ * preserving nuanced information instead of discarding overlapping memories.
  */
 
 import type { Database } from "bun:sqlite";
@@ -14,6 +16,8 @@ import {
   getConsolidationHistory,
   getMemoryStats,
   touchMemory,
+  storeDeltaSummary,
+  parseMemoryRow,
   type Memory,
   type Consolidation,
 } from "./db.js";
@@ -31,6 +35,8 @@ export interface MemoryContext {
 
 export class MemoryQuerier {
   private db: Database;
+  /** Memories queued for background delta extraction */
+  private pendingDeltas: Map<number, { candidateId: number; existingSummary: string }> = new Map();
 
   constructor(db: Database) {
     this.db = db;
@@ -53,9 +59,7 @@ export class MemoryQuerier {
       );
     }
 
-    // Novelty deduplication: suppress redundant memories, promote novel ones.
-    // Inspired by schema-based consolidation — info already encoded in existing
-    // patterns gets lower injection priority; genuinely new topics surface first.
+    // Novelty deduplication with differential pattern separation
     memories = this.deduplicateByNovelty(memories, limit);
 
     // Touch accessed memories so the forgetter knows they're still relevant
@@ -72,6 +76,62 @@ export class MemoryQuerier {
       stats,
       formatted: this.formatForContext(memories, insights),
     };
+  }
+
+  /**
+   * Process queued delta extractions in the background.
+   * Called from daemon during idle time (piggybacks on consolidation cycle).
+   * Returns the number of deltas computed.
+   */
+  async processPendingDeltas(): Promise<number> {
+    if (this.pendingDeltas.size === 0) return 0;
+
+    const { ollamaChat, checkOllamaAvailable } = await import("./ollamaClient.js");
+
+    if (!(await checkOllamaAvailable())) return 0;
+
+    let computed = 0;
+    for (const [memId, info] of this.pendingDeltas) {
+      const row = this.db.prepare("SELECT * FROM memories WHERE id = ?").get(memId);
+      if (!row) {
+        this.pendingDeltas.delete(memId);
+        continue;
+      }
+      const memory = parseMemoryRow(row);
+
+      const prompt = `Given two memories that share similar topics:
+
+EXISTING (already in context): "${info.existingSummary}"
+CANDIDATE (overlapping): "${memory.summary}"
+
+Extract ONLY the unique information in the CANDIDATE that is NOT covered by the EXISTING memory. If there is nothing unique, respond with exactly "NO_DELTA".
+Keep it to one concise sentence.`;
+
+      try {
+        const delta = await ollamaChat([
+          { role: "system", content: "You extract unique differential information between two overlapping memories. Be extremely concise." },
+          { role: "user", content: prompt },
+        ]);
+
+        if (delta && !delta.includes("NO_DELTA")) {
+          storeDeltaSummary(this.db, memId, delta.trim());
+          computed++;
+        } else {
+          // Mark as checked with no unique info — prevents re-computation
+          storeDeltaSummary(this.db, memId, "");
+        }
+      } catch (err) {
+        console.error(`[vault-memory/querier] Delta extraction failed for memory #${memId}:`, err);
+      }
+
+      this.pendingDeltas.delete(memId);
+    }
+
+    if (computed > 0) {
+      console.log(`[vault-memory/querier] Computed ${computed} memory deltas`);
+    }
+
+    return computed;
   }
 
   /**
@@ -102,14 +162,15 @@ export class MemoryQuerier {
   }
 
   /**
-   * Novelty deduplication — keeps the injection set diverse.
+   * Differential pattern separation — keeps the injection set diverse while
+   * preserving unique information from overlapping memories.
    *
-   * If two memories share 3+ topic tags, they are "redundant" (same schema).
-   * In that case, keep only the higher-importance one. This prevents a single
-   * topic (e.g. "security") from flooding the context window and crowding out
-   * other important signals.
+   * If two memories share 3+ topic tags:
+   *   - If the candidate has a cached delta_summary → include it (using the delta)
+   *   - If the candidate has delta_summary="" → skip (checked, nothing unique)
+   *   - If no delta cached yet → queue for background extraction, skip this round
    *
-   * High-salience memories always survive deduplication regardless.
+   * High-salience memories always survive regardless.
    */
   private deduplicateByNovelty(memories: Memory[], limit: number): Memory[] {
     const seen: Memory[] = [];
@@ -118,7 +179,6 @@ export class MemoryQuerier {
       const isHighSalience = candidate.topics.includes("high-salience");
 
       // Always include high-salience memories, but still respect the limit.
-      // Without this, a system generating many salience matches floods the context window.
       if (isHighSalience) {
         seen.push(candidate);
         if (seen.length >= limit) break;
@@ -126,16 +186,31 @@ export class MemoryQuerier {
       }
 
       // Check overlap with already-selected memories
-      let redundant = false;
+      let overlapWith: Memory | null = null;
       for (const existing of seen) {
         const overlap = candidate.topics.filter((t) => existing.topics.includes(t)).length;
         if (overlap >= 3) {
-          redundant = true;
+          overlapWith = existing;
           break;
         }
       }
 
-      if (!redundant) seen.push(candidate);
+      if (!overlapWith) {
+        // No overlap — include normally
+        seen.push(candidate);
+      } else if (candidate.delta_summary) {
+        // Delta already cached and non-empty — include with differential summary
+        seen.push({ ...candidate, summary: candidate.delta_summary });
+      } else if (candidate.delta_summary === "") {
+        // Checked previously, nothing unique — skip (same as old behavior)
+      } else {
+        // No delta computed yet — queue for background extraction, skip this round
+        this.pendingDeltas.set(candidate.id, {
+          candidateId: candidate.id,
+          existingSummary: overlapWith.summary,
+        });
+      }
+
       if (seen.length >= limit) break;
     }
 

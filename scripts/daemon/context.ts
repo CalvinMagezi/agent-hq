@@ -17,6 +17,10 @@ export interface MemorySystem {
     ingest(opts: { text: string; source: string; harness?: string }): Promise<number | null>;
     ingestBatch(items: Array<{ text: string; source: string; harness?: string }>): Promise<number[]>;
   };
+  awakeReplay: {
+    reverseReplay(opts: { triggerRef: string; triggerSource: string; entities?: string[]; timeWindowMs?: number }): Promise<{ replayedCount: number; creditDelta: number }>;
+    forwardReplay(opts: { triggerRef: string; triggerSource: string; instructionText: string; limit?: number }): Promise<{ precedents: any[]; replayedCount: number }>;
+  };
 }
 
 export interface DaemonContext {

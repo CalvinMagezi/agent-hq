@@ -24,6 +24,7 @@ export { ToolRegistry } from "./registry.js";
 export type { HQTool, HQContext, HQToolSummary } from "./registry.js";
 export { createHQGatewayTools } from "./gateway.js";
 export type { AgentToolShape } from "./gateway.js";
+export { openPlanDB } from "./planDB.js";
 
 // Built-in tools
 export { ImageGenTool } from "./tools/imageGen.js";
@@ -84,6 +85,16 @@ import {
   VaultWriteNoteTool,
   VaultCreateJobTool
 } from "./tools/vault.js";
+import { browserTools } from "./tools/browser.js";
+import {
+  PlanCreateTool,
+  PlanStatusTool,
+  PlanAnswerTool,
+  PlanSearchTool,
+  PlanUpdateTool,
+  CodemapQueryTool,
+  CodemapUpdateTool
+} from "./tools/planning.js";
 
 export {
   GoogleWorkspaceSchemaTool,
@@ -164,5 +175,15 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(VaultBatchReadTool);
   registry.register(VaultWriteNoteTool);
   registry.register(VaultCreateJobTool);
+  // Browser automation tools (requires hq-browser server running on :19200)
+  for (const tool of browserTools) registry.register(tool);
+  // Cross-agent planning system tools
+  registry.register(PlanCreateTool);
+  registry.register(PlanStatusTool);
+  registry.register(PlanAnswerTool);
+  registry.register(PlanSearchTool);
+  registry.register(PlanUpdateTool);
+  registry.register(CodemapQueryTool);
+  registry.register(CodemapUpdateTool);
   return registry;
 }

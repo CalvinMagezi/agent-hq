@@ -20,6 +20,15 @@ import {
     _currentJobSpanId, _currentExecutionMode,
 } from "./state.js";
 
+const BROWSER_KEYWORDS = ["browser", "screenshot", "localhost", "navigate", "webapp",
+  "vercel.app", "ngrok.io", "click", "fill form", "test the"];
+
+function injectBrowserGuidance(instruction: string): string {
+    const needs = BROWSER_KEYWORDS.some(kw => instruction.toLowerCase().includes(kw));
+    if (!needs) return instruction;
+    return instruction + `\n\n> **Browser**: Use \`hq_call browser_session_start\` (discover via \`hq_discover browser\`). Server on http://127.0.0.1:19200. Close session when done.`;
+}
+
 const SecurityConstraintsSchema = Type.Object({
     noGit: Type.Optional(Type.Boolean({ description: "Block all git commands" })),
     noNetwork: Type.Optional(Type.Boolean({ description: "Block network access" })),
@@ -199,7 +208,7 @@ Use securityConstraints per task to restrict what the relay can do (e.g., noGit:
 
                 return {
                     taskId: t.taskId,
-                    instruction: t.instruction,
+                    instruction: injectBrowserGuidance(t.instruction),
                     targetHarnessType: effectiveHarness as any,
                     modelOverride: effectiveModel,
                     dependsOn: t.dependsOn || [],

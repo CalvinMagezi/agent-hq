@@ -38,6 +38,11 @@ import {
   cleanupStaleJobs as _cleanupStaleJobs,
   cleanupDelegationArtifacts as _cleanupDelegationArtifacts,
 } from "./daemon/healthAndCleanup.js";
+import {
+  planStatusSync as _planStatusSync,
+  planKnowledgeExtraction as _planKnowledgeExtraction,
+  planArchival as _planArchival,
+} from "./daemon/planMaintenance.js";
 
 // ─── Configuration ───────────────────────────────────────────────────
 
@@ -51,6 +56,9 @@ const STALE_JOB_DAYS = 7;
 const STUCK_JOB_HOURS = 2;
 const OFFLINE_WORKER_SECONDS = 30;
 const RELAY_STALE_SECONDS = 60;
+
+const HQ_BROWSER_PORT = parseInt(process.env.HQ_BROWSER_PORT ?? "19200", 10);
+const HQ_BROWSER_ENABLED = process.env.HQ_BROWSER_ENABLED !== "false"; // opt-out to disable
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -95,12 +103,38 @@ const healthCheck = () => _healthCheck(getDaemonCtx());
 const relayHealthCheck = () => _relayHealthCheck(getDaemonCtx());
 const processEmbeddings = () => _processEmbeddings(getDaemonCtx());
 const forgetWeakMemories = () => _forgetWeakMemories(getDaemonCtx());
-const consolidateMemory = () => _consolidateMemory(getDaemonCtx());
+const consolidateMemory = async () => {
+  await _consolidateMemory(getDaemonCtx());
+  // Process any pending delta extractions from recent queries (pattern separation)
+  try {
+    const deltaCount = await memorySystem.querier.processPendingDeltas();
+    if (deltaCount > 0) console.log(`[daemon] Computed ${deltaCount} memory deltas`);
+  } catch (err) {
+    console.error("[daemon] Delta processing failed:", err);
+  }
+};
 const cleanupStaleJobs = () => _cleanupStaleJobs(getDaemonCtx());
 const cleanupDelegationArtifacts = () => _cleanupDelegationArtifacts(getDaemonCtx());
 const refreshNewsPulse = () => _refreshNewsPulse(getDaemonCtx());
 const processNoteLinking = () => _processNoteLinking(getDaemonCtx());
 const processTopicMOCs = () => _processTopicMOCs(getDaemonCtx());
+
+// Planning System Wrappers
+const planStatusSync = () => _planStatusSync(getDaemonCtx());
+const planKnowledgeExtraction = () => _planKnowledgeExtraction(getDaemonCtx());
+const planArchival = () => _planArchival(getDaemonCtx());
+
+// ─── Awake Replay Helpers ────────────────────────────────────────────
+
+function extractJobIdFromPath(filePath: string): string {
+  const parts = filePath.split("/");
+  return parts[parts.length - 1].split(".")[0];
+}
+
+function extractTaskIdFromPath(filePath: string): string {
+  const parts = filePath.split("/");
+  return parts[parts.length - 1].split(".")[0];
+}
 
 // ─── Startup Validation ─────────────────────────────────────────────
 
@@ -820,6 +854,13 @@ const tasks: {
       },
       lastRun: 0,
     },
+    // ─── HQ Browser health-check (every 5 min) ──────────────────────────
+    {
+      name: "browser-health",
+      intervalMs: 5 * 60 * 1000,
+      fn: checkHQBrowserHealth,
+      lastRun: 0,
+    },
     // ─── Team Optimizer (every 7 days) ──────────────────────────────────
     {
       name: "team-optimizer",
@@ -839,10 +880,32 @@ const tasks: {
       },
       lastRun: 0,
     },
+    // ─── Planning System Maintenance ────────────────────────────────────
+    {
+      name: "plan-sync",
+      intervalMs: 1 * 60 * 1000, // every minute
+      fn: planStatusSync,
+      lastRun: 0,
+    },
+    {
+      name: "plan-extraction",
+      intervalMs: 10 * 60 * 1000, // every 10 min
+      fn: planKnowledgeExtraction,
+      lastRun: 0,
+    },
+    {
+      name: "plan-archival",
+      intervalMs: 60 * 60 * 1000, // every hour
+      fn: planArchival,
+      lastRun: 0,
+    },
   ];
 
 
 async function runScheduler(): Promise<void> {
+  // ── HQ Browser server (start on daemon startup) ─────────────────────
+  await startHQBrowser();
+
   // ── Vault Workers (opt-in via VAULT_WORKERS_ENABLED=true) ──────────
   const VAULT_WORKERS_ENABLED = process.env.VAULT_WORKERS_ENABLED === "true";
   let workerRunner: import("./vault-workers/index.js").WorkerRunner | null = null;
@@ -936,13 +999,67 @@ async function runScheduler(): Promise<void> {
       }
     });
 
-    // Event-driven: expire approvals when new ones are created
     vault.on("approval:created", async () => {
       try {
         await expireApprovals();
         recordTaskRun("expire-approvals", true);
       } catch (err) {
         recordTaskRun("expire-approvals", false, String(err));
+      }
+    });
+
+    // ─── Awake Replay: Reverse replay on job completion ───
+    vault.on("job:status-changed", async (event) => {
+      if (event.path.includes("_jobs/done/")) {
+        try {
+          const jobId = extractJobIdFromPath(event.path);
+          const result = await memorySystem.awakeReplay.reverseReplay({
+            triggerRef: jobId,
+            triggerSource: "job:status-changed",
+          });
+          if (result.replayedCount > 0) {
+            console.log(`[awake-replay] Reverse: ${result.replayedCount} memories replayed, credit +${result.creditDelta.toFixed(3)}`);
+          }
+        } catch (err) {
+          console.error("[awake-replay] Job reverse replay failed:", err);
+        }
+      }
+    });
+
+    // ─── Awake Replay: Forward replay on job creation ───
+    vault.on("job:created", async (event) => {
+      try {
+        const fullPath = path.join(VAULT_PATH, event.path);
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath, "utf-8");
+          const jobId = extractJobIdFromPath(event.path);
+          const fwdResult = await memorySystem.awakeReplay.forwardReplay({
+            triggerRef: jobId,
+            triggerSource: "job:created",
+            instructionText: content,
+          });
+          if (fwdResult.replayedCount > 0) {
+            console.log(`[awake-replay] Forward: ${fwdResult.replayedCount} precedents found for ${jobId}`);
+          }
+        }
+      } catch (err) {
+        console.error("[awake-replay] Job forward replay failed:", err);
+      }
+    });
+
+    // ─── Awake Replay: Reverse replay on delegation completion ───
+    vault.on("task:completed", async (event) => {
+      try {
+        const taskId = extractTaskIdFromPath(event.path);
+        const taskResult = await memorySystem.awakeReplay.reverseReplay({
+          triggerRef: taskId,
+          triggerSource: "task:completed",
+        });
+        if (taskResult.replayedCount > 0) {
+          console.log(`[awake-replay] Task reverse: ${taskResult.replayedCount} memories replayed, credit +${taskResult.creditDelta.toFixed(3)}`);
+        }
+      } catch (err) {
+        console.error("[awake-replay] Task reverse replay failed:", err);
       }
     });
 
@@ -1084,10 +1201,73 @@ async function runScheduler(): Promise<void> {
   }, 60_000);
 }
 
+// ─── HQ Browser Server Lifecycle ─────────────────────────────────────
+
+let hqBrowserProc: ReturnType<typeof Bun.spawn> | null = null;
+
+async function startHQBrowser(): Promise<void> {
+  if (!HQ_BROWSER_ENABLED) return;
+
+  // Locate the binary relative to the repo root (scripts/../packages/hq-browser/bin/hq-browser)
+  const repoRoot = path.resolve(import.meta.dir, "..");
+  const binaryPath = path.join(repoRoot, "packages/hq-browser/bin/hq-browser");
+
+  if (!fs.existsSync(binaryPath)) {
+    console.warn(
+      `[hq-browser] Binary not found at ${binaryPath}. ` +
+      `Run: cd packages/hq-browser && make build  (requires Go 1.22+)`
+    );
+    return;
+  }
+
+  // Check if already running on the port
+  try {
+    const res = await fetch(`http://127.0.0.1:${HQ_BROWSER_PORT}/health`, { signal: AbortSignal.timeout(1000) });
+    if (res.ok) {
+      console.log(`[hq-browser] Already running on :${HQ_BROWSER_PORT}`);
+      return;
+    }
+  } catch {
+    // Not running — proceed to start
+  }
+
+  hqBrowserProc = Bun.spawn(
+    [binaryPath, "--port", String(HQ_BROWSER_PORT), "--vault", VAULT_PATH, "--headless"],
+    {
+      stdout: "inherit",
+      stderr: "inherit",
+      env: { ...process.env, VAULT_PATH },
+    },
+  );
+  console.log(`[hq-browser] Started (pid ${hqBrowserProc.pid}) on :${HQ_BROWSER_PORT}`);
+}
+
+async function stopHQBrowser(): Promise<void> {
+  if (hqBrowserProc) {
+    hqBrowserProc.kill("SIGTERM");
+    hqBrowserProc = null;
+    console.log("[hq-browser] Stopped");
+  }
+}
+
+async function checkHQBrowserHealth(): Promise<void> {
+  if (!HQ_BROWSER_ENABLED) return;
+  try {
+    const res = await fetch(`http://127.0.0.1:${HQ_BROWSER_PORT}/health`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    console.warn("[hq-browser] Health check failed — attempting restart:", String(err));
+    hqBrowserProc?.kill("SIGTERM");
+    hqBrowserProc = null;
+    await startHQBrowser();
+  }
+}
+
 // ─── Graceful Shutdown ───────────────────────────────────────────────
 
 process.on("SIGINT", async () => {
   console.log("\n[daemon] Shutting down...");
+  await stopHQBrowser();
   await vault.stopSync().catch(() => { });
   search.close();
   process.exit(0);
@@ -1095,6 +1275,7 @@ process.on("SIGINT", async () => {
 
 process.on("SIGTERM", async () => {
   console.log("[daemon] Received SIGTERM, shutting down...");
+  await stopHQBrowser();
   await vault.stopSync().catch(() => { });
   search.close();
   process.exit(0);

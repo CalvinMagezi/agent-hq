@@ -116,6 +116,10 @@ initDelegationTools(VAULT_PATH);
 // Initialize SearchClient for hq-tools registry and prompt builder
 const searchClient = new SearchClient(VAULT_PATH);
 
+// Initialize planDB for cross-agent planning
+import { openPlanDB } from "@repo/hq-tools";
+const planDB = openPlanDB(VAULT_PATH);
+
 // Initialize prompt builder for context-enriched delegations
 initPromptBuilder(VAULT_PATH, searchClient);
 
@@ -126,6 +130,7 @@ const hqGatewayContext = {
     geminiApiKey: GEMINI_API_KEY,
     googleWorkspaceCredentialsFile: GOOGLE_WORKSPACE_CREDENTIALS_FILE,
     searchClient,
+    planDB,
 };
 const hqToolRegistry = createDefaultRegistry(hqGatewayContext);
 
@@ -1164,7 +1169,7 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
                 const { session: fallbackSession } = await createAgentSession({ ...sessionOptions, model: fallbackModel });
                 currentSession = fallbackSession;
                 if (profileToolNames !== "*") {
-                    try { fallbackSession.setActiveToolsByName(profileToolNames); } catch (_) { }
+                    try { fallbackSession.setActiveToolsByName(profileToolNames); } catch (_) { /* tool list may not apply to all session types */ }
                 }
                 fallbackSession.subscribe(onSessionEvent);
                 await fallbackSession.prompt(promptText);

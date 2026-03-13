@@ -1,4 +1,4 @@
-import { DelegatedTask, TaskStatus, HarnessType, DelegationSecurityConstraints } from "@repo/vault-client";
+import { DelegatedTask, TaskStatus, HarnessType, DelegationSecurityConstraints } from "@repo/vault-types";
 import { FbmqPriority, MessageCodec, ParsedHeaders } from "../types";
 import { getPriority, parsePriority } from "./jobCodec";
 

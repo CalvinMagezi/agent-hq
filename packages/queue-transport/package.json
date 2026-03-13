@@ -11,7 +11,7 @@
         ".": "./src/index.ts"
     },
     "dependencies": {
-        "@repo/vault-client": "workspace:*"
+        "@repo/vault-types": "workspace:*"
     },
     "devDependencies": {
         "bun-types": "latest",

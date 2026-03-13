@@ -17,6 +17,11 @@ import {
   buildHelpEmbed,
   buildErrorEmbed,
 } from "./embedBuilder.js";
+import {
+  HARNESS_ALIASES,
+  harnessLabel,
+  type ActiveHarness,
+} from "@repo/relay-adapter-core";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -26,6 +31,10 @@ export interface SlashCommandContext {
   convex: ConvexAPI;
   enricher: ContextEnricher;
   threadManager?: ThreadManager;
+  /** Get the active harness for the unified bot. */
+  getActiveHarness?: () => ActiveHarness;
+  /** Set the active harness for the unified bot. */
+  setActiveHarness?: (h: ActiveHarness) => void;
 }
 
 interface SlashCommandDef {
@@ -199,6 +208,65 @@ function defineCommands(harnessName: string): SlashCommandDef[] {
     async execute(interaction, ctx) {
       await ctx.harness.clearChannelSettings(interaction.channelId);
       await interaction.reply("All channel settings cleared. Using defaults.");
+    },
+  });
+
+  // /harness — switch between CLI harnesses (like Telegram)
+  commands.push({
+    data: new SlashCommandBuilder()
+      .setName("harness")
+      .setDescription("Switch between CLI harnesses (Claude, OpenCode, Gemini, auto)")
+      .addStringOption((opt) =>
+        opt
+          .setName("target")
+          .setDescription("Harness to switch to")
+          .addChoices(
+            { name: "Auto (intent-based routing)", value: "auto" },
+            { name: "Claude Code", value: "claude" },
+            { name: "OpenCode", value: "opencode" },
+            { name: "Gemini CLI", value: "gemini" },
+            { name: "Codex CLI", value: "codex" },
+          ),
+      ) as SlashCommandBuilder,
+    async execute(interaction, ctx) {
+      if (!ctx.getActiveHarness || !ctx.setActiveHarness) {
+        await interaction.reply({
+          content: "Harness switching is not available on this bot instance.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const target = interaction.options.getString("target");
+
+      if (!target) {
+        // Show current harness
+        const current = ctx.getActiveHarness();
+        await interaction.reply({
+          content:
+            `**Active harness:** ${harnessLabel(current)}\n\n` +
+            "Use `/harness target:` to switch:\n" +
+            "- **Auto** — intent-based routing (coding → Claude, workspace → Gemini)\n" +
+            "- **Claude Code** — pin all messages to Claude Code CLI\n" +
+            "- **OpenCode** — pin all messages to OpenCode CLI\n" +
+            "- **Gemini CLI** — pin all messages to Gemini CLI\n" +
+            "- **Codex CLI** — pin all messages to Codex CLI",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const resolved: ActiveHarness =
+        target === "auto" ? "auto" : (HARNESS_ALIASES[target] ?? target) as ActiveHarness;
+
+      ctx.setActiveHarness(resolved);
+
+      const desc =
+        resolved === "auto"
+          ? "Intent-based routing restored — workspace tasks → Gemini, coding tasks → Claude Code."
+          : `All messages will now route to **${harnessLabel(resolved)}** until you switch back with \`/harness auto\`.`;
+
+      await interaction.reply(`Switched to **${harnessLabel(resolved)}**\n\n${desc}`);
     },
   });
 

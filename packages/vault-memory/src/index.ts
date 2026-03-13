@@ -30,6 +30,7 @@ export { MemoryQuerier } from "./querier.js";
 export type { MemoryContext } from "./querier.js";
 export { MemoryForgetter } from "./forgetter.js";
 export type { ForgetterResult } from "./forgetter.js";
+export { AwakeReplayEngine } from "./awakeReplay.js";
 
 export { ollamaChat, checkOllamaAvailable, MEMORY_MODEL } from "./ollamaClient.js";
 export type { OllamaChatMessage } from "./ollamaClient.js";
@@ -39,6 +40,7 @@ import { MemoryIngester } from "./ingester.js";
 import { MemoryConsolidator } from "./consolidator.js";
 import { MemoryQuerier } from "./querier.js";
 import { MemoryForgetter } from "./forgetter.js";
+import { AwakeReplayEngine } from "./awakeReplay.js";
 
 /**
  * Create the full memory system from a vault path.
@@ -49,7 +51,8 @@ export function createMemorySystem(vaultPath: string) {
   const ingester = new MemoryIngester(db);
   const consolidator = new MemoryConsolidator(db, vaultPath);
   const querier = new MemoryQuerier(db);
-  const forgetter = new MemoryForgetter(db);
+  const forgetter = new MemoryForgetter(db, vaultPath);
+  const awakeReplay = new AwakeReplayEngine(db, vaultPath);
 
-  return { db, ingester, consolidator, querier, forgetter };
+  return { db, ingester, consolidator, querier, forgetter, awakeReplay };
 }

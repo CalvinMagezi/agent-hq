@@ -834,4 +834,18 @@ export class UnifiedAdapterBot {
       console.error(`[${this.label}] Failed to save state:`, err);
     }
   }
+
+  // ─── Public harness accessors (for slash command integration) ────
+
+  getActiveHarness(): ActiveHarness {
+    return this.activeHarness;
+  }
+
+  setActiveHarness(h: ActiveHarness): void {
+    this.activeHarness = h;
+    if (this.threadId) {
+      this.threadStore.setActiveHarness(this.threadId, h).catch(console.error);
+    }
+    this.saveState();
+  }
 }

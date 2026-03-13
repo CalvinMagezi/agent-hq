@@ -1,4 +1,4 @@
-import { DelegatedTask, HarnessType } from "@repo/vault-client";
+import { DelegatedTask, HarnessType } from "@repo/vault-types";
 import { FbmqCli } from "./fbmqCli";
 import { delegationCodec } from "./codecs/delegationCodec";
 import { QueueConfig } from "./types";

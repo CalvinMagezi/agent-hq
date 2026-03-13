@@ -20,6 +20,8 @@ export interface HQContext {
   securityProfile?: "minimal" | "standard" | "guarded" | "admin";
   /** Performant vault search client (FTS5 + semantic) */
   searchClient?: any;
+  /** SQL storage for planning system */
+  planDB?: any;
 }
 
 export interface HQToolSummary {

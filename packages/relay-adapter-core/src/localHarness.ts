@@ -181,6 +181,7 @@ export class LocalHarness {
         // Prevent "cannot launch inside another Claude Code session" error
         CLAUDECODE: undefined,
         CLAUDE_CODE_ENTRYPOINT: undefined,
+        HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200",
       },
     });
     this.activeKill = () => proc.kill();
@@ -292,7 +293,7 @@ export class LocalHarness {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env },
+      env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
     });
     this.activeKill = () => proc.kill();
 
@@ -358,7 +359,7 @@ export class LocalHarness {
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...process.env },
+        env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
       });
 
       this.activeKill = () => proc.kill();

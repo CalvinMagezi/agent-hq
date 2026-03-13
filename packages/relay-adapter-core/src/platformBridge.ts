@@ -8,7 +8,7 @@
 
 // ─── Platform Identity ────────────────────────────────────────────
 
-export type PlatformId = "telegram" | "whatsapp" | "discord" | "web";
+export type PlatformId = "telegram" | "whatsapp" | "discord" | "web" | "google-chat";
 
 // ─── Capabilities ─────────────────────────────────────────────────
 

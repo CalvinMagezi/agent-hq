@@ -24,6 +24,7 @@ import { noteEnricher } from "./workers/noteEnricher.js";
 import { dailyPreparer } from "./workers/dailyPreparer.js";
 import { orphanRescuer } from "./workers/orphanRescuer.js";
 import { vaultCartographer } from "./workers/vaultCartographer.js";
+import { codemapRefresher } from "./workers/codemapRefresher.js";
 
 // ── Worker Registry ───────────────────────────────────────────────────
 
@@ -35,6 +36,7 @@ const WORKERS: VaultWorker[] = [
     dailyPreparer,
     orphanRescuer,
     vaultCartographer,
+    codemapRefresher,
 ];
 
 export function getWorkers(): VaultWorker[] {

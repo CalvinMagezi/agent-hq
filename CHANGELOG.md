@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Cross-Agent Planning System** (`@repo/hq-tools/planDB`): SQLite-backed plan tracking with FTS5 search. Includes `PlanKnowledgeEngine` for LLM-powered pattern extraction from completed plans and `planStatusSync` for frontmatter-to-DB synchronization.
+- **Awake Replay Engine** (`@repo/vault-memory/awakeReplay`): Implements "preplay" and "credit assignment" via forward/reverse replay of memories. Triggered by job/task creation and completion to ground agent reasoning in past precedents.
+- **HQ Browser Integration** (`packages/hq-browser`): Managed headless browser server with lifecycle management in the daemon. Adds `browser_open`, `browser_type`, `browser_click`, and `browser_screenshot` tools to the agent skillset.
+- **Progressive Codebase Understanding** (`@repo/hq-tools/codemap`): Automated "codemap" generation. `CodemapEngine` tracks file purposes, exports, and patterns with confidence decay over time. Includes `codemapRefresher` background worker.
+- **Daemon Task Expansion**: New background tasks for plan status syncing, pattern extraction, codemap refreshing, and plan archival/pruning.
+
+### Changed
+- **Memory System**: Added `processPendingDeltas` to the memory querier for asynchronous pattern separation.
+- **Daemon Context**: Enriched with `MemorySystem` extensions for Awake Replay and Plan Knowledge management.
+
 ## [0.6.0] - 2026-03-11
 
 ### Added

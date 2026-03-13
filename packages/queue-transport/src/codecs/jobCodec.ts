@@ -1,4 +1,4 @@
-import { Job, JobStatus, JobType, SecurityProfile, ThinkingLevel } from "@repo/vault-client";
+import { Job, JobStatus, JobType, SecurityProfile, ThinkingLevel } from "@repo/vault-types";
 import { FbmqPriority, MessageCodec, ParsedHeaders } from "../types";
 
 export function getPriority(agentPriority: number): FbmqPriority {

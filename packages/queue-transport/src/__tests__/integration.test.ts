@@ -7,7 +7,7 @@ import { JobQueue } from "../jobQueue";
 import { DelegationQueue } from "../delegationQueue";
 import { jobCodec, getPriority, parsePriority } from "../codecs/jobCodec";
 import { delegationCodec } from "../codecs/delegationCodec";
-import type { Job, DelegatedTask } from "@repo/vault-client";
+import type { Job, DelegatedTask } from "@repo/vault-types";
 
 // ─── Test fixtures ──────────────────────────────────────────────────
 

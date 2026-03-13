@@ -171,9 +171,18 @@ export class DiscordBot extends DiscordBotBase {
     this.setPresence(status);
   }
 
+  // ── File sending ─────────────────────────────────────────────────
+
+  private async sendFile(channelId: string, attachments: import("discord.js").AttachmentBuilder[]): Promise<void> {
+    const channel = await this.client?.channels.fetch(channelId);
+    if (channel?.isTextBased() && "send" in channel) {
+      await (channel as import("discord.js").TextChannel).send({ files: attachments });
+    }
+  }
+
   // ── DiscordBotBase hooks ──────────────────────────────────────────
 
-  async onMessage(msg: IncomingMessage): Promise<void> {
+  async onDiscordMessage(msg: IncomingMessage): Promise<void> {
     const content = msg.content;
     if (!content) return;
 

@@ -92,6 +92,23 @@ export const PLATFORM_DEFAULTS: Record<PlatformId, PlatformConfig> = {
     },
   },
 
+  "google-chat": {
+    platformId: "google-chat",
+    harnessTimeouts: {
+      "claude-code": 3_600_000,
+      "opencode":    3_600_000,
+      "gemini-cli":  600_000,
+      "codex-cli":   600_000,
+    },
+    defaultTimeout: 600_000,
+    notifications: {
+      progressInterval: 300_000,
+      showTyping: false,
+      typingKeepAliveMs: 0,
+      acknowledgeReceipt: false,
+    },
+  },
+
   web: {
     platformId: "web",
     harnessTimeouts: {

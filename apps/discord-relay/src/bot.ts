@@ -120,6 +120,8 @@ export class BotInstance {
           convex: this.convex,
           enricher: {} as any, // Legacy
           threadManager: {} as any, // Legacy
+          getActiveHarness: () => this.bot.getActiveHarness(),
+          setActiveHarness: (h) => this.bot.setActiveHarness(h),
         });
       } else if (interaction.isAutocomplete()) {
         await handleAutocomplete(interaction as any, { harnessName: this.harnessType } as any);

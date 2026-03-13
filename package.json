@@ -28,6 +28,7 @@
     "relay-server": "bun run packages/agent-relay-server/src/index.ts",
     "whatsapp": "bun --cwd apps/relay-adapter-whatsapp start",
     "telegram": "bun --cwd apps/relay-adapter-telegram start",
+    "googlechat": "bun --cwd apps/relay-adapter-googlechat start",
     "plugin:build": "cd plugins/obsidian-vault-sync && bun run build",
     "plugin:install": "bash scripts/install-obsidian-plugin.sh",
     "icloud-bridge": "bun run scripts/vault-icloud-bridge.ts",

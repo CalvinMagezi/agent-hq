@@ -1,4 +1,4 @@
-import { Job } from "@repo/vault-client";
+import { Job } from "@repo/vault-types";
 import { FbmqCli } from "./fbmqCli";
 import { jobCodec } from "./codecs/jobCodec";
 import type { ParsedHeaders } from "./types";

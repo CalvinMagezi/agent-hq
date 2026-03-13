@@ -241,3 +241,76 @@ export function confirmInstall(prompt: string): boolean {
   const n = fs.readSync(0, buf, 0, buf.length, null);
   return buf.toString("utf-8", 0, n).trim().toLowerCase().startsWith("y");
 }
+
+/** Interactive text prompt — returns trimmed input (empty string if user presses Enter). */
+export function readLine(prompt: string, defaultValue?: string): string {
+  const suffix = defaultValue ? ` [${defaultValue}]` : "";
+  process.stdout.write(`${prompt}${suffix}: `);
+  const buf = Buffer.alloc(1024);
+  const n = fs.readSync(0, buf, 0, buf.length, null);
+  const input = buf.toString("utf-8", 0, n).trim();
+  return input || defaultValue || "";
+}
+
+/** Check if a TCP port is in use. */
+export function isPortInUse(port: number): boolean {
+  try {
+    execSync(`lsof -i :${port} -sTCP:LISTEN -t 2>/dev/null`, { encoding: "utf-8" });
+    return true;
+  } catch { return false; }
+}
+
+/** Parse a .env.local file into a key-value map. */
+export function parseEnvFile(filePath: string): Record<string, string> {
+  if (!fs.existsSync(filePath)) return {};
+  const content = fs.readFileSync(filePath, "utf-8");
+  const env: Record<string, string> = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq > 0) {
+      env[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+    }
+  }
+  return env;
+}
+
+/** Write key-value pairs to a .env.local file, preserving comments and order. */
+export function writeEnvFile(filePath: string, updates: Record<string, string>): void {
+  let content = "";
+  if (fs.existsSync(filePath)) {
+    const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+    const written = new Set<string>();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) {
+        content += line + "\n";
+        continue;
+      }
+      const eq = trimmed.indexOf("=");
+      if (eq > 0) {
+        const key = trimmed.slice(0, eq);
+        if (key in updates) {
+          content += `${key}=${updates[key]}\n`;
+          written.add(key);
+        } else {
+          content += line + "\n";
+        }
+      } else {
+        content += line + "\n";
+      }
+    }
+    // Append new keys not already in the file
+    for (const [key, value] of Object.entries(updates)) {
+      if (!written.has(key)) {
+        content += `${key}=${value}\n`;
+      }
+    }
+  } else {
+    for (const [key, value] of Object.entries(updates)) {
+      content += `${key}=${value}\n`;
+    }
+  }
+  fs.writeFileSync(filePath, content, "utf-8");
+}

@@ -127,7 +127,7 @@ packages/
 ├── discord-core/            # Shared DiscordBotBase + utilities
 ├── hq-tools/                # 2-tool gateway + MCP server (hq_discover + hq_call)
 ├── context-engine/          # Token-budgeted context assembly
-└── hq-cli/                  # NPM package (@calvin.magezi/agent-hq v0.5.0)
+└── hq-cli/                  # NPM package (@calvin.magezi/agent-hq v0.6.4)
 
 plugins/
 └── obsidian-vault-sync/     # Obsidian plugin for cross-device sync
@@ -165,20 +165,31 @@ scripts/
 
 ## Install
 
-### Zero-install
+### Zero-install (recommended)
 ```bash
+# Works even without Bun — installs it automatically
+npx @calvin.magezi/agent-hq
+
+# Or with Bun (faster):
 bunx @calvin.magezi/agent-hq
 ```
 
-### Inside the repo
+This auto-clones the repo, installs dependencies, scaffolds the vault, and walks you through setup.
+
+### From source
 ```bash
 git clone https://github.com/CalvinMagezi/agent-hq.git
-cd agent-hq
-bun install
-hq init        # interactive setup — installs tools, scaffolds vault, sets up launchd
+cd agent-hq && bun install
+hq init            # interactive setup
+hq quickstart      # guided first-run walkthrough
 ```
 
-`hq init` installs Claude CLI, Gemini CLI, OpenCode, scaffolds `.vault/`, creates `.env.local` templates, and installs macOS launchd daemons.
+### After install
+```bash
+hq env             # set up API keys interactively
+hq doctor          # verify everything works
+hq                 # start chatting
+```
 
 ---
 
@@ -199,25 +210,24 @@ hq init        # interactive setup — installs tools, scaffolds vault, sets up 
 > **Give this section to your AI agent.** It will handle everything.
 
 ```bash
-# 1. Install Bun (if not already installed)
-curl -fsSL https://bun.sh/install | bash   # macOS / Linux
-# Windows: powershell -c "irm bun.sh/install.ps1 | iex"
+# 1. Install and set up (auto-installs Bun if needed, clones repo, scaffolds vault)
+npx @calvin.magezi/agent-hq init --non-interactive
 
-# 2. Run setup (clones repo, installs deps, pulls Ollama models, scaffolds vault)
-bunx @calvin.magezi/agent-hq init --non-interactive
-
-# 3. Set required API key (choose one)
+# 2. Set required API key (choose one)
 echo "OPENROUTER_API_KEY=sk-or-..." >> ~/agent-hq/apps/agent/.env.local
 # OR: echo "GEMINI_API_KEY=AIza..." >> ~/agent-hq/apps/agent/.env.local
 
-# 4. (Optional) Set Discord token for relay
+# 3. (Optional) Set Discord token for relay
 echo "DISCORD_BOT_TOKEN=MT..." >> ~/agent-hq/apps/discord-relay/.env.local
 echo "DISCORD_USER_ID=123456789" >> ~/agent-hq/apps/discord-relay/.env.local
 
-# 5. Start everything
-cd ~/agent-hq && hq start all
+# 4. Verify setup
+cd ~/agent-hq && hq doctor
 
-# 6. Verify
+# 5. Start everything
+hq start all
+
+# 6. Verify services
 hq health
 ```
 
@@ -226,8 +236,10 @@ Pass API keys as environment variables for fully unattended setup:
 
 ```bash
 OPENROUTER_API_KEY=sk-or-... DISCORD_BOT_TOKEN=MT... DISCORD_USER_ID=123 \
-  bunx @calvin.magezi/agent-hq init --non-interactive
+  npx @calvin.magezi/agent-hq init --non-interactive
 ```
+
+Run `hq help --agent` for the full agent command reference.
 
 ## Quick Start (manual)
 
@@ -273,20 +285,30 @@ Open the PWA at `http://localhost:4747` — or connect via Tailscale from any de
 ## The `hq` CLI
 
 ```
-hq init                         First-time setup
-hq tools                        Install/re-auth CLI tools
-hq start  [agent|relay|all]     Start services via launchd
-hq stop   [target]              Stop services
-hq fg     [agent|relay]         Run in foreground
-hq tg                           Start Telegram relay
-hq wa                           Start WhatsApp relay (QR scan)
-hq daemon start|stop|logs       Background workflow daemon
-hq status                       Service status
-hq health                       Full health check
-hq logs   [target] [N]          View logs
-hq follow [target]              Live-tail logs
-hq tasks:monitor                Scheduled task health report
-hq tasks:follow                 Live scheduled task dashboard
+GETTING STARTED
+  hq init                       Full setup (vault + tools + services)
+  hq quickstart                 Guided first-run walkthrough
+  hq doctor                     Diagnose common issues
+  hq env                        Set up API keys interactively
+
+CHAT
+  hq                            Start chatting (default)
+  hq agent [harness]            Spawn agent session (hq, claude, gemini, opencode)
+
+SERVICES
+  hq status                     Check what's running
+  hq start [target]             Start services (agent, relay, all, ...)
+  hq stop  [target]             Stop services
+  hq restart                    Restart everything
+
+MONITORING
+  hq health                     Full health check
+  hq logs [target] [N]          View logs
+  hq pwa                        Open the web dashboard (port 4747)
+  hq vault open                 Open vault in Obsidian
+
+Run 'hq help --all' for all commands (WhatsApp, Telegram, diagrams, COO, etc.)
+Run 'hq help --agent' for AI agent quick reference
 ```
 
 ---

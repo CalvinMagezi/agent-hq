@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-03-13
+
 ### Added
+- **CLI Overhaul — New User Experience**: Complete rewrite of the CLI's first-run experience for new users and AI agents.
+  - **`hq doctor`**: Diagnostic command checking 12 items (Bun, Git, vault, deps, API keys, Discord, Ollama, ports, MCP, services) with actionable fix suggestions for each failure.
+  - **`hq env`**: Interactive API key setup — prompts for OpenRouter, Gemini, Discord keys with links to where to get them. Reads/preserves existing `.env.local` values.
+  - **`hq pwa`** (aliases: `hq web`, `hq dashboard`): Starts the HQ Control Center PWA and opens browser automatically.
+  - **`hq vault open`**: Opens the vault in Obsidian (auto-detects installation, shows download link if missing).
+  - **`hq quickstart`**: Guided first-run wizard — walks through init, API keys, Obsidian setup, and prints a summary of next steps.
+  - **`hq help --agent`**: Machine-readable ordered command checklist for AI agents using the CLI.
+  - **Tiered help**: `hq help` now shows ~20 essential commands by default; `hq help --all` shows the full reference.
+- **Node.js-compatible bootstrap** (`packages/hq-cli/bin/hq`): Rewritten from Bun TypeScript to plain Node.js CommonJS. `npx @calvin.magezi/agent-hq` now works even without Bun installed — auto-installs Bun via `curl` if missing.
+- **Shared helpers** (`scripts/hq/shared.ts`): `readLine()`, `isPortInUse()`, `parseEnvFile()`, `writeEnvFile()` utilities.
 - **Cross-Agent Planning System** (`@repo/hq-tools/planDB`): SQLite-backed plan tracking with FTS5 search. Includes `PlanKnowledgeEngine` for LLM-powered pattern extraction from completed plans and `planStatusSync` for frontmatter-to-DB synchronization.
 - **Awake Replay Engine** (`@repo/vault-memory/awakeReplay`): Implements "preplay" and "credit assignment" via forward/reverse replay of memories. Triggered by job/task creation and completion to ground agent reasoning in past precedents.
 - **HQ Browser Integration** (`packages/hq-browser`): Managed headless browser server with lifecycle management in the daemon. Adds `browser_open`, `browser_type`, `browser_click`, and `browser_screenshot` tools to the agent skillset.
@@ -15,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Daemon Task Expansion**: New background tasks for plan status syncing, pattern extraction, codemap refreshing, and plan archival/pruning.
 
 ### Changed
+- **Post-init output**: Replaced `cmdHealth()` dump with structured "Getting Started" card showing numbered next steps.
+- **hq-cli package**: Bumped to v0.6.4, removed Bun engine requirement (now `node >= 18.0.0`), removed dead Homebrew references from README.
+- **Root README**: Updated Install section (npx works without Bun), CLI section (shows new commands), Quick Start for AI agents (uses `hq doctor`).
 - **Memory System**: Added `processPendingDeltas` to the memory querier for asynchronous pattern separation.
 - **Daemon Context**: Enriched with `MemorySystem` extensions for Awake Replay and Plan Knowledge management.
 
@@ -202,7 +217,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WebSocket server**: `ws://127.0.0.1:5678` for web UI integration
 - **Voice message support**: Groq/Whisper transcription for Discord voice messages
 
-[Unreleased]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.0...v0.6.4
 [0.6.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.3.0...v0.4.0

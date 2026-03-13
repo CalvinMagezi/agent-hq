@@ -1,26 +1,68 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * agent-hq entry point
  *
- * When installed via `bunx agent-hq` or `npx agent-hq`:
- *   - If run from inside the monorepo, delegates to scripts/hq.ts
- *   - Otherwise, bootstraps the installation with `hq init`
+ * When installed via `npx @calvin.magezi/agent-hq` or `bunx @calvin.magezi/agent-hq`:
+ *   - If run from inside the monorepo, delegates to scripts/hq.ts via Bun
+ *   - Otherwise, bootstraps the installation (clone + hq init)
  *
- * Install globally:  bunx agent-hq install-cli
- * Homebrew:          brew install calvinmagezi/agent-hq/hq
+ * Works with Node.js (no Bun required) — auto-installs Bun if missing.
  */
 
-import * as fs from "fs";
-import * as path from "path";
-import { spawnSync } from "child_process";
+const fs = require("fs");
+const path = require("path");
+const { spawnSync, execSync } = require("child_process");
 
-// ── Locate the monorepo root ──────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
-function findRepoRoot(start: string): string | null {
+function hasBun() {
+  try {
+    const r = spawnSync("bun", ["--version"], { stdio: "pipe" });
+    return r.status === 0;
+  } catch { return false; }
+}
+
+function installBun() {
+  console.log("\n  Bun is required but not installed. Installing Bun...\n");
+  const platform = process.platform;
+
+  if (platform === "win32") {
+    console.log("  Run this in PowerShell:");
+    console.log("    irm bun.sh/install.ps1 | iex\n");
+    console.log("  Then re-run: npx @calvin.magezi/agent-hq");
+    process.exit(1);
+  }
+
+  // macOS / Linux
+  const result = spawnSync("bash", ["-c", "curl -fsSL https://bun.sh/install | bash"], {
+    stdio: "inherit",
+  });
+
+  if (result.status !== 0) {
+    console.error("\n  Bun installation failed. Install manually: https://bun.sh\n");
+    process.exit(1);
+  }
+
+  // Source the new PATH (Bun installs to ~/.bun/bin)
+  const bunBin = path.join(process.env.HOME || "~", ".bun", "bin");
+  process.env.PATH = bunBin + ":" + process.env.PATH;
+
+  if (!hasBun()) {
+    console.log("\n  Bun installed but not found on PATH.");
+    console.log("  Restart your terminal, then re-run: npx @calvin.magezi/agent-hq\n");
+    process.exit(1);
+  }
+
+  console.log("\n  Bun installed successfully.\n");
+}
+
+// ── Locate the monorepo root ────────────────────────────────────────────────
+
+function findRepoRoot(start) {
   let dir = start;
   for (let i = 0; i < 8; i++) {
     const pkg = path.join(dir, "package.json");
-    const apps = path.join(dir, "apps/agent");
+    const apps = path.join(dir, "apps", "agent");
     if (fs.existsSync(pkg) && fs.existsSync(apps)) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
@@ -29,37 +71,39 @@ function findRepoRoot(start: string): string | null {
   return null;
 }
 
-// When installed via npm/bun globally, this file lives at:
-//   node_modules/.bin/hq  →  node_modules/agent-hq/bin/hq.ts
-// So walk up from __dirname to find the repo, or fall back to CWD.
-const repoFromPackage = findRepoRoot(path.resolve(import.meta.dir, "../../.."));
+const repoFromPackage = findRepoRoot(path.resolve(__dirname, "..", "..", ".."));
 const repoFromCwd = findRepoRoot(process.cwd());
-const REPO_ROOT = repoFromPackage ?? repoFromCwd;
+const REPO_ROOT = repoFromPackage || repoFromCwd;
 
-// ── Delegate or bootstrap ─────────────────────────────────────────────────────
+// ── Delegate or bootstrap ───────────────────────────────────────────────────
 
 if (REPO_ROOT) {
-  // We're inside (or near) the monorepo — exec the full CLI
-  const fullCli = path.join(REPO_ROOT, "scripts/hq.ts");
+  // Inside (or near) the monorepo — ensure Bun, then delegate to full CLI
+  if (!hasBun()) installBun();
+
+  const fullCli = path.join(REPO_ROOT, "scripts", "hq.ts");
   if (fs.existsSync(fullCli)) {
-    const result = spawnSync(process.execPath, [fullCli, ...process.argv.slice(2)], {
+    const result = spawnSync("bun", [fullCli, ...process.argv.slice(2)], {
       stdio: "inherit",
       env: process.env,
     });
-    process.exit(result.status ?? 0);
+    process.exit(result.status || 0);
   }
 }
 
-// ── Not in repo — run init to bootstrap ──────────────────────────────────────
+// ── Not in repo — run init to bootstrap ─────────────────────────────────────
 
 console.log(`
-  ┌─────────────────────────────────────────────────────┐
-  │  agent-hq — first run                               │
-  │                                                     │
-  │  No agent-hq repository found near this location.  │
-  │  Let's set everything up.                           │
-  └─────────────────────────────────────────────────────┘
+  +-------------------------------------------------+
+  |  agent-hq -- first run                          |
+  |                                                 |
+  |  No agent-hq repository found.                  |
+  |  Let's set everything up.                       |
+  +-------------------------------------------------+
 `);
+
+// Ensure Bun is available before cloning
+if (!hasBun()) installBun();
 
 const isNonInteractive =
   process.argv.includes("--non-interactive") ||
@@ -67,28 +111,38 @@ const isNonInteractive =
   !process.stdout.isTTY;
 
 const installDir = path.join(
-  process.env.AGENT_HQ_DIR ?? (process.env.HOME ?? "~"),
+  process.env.AGENT_HQ_DIR || process.env.HOME || "~",
   "agent-hq"
 );
 
-console.log(`Cloning agent-hq to: ${installDir}`);
-const clone = spawnSync("git", [
-  "clone", "https://github.com/CalvinMagezi/agent-hq.git", installDir
-], { stdio: "inherit" });
+if (fs.existsSync(path.join(installDir, "package.json"))) {
+  console.log(`  Found existing repo at: ${installDir}`);
+  console.log(`  Running: cd ${installDir} && bun scripts/hq.ts init\n`);
+} else {
+  console.log(`  Cloning agent-hq to: ${installDir}\n`);
+  const clone = spawnSync("git", [
+    "clone", "https://github.com/CalvinMagezi/agent-hq.git", installDir
+  ], { stdio: "inherit" });
 
-if (clone.status !== 0) {
-  console.error("\nClone failed. Check your internet connection.");
-  process.exit(1);
+  if (clone.status !== 0) {
+    console.error("\n  Clone failed. Check your internet connection and that git is installed.");
+    process.exit(1);
+  }
 }
 
-const installArgs = [
-  path.join(installDir, "scripts/hq.ts"),
+const initArgs = isNonInteractive ? ["--non-interactive"] : [];
+const passedArgs = process.argv.slice(2).filter(a =>
+  a.startsWith("--vault") || a.startsWith("--repo-url") ||
+  a === "--non-interactive" || a === "-y" || a === "--reset"
+);
+
+const init = spawnSync("bun", [
+  path.join(installDir, "scripts", "hq.ts"),
   "init",
-  ...(isNonInteractive ? ["--non-interactive"] : []),
-];
-const init = spawnSync(process.execPath, installArgs, {
+  ...new Set([...initArgs, ...passedArgs]),
+], {
   cwd: installDir,
   stdio: "inherit",
   env: process.env,
 });
-process.exit(init.status ?? 0);
+process.exit(init.status || 0);

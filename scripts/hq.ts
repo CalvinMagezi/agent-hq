@@ -16,13 +16,14 @@ import { execSync, spawnSync } from "child_process";
 
 import {
   REPO_ROOT, RELAY_DIR, HQ_DIR, SCRIPTS_DIR, LAUNCH_AGENTS,
-  WA_DIR, TG_DIR, RELAY_SERVER_DIR, WA_AUTH_DIR,
+  WA_DIR, TG_DIR, RELAY_SERVER_DIR, WA_AUTH_DIR, PWA_DIR,
   AGENT_DAEMON, RELAY_DAEMON, RELAY_SERVER_DAEMON,
   DAEMON_LOG, DAEMON_PID, RELAY_LOCK,
   c, sh, isAlive, sleep,
   ok, fail, warn, info, dim, section,
   agentPid, relayPid, whatsappPid, relayServerPid,
   uptime, resolveTargets, serviceInfo, killProcessTree, findAllInstances, killAllInstances,
+  readLine, isPortInUse, parseEnvFile, writeEnvFile, confirmInstall,
   type ServiceTarget,
 } from "./hq/shared.js";
 
@@ -1589,16 +1590,26 @@ async function cmdInit(argv: string[]): Promise<void> {
   }
 
   // ── Done ──────────────────────────────────────────────────────────────────────
-  console.log();
-  await cmdHealth();
-
   const warns = state.warnings;
   if (warns.length) {
     console.log(`\n${c.yellow}Warnings:${c.reset}`);
     warns.forEach(w => warn(w));
   }
 
-  console.log(`\n${c.bold}${c.green}You're ready!${c.reset} Run ${c.bold}hq${c.reset} to start chatting.\n`);
+  console.log(`
+${c.bold}${c.green}━━━ Setup Complete ━━━${c.reset}
+
+  ${c.bold}Next Steps:${c.reset}
+
+  1. Configure API keys:      ${c.bold}hq env${c.reset}
+  2. Start chatting:           ${c.bold}hq${c.reset}
+  3. Check system health:      ${c.bold}hq doctor${c.reset}
+  4. Open web dashboard:       ${c.bold}hq pwa${c.reset}
+  5. View vault in Obsidian:   ${c.bold}hq vault open${c.reset}
+
+  Need help?                   ${c.bold}hq help${c.reset}
+  Full documentation:          ${c.cyan}https://github.com/CalvinMagezi/agent-hq${c.reset}
+`);
 }
 
 // hq daemon [start|stop|status|logs [N]]
@@ -1717,111 +1728,428 @@ async function cmdUpdate(argv: string[]): Promise<void> {
   console.log(`\n${c.green}${c.bold}Update complete.${c.reset} Run ${c.bold}hq health${c.reset} to verify.\n`);
 }
 
-// hq help
-function cmdHelp(): void {
+// ─── New User-Facing Commands ────────────────────────────────────────────────
+
+// hq doctor — diagnose common issues
+async function cmdDoctor(): Promise<void> {
+  console.log(`\n${c.bold}━━━ Agent HQ — Doctor ━━━${c.reset}\n`);
+
+  let issues = 0;
+
+  // 1. Bun
+  const bunVersion = sh("bun --version 2>/dev/null");
+  if (bunVersion) {
+    ok(`Bun ${bunVersion}`);
+  } else {
+    fail("Bun not installed — visit https://bun.sh"); issues++;
+  }
+
+  // 2. Git
+  const gitVersion = sh("git --version 2>/dev/null").replace("git version ", "");
+  if (gitVersion) {
+    ok(`Git ${gitVersion}`);
+  } else {
+    fail("Git not installed"); issues++;
+  }
+
+  // 3. Vault exists & scaffolded
+  const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+  if (fs.existsSync(path.join(vaultPath, "_system/SOUL.md"))) {
+    ok(`Vault scaffolded at ${vaultPath}`);
+  } else if (fs.existsSync(vaultPath)) {
+    fail(`Vault exists at ${vaultPath} but not scaffolded — run: ${c.bold}hq setup${c.reset}`); issues++;
+  } else {
+    fail(`No vault found — run: ${c.bold}hq init${c.reset}`); issues++;
+  }
+
+  // 4. node_modules
+  if (fs.existsSync(path.join(REPO_ROOT, "node_modules"))) {
+    ok("Dependencies installed");
+  } else {
+    fail(`Dependencies missing — run: ${c.bold}bun install${c.reset}`); issues++;
+  }
+
+  // 5. API keys
+  const agentEnvPath = path.join(REPO_ROOT, "apps/agent/.env.local");
+  const agentEnv = parseEnvFile(agentEnvPath);
+  const hasOpenRouter = !!agentEnv.OPENROUTER_API_KEY;
+  const hasGemini = !!agentEnv.GEMINI_API_KEY;
+  if (hasOpenRouter || hasGemini) {
+    ok(`API keys configured (${hasOpenRouter ? "OpenRouter" : ""}${hasOpenRouter && hasGemini ? " + " : ""}${hasGemini ? "Gemini" : ""})`);
+  } else if (fs.existsSync(agentEnvPath)) {
+    fail(`No API keys set — run: ${c.bold}hq env${c.reset}`); issues++;
+  } else {
+    fail(`No .env.local found — run: ${c.bold}hq env${c.reset}`); issues++;
+  }
+
+  // 6. Discord (optional)
+  const relayEnvPath = path.join(REPO_ROOT, "apps/discord-relay/.env.local");
+  const relayEnv = parseEnvFile(relayEnvPath);
+  if (relayEnv.DISCORD_BOT_TOKEN) {
+    ok("Discord bot token configured");
+  } else {
+    dim("  SKIP  Discord not configured (optional) — set up with: hq env");
+  }
+
+  // 7. Ollama
+  const ollamaRunning = sh("ollama list 2>/dev/null");
+  if (ollamaRunning) {
+    ok("Ollama running");
+  } else {
+    warn("Ollama not running — memory features will be limited");
+  }
+
+  // 8. Key ports
+  for (const [port, label] of [[4747, "PWA"], [18900, "Relay Server"], [5678, "Agent WS"]] as [number, string][]) {
+    if (isPortInUse(port)) {
+      ok(`Port ${port} (${label}) in use — service likely running`);
+    } else {
+      dim(`  ----  Port ${port} (${label}) available`);
+    }
+  }
+
+  // 9. MCP configured
+  const mcpJson = path.join(REPO_ROOT, ".mcp.json");
+  if (fs.existsSync(mcpJson)) {
+    ok("MCP server configured (.mcp.json)");
+  } else {
+    warn(`MCP not configured — run: ${c.bold}hq mcp${c.reset}`);
+  }
+
+  // 10. Services
+  const agent = agentPid();
+  const relay = relayPid();
+  if (agent) ok(`HQ Agent running (PID ${agent})`);
+  else dim("  ----  HQ Agent not running — start with: hq start agent");
+  if (relay) ok(`Discord Relay running (PID ${relay})`);
+  else dim("  ----  Discord Relay not running — start with: hq start relay");
+
+  // Summary
+  console.log();
+  if (issues === 0) {
+    console.log(`${c.green}${c.bold}All checks passed.${c.reset} Run ${c.bold}hq${c.reset} to start chatting.\n`);
+  } else {
+    console.log(`${c.yellow}${c.bold}${issues} issue(s) found.${c.reset} Fix the items above and re-run ${c.bold}hq doctor${c.reset}.\n`);
+  }
+}
+
+// hq env — interactive API key setup
+async function cmdEnv(): Promise<void> {
+  console.log(`\n${c.bold}━━━ Agent HQ — Environment Setup ━━━${c.reset}\n`);
+
+  const agentEnvPath = path.join(REPO_ROOT, "apps/agent/.env.local");
+  const relayEnvPath = path.join(REPO_ROOT, "apps/discord-relay/.env.local");
+  const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+
+  // Read existing values
+  const agentEnv = parseEnvFile(agentEnvPath);
+  const relayEnv = parseEnvFile(relayEnvPath);
+
+  const mask = (val: string) => val ? val.slice(0, 8) + "..." : "(not set)";
+
+  // 1. OpenRouter API Key
+  console.log(`${c.bold}1. OpenRouter API Key${c.reset} ${c.dim}(required for AI chat)${c.reset}`);
+  console.log(`   Get one at: ${c.cyan}https://openrouter.ai/keys${c.reset}`);
+  console.log(`   Current: ${c.dim}${mask(agentEnv.OPENROUTER_API_KEY || "")}${c.reset}`);
+  const orKey = readLine("   Enter key (or press Enter to skip)");
+  if (orKey) agentEnv.OPENROUTER_API_KEY = orKey;
+  console.log();
+
+  // 2. Gemini API Key (optional)
+  console.log(`${c.bold}2. Gemini API Key${c.reset} ${c.dim}(optional — for direct Google Gemini access)${c.reset}`);
+  console.log(`   Get one at: ${c.cyan}https://aistudio.google.com/apikey${c.reset}`);
+  console.log(`   Current: ${c.dim}${mask(agentEnv.GEMINI_API_KEY || "")}${c.reset}`);
+  const gemKey = readLine("   Enter key (or press Enter to skip)");
+  if (gemKey) agentEnv.GEMINI_API_KEY = gemKey;
+  console.log();
+
+  // 3. Default model
+  console.log(`${c.bold}3. Default LLM Model${c.reset}`);
+  console.log(`   Current: ${c.dim}${agentEnv.DEFAULT_MODEL || "gemini-2.5-flash"}${c.reset}`);
+  const model = readLine("   Enter model ID", agentEnv.DEFAULT_MODEL || "gemini-2.5-flash");
+  agentEnv.DEFAULT_MODEL = model;
+  console.log();
+
+  // 4. Discord (optional)
+  console.log(`${c.bold}4. Discord Bot Token${c.reset} ${c.dim}(optional — for Discord relay)${c.reset}`);
+  console.log(`   Create a bot at: ${c.cyan}https://discord.com/developers/applications${c.reset}`);
+  console.log(`   Current: ${c.dim}${mask(relayEnv.DISCORD_BOT_TOKEN || "")}${c.reset}`);
+  const discordToken = readLine("   Enter token (or press Enter to skip)");
+  if (discordToken) relayEnv.DISCORD_BOT_TOKEN = discordToken;
+  console.log();
+
+  if (discordToken || relayEnv.DISCORD_BOT_TOKEN) {
+    console.log(`${c.bold}5. Discord User ID${c.reset} ${c.dim}(your Discord ID — enable Developer Mode in settings)${c.reset}`);
+    console.log(`   Current: ${c.dim}${relayEnv.DISCORD_USER_ID || "(not set)"}${c.reset}`);
+    const discordUser = readLine("   Enter user ID (or press Enter to skip)");
+    if (discordUser) relayEnv.DISCORD_USER_ID = discordUser;
+    console.log();
+  }
+
+  // Write updated env files
+  agentEnv.VAULT_PATH = agentEnv.VAULT_PATH || vaultPath;
+  relayEnv.VAULT_PATH = relayEnv.VAULT_PATH || vaultPath;
+
+  writeEnvFile(agentEnvPath, agentEnv);
+  ok(`Updated ${agentEnvPath}`);
+
+  writeEnvFile(relayEnvPath, relayEnv);
+  ok(`Updated ${relayEnvPath}`);
+
+  console.log(`\n${c.bold}Done.${c.reset} Run ${c.bold}hq doctor${c.reset} to verify, or ${c.bold}hq${c.reset} to start chatting.\n`);
+}
+
+// hq pwa — start the web dashboard
+async function cmdPwa(): Promise<void> {
+  section("HQ Control Center");
+
+  const pwaDir = path.resolve(REPO_ROOT, "apps/hq-control-center");
+  if (!fs.existsSync(pwaDir)) {
+    fail("apps/hq-control-center not found");
+    return;
+  }
+
+  // Check deps
+  if (!fs.existsSync(path.join(pwaDir, "node_modules"))) {
+    info("Installing PWA dependencies...");
+    spawnSync(process.execPath, ["install"], { cwd: pwaDir, stdio: "inherit" });
+  }
+
+  info("Starting on http://localhost:4747 ...");
+
+  // Open browser after a short delay (macOS / Linux)
+  const platform = os.platform();
+  setTimeout(() => {
+    if (platform === "darwin") {
+      spawnSync("open", ["http://localhost:4747"], { stdio: "ignore" });
+    } else if (platform === "linux") {
+      spawnSync("xdg-open", ["http://localhost:4747"], { stdio: "ignore" });
+    }
+  }, 2000);
+
+  // Run dev server (blocks)
+  const result = spawnSync(process.execPath, ["--cwd", pwaDir, "run", "dev"], {
+    stdio: "inherit",
+    env: { ...process.env },
+  });
+  process.exit(result.status ?? 0);
+}
+
+// hq vault open — open vault in Obsidian
+async function cmdVaultOpen(): Promise<void> {
+  const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+
+  if (!fs.existsSync(vaultPath)) {
+    fail(`Vault not found at ${vaultPath}`);
+    info(`Run ${c.bold}hq setup${c.reset} to create it.`);
+    return;
+  }
+
+  const platform = os.platform();
+
+  if (platform === "darwin") {
+    // Check if Obsidian is installed
+    const hasObsidian = fs.existsSync("/Applications/Obsidian.app");
+    if (hasObsidian) {
+      info("Opening vault in Obsidian...");
+      spawnSync("open", [`obsidian://open?path=${encodeURIComponent(vaultPath)}`], { stdio: "ignore" });
+      ok("Opened vault in Obsidian");
+    } else {
+      info("Obsidian is not installed.");
+      console.log(`\n  Download from: ${c.cyan}https://obsidian.md/download${c.reset}`);
+      console.log(`  Then open this folder as a vault: ${c.bold}${vaultPath}${c.reset}\n`);
+    }
+  } else if (platform === "linux") {
+    const hasObsidian = !!sh("which obsidian 2>/dev/null");
+    if (hasObsidian) {
+      spawnSync("obsidian", [`obsidian://open?path=${encodeURIComponent(vaultPath)}`], { stdio: "ignore" });
+      ok("Opened vault in Obsidian");
+    } else {
+      info("Obsidian is not installed.");
+      console.log(`\n  Download from: ${c.cyan}https://obsidian.md/download${c.reset}`);
+      console.log(`  Then open this folder as a vault: ${c.bold}${vaultPath}${c.reset}\n`);
+    }
+  } else {
+    console.log(`\n  Open this folder as a vault in Obsidian: ${c.bold}${vaultPath}${c.reset}`);
+    console.log(`  Download Obsidian: ${c.cyan}https://obsidian.md/download${c.reset}\n`);
+  }
+}
+
+// hq quickstart — guided first-run walkthrough
+async function cmdQuickstart(): Promise<void> {
   console.log(`
-${c.bold}hq${c.reset} — Agent HQ CLI
+${c.bold}━━━ Agent HQ — Quickstart ━━━${c.reset}
 
-${c.bold}USAGE${c.reset}
-  hq <command> [target] [options]
+Welcome! Let's get you set up step by step.
+`);
 
-${c.bold}FIRST-TIME SETUP${c.reset}
-  hq init                       Full interactive setup (vault + tools + daemons)
-  hq init --non-interactive     Unattended setup — safe for agent execution
-  hq tools                      Install & authenticate Claude/Gemini/OpenCode CLIs
-  hq tools --non-interactive    Auto-install all tools silently
-  hq tools vscode               Build & install the Agent-HQ VS Code extension
+  // Step 1: Check if init has been run
+  const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+  if (!fs.existsSync(path.join(vaultPath, "_system/SOUL.md"))) {
+    info("Vault not set up yet. Running initial setup...\n");
+    await cmdInit([]);
+    console.log();
+  } else {
+    ok("Vault already set up");
+  }
 
-  hq agent [harness]            Spawn a vault-contextualized agent session
-                                  Harnesses: hq (default), claude, codex, gemini, opencode
-                                  Injects SOUL/MEMORY/PREFERENCES + governance rules
-  hq setup                      Scaffold vault directories and system files only
-  hq mcp                        Auto-install HQ MCP server to all detected AI agents
-  hq mcp status                 Check MCP installation status across agents
-  hq mcp remove                 Remove HQ MCP server from all agent configs
-  hq install-cli                Symlink hq to ~/.local/bin/hq (add to PATH)
+  // Step 2: API keys
+  const agentEnvPath = path.join(REPO_ROOT, "apps/agent/.env.local");
+  const agentEnv = parseEnvFile(agentEnvPath);
+  if (!agentEnv.OPENROUTER_API_KEY && !agentEnv.GEMINI_API_KEY) {
+    console.log(`\n${c.bold}Step 1: API Keys${c.reset}`);
+    console.log("You need at least one API key to use AI chat.\n");
+
+    const wantsKeys = confirmInstall("Set up API keys now?");
+    if (wantsKeys) {
+      await cmdEnv();
+    } else {
+      warn("Skipped — you can set up keys later with: hq env");
+    }
+  } else {
+    ok("API keys already configured");
+  }
+
+  // Step 3: Obsidian
+  console.log(`\n${c.bold}Step 2: Vault Viewer${c.reset}`);
+  console.log("Your vault is a folder of markdown files. You can browse it with Obsidian (recommended) or the web dashboard.\n");
+
+  const wantsObsidian = confirmInstall("Open vault in Obsidian?");
+  if (wantsObsidian) {
+    await cmdVaultOpen();
+  } else {
+    info(`You can always open it later with: ${c.bold}hq vault open${c.reset}`);
+  }
+
+  // Step 4: PWA
+  console.log(`\n${c.bold}Step 3: Web Dashboard${c.reset}`);
+  console.log(`The HQ Control Center is a web app for monitoring agents, jobs, and vault content.\n`);
+  info(`Start it anytime with: ${c.bold}hq pwa${c.reset}`);
+
+  // Summary
+  console.log(`
+${c.bold}${c.green}━━━ You're all set! ━━━${c.reset}
+
+  ${c.bold}hq${c.reset}              Start chatting with your AI agent
+  ${c.bold}hq start all${c.reset}    Start all background services
+  ${c.bold}hq doctor${c.reset}       Check if everything is healthy
+  ${c.bold}hq pwa${c.reset}          Open the web dashboard
+  ${c.bold}hq help${c.reset}         See all commands
+`);
+}
+
+// hq help [--all|--agent|advanced]
+function cmdHelp(mode?: string): void {
+  const showAll = mode === "--all" || mode === "advanced" || mode === "all";
+  const showAgent = mode === "--agent" || mode === "agent";
+
+  if (showAgent) {
+    console.log(`
+# Agent-HQ CLI — Quick Reference for AI Agents
+# Run these commands in order:
+#
+# 1. hq init --non-interactive    First-time setup (idempotent, safe to re-run)
+# 2. hq doctor                    Verify everything is configured correctly
+# 3. hq env                       Set API keys (if hq doctor reports missing keys)
+# 4. hq start agent               Start the HQ agent worker
+# 5. hq start relay               Start the Discord relay (optional)
+# 6. hq status                    Verify services are running
+# 7. hq chat                      Start an interactive chat session
+#
+# Useful commands:
+#   hq health                     Full system health check
+#   hq logs [target] [N]          View last N log lines
+#   hq restart                    Restart all services
+#   hq pwa                        Start web dashboard (port 4747)
+#   hq vault open                 Open vault in Obsidian
+`);
+    return;
+  }
+
+  // ── Essential help (default) ──────────────────────────────────────────────
+  console.log(`
+${c.bold}hq${c.reset} — Agent HQ CLI (local-first AI agent hub)
+
+${c.bold}GETTING STARTED${c.reset}
+  hq init                       Full setup (vault + tools + services)
+  hq quickstart                 Guided first-run walkthrough
+  hq doctor                     Diagnose common issues
+  hq env                        Set up API keys interactively
 
 ${c.bold}CHAT${c.reset}
-  hq                            Interactive chat session (default)
-  hq chat                       Interactive chat session
+  hq                            Start chatting (default command)
+  hq agent [harness]            Spawn agent session (hq, claude, gemini, opencode)
 
-${c.bold}SERVICE MANAGEMENT${c.reset}
-  hq status                     Status of all services                 (alias: s)
-  hq start  [target]            Start services                         targets: agent, relay, whatsapp, telegram, relay-server, vault-sync, all
-  hq stop   [target]            Stop services
-  hq restart [target]           Restart services                       (alias: r)
-  hq fg     [target]            Run a service in the foreground
+${c.bold}SERVICES${c.reset}
+  hq status                     Check what's running
+  hq start [target]             Start services (agent, relay, all, ...)
+  hq stop  [target]             Stop services
+  hq restart                    Restart everything
+
+${c.bold}MONITORING${c.reset}
+  hq health                     Full health check
+  hq logs [target] [N]          View last N log lines
+  hq pwa                        Open the HQ web dashboard
+  hq vault open                 Open vault in Obsidian`);
+
+  if (!showAll) {
+    console.log(`
+${c.dim}Run ${c.reset}${c.bold}hq help --all${c.reset}${c.dim} for all commands (WhatsApp, Telegram, diagrams, COO, etc.)${c.reset}
+${c.dim}Run ${c.reset}${c.bold}hq help --agent${c.reset}${c.dim} for AI agent quick reference${c.reset}
+`);
+    return;
+  }
+
+  // ── Full help (--all) ────────────────────────────────────────────────────
+  console.log(`
+
+${c.bold}SETUP & TOOLS${c.reset}
+  hq init --non-interactive     Unattended setup (safe for CI / agent execution)
+  hq setup                      Scaffold vault directories only
+  hq tools                      Install Claude/Gemini/OpenCode CLIs
+  hq mcp                        Auto-install HQ MCP server to all AI agents
+  hq mcp status                 Check MCP installation status
+  hq mcp remove                 Remove HQ MCP server from configs
+  hq install-cli                Symlink hq to ~/.local/bin/hq
 
 ${c.bold}WHATSAPP${c.reset}
-  hq wa                         Start WhatsApp in foreground (for QR scan / debug)
+  hq wa                         Start WhatsApp in foreground (QR scan)
   hq wa reset                   Clear conversation thread
-  hq wa reauth                  Clear credentials & re-scan QR         (alias: clear-auth)
-  hq wa status                  WhatsApp service status
-  hq wa logs [N]                WhatsApp adapter logs
-  hq wa errors [N]              WhatsApp adapter error logs
+  hq wa reauth                  Clear credentials, re-scan QR
+  hq wa status|logs|errors      Status / logs
 
 ${c.bold}TELEGRAM${c.reset}
-  hq tg                         Start Telegram in foreground (debug)
-  hq tg reset                   Clear conversation thread + state
-  hq tg status                  Telegram service status
-  hq tg logs [N]                Telegram adapter logs
-  hq tg errors [N]              Telegram adapter error logs
+  hq tg                         Start Telegram in foreground
+  hq tg reset                   Clear conversation + state
+  hq tg status|logs|errors      Status / logs
 
 ${c.bold}BACKGROUND DAEMON${c.reset}
-  hq daemon start               Start the background daemon
-  hq daemon stop                Stop the background daemon
-  hq daemon status              Check if the daemon is running
-  hq daemon logs [N]            Last N daemon log lines (default 40)
+  hq daemon start|stop|status   Manage background daemon
+  hq daemon logs [N]            Last N daemon log lines
 
-${c.bold}LOGS${c.reset}
-  hq logs   [target] [N]        Last N log lines (default 30)          (alias: l)
-  hq errors [target] [N]        Last N error lines (default 20)        (alias: e)
-  hq follow [target]            Live-tail logs                         (alias: f)
-
-${c.bold}PROCESSES & HEALTH${c.reset}
-  hq ps                         All managed processes                  (alias: p)
-  hq health                     Full health check                      (alias: h)
-  hq kill                       Force-kill all processes               (alias: k)
-  hq clean                      Remove stale locks & orphans           (alias: c)
-
-${c.bold}DAEMONS (macOS launchd auto-start)${c.reset}
-  hq install   [target]         Install launchd daemons
+${c.bold}ADVANCED${c.reset}
+  hq fg [target]                Run a service in the foreground
+  hq ps                         All managed processes
+  hq kill                       Force-kill all processes
+  hq clean                      Remove stale locks & orphans
+  hq install [target]           Install launchd daemons (macOS)
   hq uninstall [target]         Remove launchd daemons
-
-${c.bold}UPDATES${c.reset}
-  hq update                     Pull latest and restart services
-  hq update --check             Show available update without applying
-  hq init --reset               Re-run all setup steps from scratch
+  hq update                     Pull latest + restart services
 
 ${c.bold}DIAGRAMS${c.reset}
-  hq diagram flow "A" "B" "C?"  Quick flowchart (? = decision diamond)
-  hq diagram create --title X --nodes "A,B,C" --edges "A>B,B>C"
-  hq diagram map [path]         Codebase architecture map
-  hq diagram deps [path]        Package dependency graph
-  hq diagram routes [path]      Next.js route tree
+  hq diagram flow "A" "B" "C?"  Quick flowchart
+  hq diagram map|deps|routes    Codebase visualization
   hq diagram render <file>      Export .drawit to PNG
 
 ${c.bold}COO MANAGEMENT${c.reset}
-  hq coo install <url>          Install a COO orchestrator
-  hq coo uninstall <name>       Remove COO (preserves memory)
-  hq coo activate <name>        Switch to external orchestration
-  hq coo deactivate             Switch to internal orchestration
-  hq coo status                 Show status and installed COOs
+  hq coo install|uninstall|activate|deactivate|status
 
 ${c.bold}EXAMPLES${c.reset}
   hq                            Start chatting
-  hq wa                         WhatsApp foreground (scan QR, debug)
-  hq tg                         Telegram foreground (debug)
-  hq start whatsapp             Start WhatsApp as background service
-  hq start telegram             Start Telegram as background service
   hq start all                  Start everything
-  hq wa reset                   Clear WhatsApp conversation
-  hq tg reset                   Clear Telegram conversation + state
-  hq wa reauth                  Wipe WhatsApp auth, re-scan QR
-  hq restart                    Restart everything
-  hq logs telegram 50           Last 50 Telegram log lines
-  hq follow                     Live-tail all logs
-  hq health                     Full system health report
+  hq wa                         WhatsApp foreground (scan QR)
+  hq doctor                     Check if everything works
+  hq pwa                        Open web dashboard
 `);
 }
 
@@ -1921,8 +2249,25 @@ switch (cmd) {
   case "update":
     await cmdUpdate(process.argv.slice(3)); break;
 
+  case "doctor":
+    await cmdDoctor(); break;
+
+  case "env":
+    await cmdEnv(); break;
+
+  case "pwa": case "web": case "dashboard":
+    await cmdPwa(); break;
+
+  case "vault":
+    if (arg1 === "open") { await cmdVaultOpen(); }
+    else { fail(`Unknown vault subcommand: ${arg1 ?? "(none)"}`); info("Usage: hq vault open"); }
+    break;
+
+  case "quickstart":
+    await cmdQuickstart(); break;
+
   case "help": case "--help": case "-h":
-    cmdHelp(); break;
+    cmdHelp(arg1); break;
 
   default:
     fail(`Unknown command: ${cmd}`);

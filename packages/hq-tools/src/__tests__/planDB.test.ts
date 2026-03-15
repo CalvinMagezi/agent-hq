@@ -17,6 +17,9 @@ import {
   getCodemapForProject,
   upsertConvention,
   getConventionsForProject,
+  addPlanAsset,
+  getPlanAssets,
+  removePlanAsset
 } from "../planDB.js";
 import { CodemapEngine } from "../codemap.js";
 import { PlanKnowledgeEngine } from "../planKnowledge.js";
@@ -96,6 +99,44 @@ describe("Plan CRUD", () => {
     expect(plan!.phases).toHaveLength(2);
     expect(plan!.phases[0].phaseId).toBe("explore");
     expect(plan!.phases[1].role).toBe("coder");
+  });
+
+  test("planning_mode and ambiguity_signals are stored", () => {
+    upsertPlan(db, {
+      id: "plan-multi-modal",
+      project: "test",
+      title: "MM Plan",
+      instruction: "Do something",
+      planning_mode: "sketch",
+      ambiguity_signals: [{ type: "missing_actor", description: "Who?", excerpt: "it", severity: "medium" }]
+    });
+
+    const plan = getPlan(db, "plan-multi-modal");
+    expect(plan!.planning_mode).toBe("sketch");
+    expect(plan!.ambiguity_signals).toHaveLength(1);
+    expect(plan!.ambiguity_signals[0].type).toBe("missing_actor");
+  });
+
+  test("plan_assets CRUD", () => {
+    upsertPlan(db, { id: "p-asset", project: "test", title: "Asset Test", instruction: "I" });
+    
+    addPlanAsset(db, {
+      id: "a1",
+      plan_id: "p-asset",
+      asset_type: "screenshot",
+      filename: "assets/screenshots/s1.png",
+      label: "Screenshot 1",
+      source_tool: "test",
+      size_bytes: 1024,
+      created_at: new Date().toISOString()
+    });
+
+    const assets = getPlanAssets(db, "p-asset");
+    expect(assets).toHaveLength(1);
+    expect(assets[0].label).toBe("Screenshot 1");
+
+    removePlanAsset(db, "a1");
+    expect(getPlanAssets(db, "p-asset")).toHaveLength(0);
   });
 });
 

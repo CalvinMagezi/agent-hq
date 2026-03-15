@@ -93,7 +93,11 @@ import {
   PlanSearchTool,
   PlanUpdateTool,
   CodemapQueryTool,
-  CodemapUpdateTool
+  CodemapUpdateTool,
+  PlanAttachTool,
+  PlanVisualizeTool,
+  PlanGalleryTool,
+  PlanPhaseUpdateTool,
 } from "./tools/planning.js";
 
 export {
@@ -185,5 +189,9 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(PlanUpdateTool);
   registry.register(CodemapQueryTool);
   registry.register(CodemapUpdateTool);
+  registry.register(PlanAttachTool);
+  registry.register(PlanVisualizeTool);
+  registry.register(PlanGalleryTool);
+  registry.register(PlanPhaseUpdateTool);
   return registry;
 }

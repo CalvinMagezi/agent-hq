@@ -118,7 +118,7 @@ function exportToSvg(
 }
 
 /** Full pipeline: save NDJSON → export SVG → convert PNG */
-async function renderPipeline(
+export async function renderPipeline(
   name: string,
   content: string,
   ctx: HQContext,
@@ -560,7 +560,7 @@ interface CreateDiagramInput {
  * Generate NDJSON internally from structured input — the LLM never touches
  * raw NDJSON. Automatic grid layout, color palette, and canvas sizing.
  */
-function buildStructuredDiagram(input: CreateDiagramInput): string {
+export function buildStructuredDiagram(input: CreateDiagramInput): string {
   const isDark = (input.theme ?? "dark") === "dark";
   const bg = isDark ? "#0a0f1e" : "#ffffff";
   const textColor = isDark ? "#e2e8f0" : "#333333";

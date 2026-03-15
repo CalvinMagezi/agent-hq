@@ -407,6 +407,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     const [isStreaming, setIsStreaming] = useState(false)
     const [toolActivity, setToolActivity] = useState<string | null>(null)
     const [harness, setHarness] = useState<string>(DEFAULT_HARNESS)
+    const isThreadSwitchRef = useRef(false) // true when user explicitly opens a thread
     const [input, setInput] = useState('')
     const [dropdownOpen, setDropdownOpen] = useState(false)
     // Phase 2 Stats State
@@ -442,6 +443,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('hq-chat-sound') !== 'off')
     // Upload in progress
     const [isUploading, setIsUploading] = useState(false)
+    const fileInputRef = useRef<HTMLInputElement>(null)
 
     const COMMANDS = [
         { id: 'clear', name: 'clear', desc: 'Clear thread history', server: true },
@@ -523,7 +525,8 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
 
     // Connect WS with exponential backoff
     useEffect(() => {
-        const wsUrl = `ws://${window.location.hostname}:4748/ws`
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+        const wsUrl = `${wsProtocol}//${window.location.host}/ws`
         let socket: WebSocket
         let retryTimer: ReturnType<typeof setTimeout>
         let attempt = 0
@@ -573,17 +576,32 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                             activeThreadRef.current = toRestore
                             setActiveThreadId(toRestore)
                             setIsLoadingThread(true)
+                            isThreadSwitchRef.current = true // restore harness from saved thread
                             socket.send(JSON.stringify({ type: 'chat:load', threadId: toRestore }))
                         }
                     } else if (msg.type === 'chat:history') {
+                        // Always clear loading state regardless of whether thread is null
+                        setIsLoadingThread(false)
                         if (msg.thread) {
-                            // Atomic swap: replace messages and clear loading in a single batch
+                            // Atomic swap: replace messages and clear ALL streaming state in one batch
                             setMessages(msg.thread.messages ?? [])
-                            setHarness(msg.thread.harness)
-                            prevMsgCountRef.current = 0 // reset so scroll fires correctly on load
-                            setIsLoadingThread(false)
+                            setIsStreaming(false)
+                            setStreamingContent('')
+                            setToolActivity(null)
+                            // Only restore harness from thread on explicit thread switch,
+                            // not on post-response reload (preserves user's harness pick)
+                            if (isThreadSwitchRef.current) {
+                                setHarness(msg.thread.harness || DEFAULT_HARNESS)
+                                isThreadSwitchRef.current = false
+                            }
+                            prevMsgCountRef.current = 0
                             if (msg.sessionTotals) setSessionTotals(msg.sessionTotals)
                             if (msg.sessionInfo) setSessionInfo(msg.sessionInfo)
+                        } else {
+                            // Thread not yet on disk — streaming is done, clear state so UI doesn't hang
+                            setIsStreaming(false)
+                            setStreamingContent('')
+                            setToolActivity(null)
                         }
                     } else if (msg.type === 'chat:status') {
                         if (msg.threadId === tid) {
@@ -603,6 +621,8 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                         }
                     } else if (msg.type === 'chat:done') {
                         if (msg.threadId === tid) {
+                            // Flush any remaining buffered tokens into streamingContent so the
+                            // bubble shows the complete response while we wait for chat:history.
                             if (tokenFlushRef.current) {
                                 clearTimeout(tokenFlushRef.current)
                                 tokenFlushRef.current = null
@@ -611,22 +631,21 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                                 setStreamingContent(prev => prev + tokenBufferRef.current)
                                 tokenBufferRef.current = ''
                             }
-                            setIsStreaming(false)
-                            setStreamingContent('')
-                            setToolActivity(null)
-                            setIsLoadingThread(true)
+                            // DO NOT clear isStreaming/streamingContent here — keep the bubble
+                            // visible until chat:history arrives and atomically swaps messages.
+                            // DO NOT set isLoadingThread — no skeleton flash.
                             if (msg.stats) setLastMsgStats(msg.stats)
                             if (msg.sessionTotals) setSessionTotals(msg.sessionTotals)
-                            
+
                             // Sound notification (only when tab not focused)
                             if (soundEnabled && !document.hasFocus()) {
                                 try { (new Audio('/notification.wav')).play(); } catch {}
                             }
-                            
-                            // Phase 4: Dynamic suggestions
-                            const lastContent = msg.stats ? `Model: ${msg.stats.model}` : '' // Using stats as a proxy for completion info
+
                             setSuggestions(['Tell me more', 'Give an example', 'Can you simplify this?'])
 
+                            // Silent reload — chat:history will atomically replace messages
+                            // AND clear streaming state in one React batch.
                             socket.send(JSON.stringify({ type: 'chat:load', threadId: tid }))
                             socket.send(JSON.stringify({ type: 'chat:list' }))
                         }
@@ -663,6 +682,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         setStreamingContent('')
         setIsStreaming(false)
         setDropdownOpen(false)
+        isThreadSwitchRef.current = true // mark: restore harness from thread
         wsRef.current?.send(JSON.stringify({ type: 'chat:load', threadId }))
     }, [setActiveThreadIdPersisted])
 
@@ -863,7 +883,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                 setIsUploading(true)
                 try {
                     const wsUrl = wsRef.current?.url ?? ''
-                    const baseUrl = wsUrl ? `http://${new URL(wsUrl).hostname}:${new URL(wsUrl).port}` : `http://${window.location.hostname}:4748`
+                    const baseUrl = window.location.origin
                     const form = new FormData()
                     form.append('file', file)
                     const res = await fetch(`${baseUrl}/upload`, { method: 'POST', body: form })
@@ -881,6 +901,30 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                 }
                 return // Only handle first file
             }
+        }
+    }
+
+    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0]
+        if (!file) return
+        e.target.value = '' // reset for re-selection
+        setIsUploading(true)
+        try {
+            const baseUrl = window.location.origin
+            const form = new FormData()
+            form.append('file', file)
+            const res = await fetch(`${baseUrl}/upload`, { method: 'POST', body: form })
+            const data = await res.json()
+            if (data.ok && data.path) {
+                setInput(prev => `${prev}[Referencing: [[${data.path}]]]\n`.trim() + '\n')
+                setMessages(prev => [...prev, { role: 'system', content: `[Attached: ${data.name} (${(data.size / 1024).toFixed(1)}KB)]`, timestamp: new Date().toISOString() }])
+            } else {
+                setMessages(prev => [...prev, { role: 'system', content: `[Upload failed: ${data.error ?? 'Unknown error'}]`, timestamp: new Date().toISOString() }])
+            }
+        } catch (err: any) {
+            setMessages(prev => [...prev, { role: 'system', content: `[Upload error: ${err.message}]`, timestamp: new Date().toISOString() }])
+        } finally {
+            setIsUploading(false)
         }
     }
 
@@ -1112,8 +1156,8 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                     className="flex-1 overflow-y-auto pt-4 pb-8 px-2"
                     style={{ background: 'rgba(0,0,0,0.1)' }}
                 >
-                    {/* Loading skeleton — shown while thread history is in flight */}
-                    {isLoadingThread ? (
+                    {/* Loading skeleton — only shown on initial load / thread switch (no messages yet) */}
+                    {isLoadingThread && messages.length === 0 ? (
                         <MessageSkeleton />
                     ) : !activeThreadId && messages.length === 0 ? (
                         <div className="h-full flex flex-col items-center justify-center gap-4 px-4">
@@ -1222,7 +1266,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                             onKeyDown={handleKeyDown}
                             onPaste={handlePaste}
                             placeholder={wsReady ? 'Message…' : 'Reconnecting…'}
-                            disabled={isStreaming}
+                            disabled={false}
                             rows={1}
                             className="w-full px-3 py-2.5 font-mono bg-transparent outline-none resize-none"
                             style={{
@@ -1234,8 +1278,24 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                         />
 
                         <div className="flex items-center justify-between px-2 pb-2 mt-0.5">
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        className="hidden"
+                        onChange={handleFileSelect}
+                        accept="image/*,.pdf,.doc,.docx,.txt,.csv,.json,.md,.ts,.js,.py,.sh,.yaml,.yml"
+                    />
                             <div className="flex items-center gap-2">
                                 <HarnessPicker value={harness} onChange={setHarness} />
+                                <button
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={isUploading}
+                                    className="p-1 rounded hover:bg-white/10 text-[10px] font-mono transition-colors"
+                                    style={{ color: 'var(--text-dim)' }}
+                                    title="Attach file"
+                                >
+                                    📎
+                                </button>
                                 {sessionTotals.cost > 0 && (
                                     <div className="text-[9px] font-mono" style={{ color: 'var(--text-dim)' }}>
                                         {sessionTotals.inputTokens + sessionTotals.outputTokens > 0 && (
@@ -1262,7 +1322,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
 
                             <button
                                 onClick={sendMessage}
-                                disabled={!wsReady || isStreaming || !input.trim()}
+                                disabled={!wsReady || !input.trim()}
                                 className="w-6 h-6 rounded-lg flex items-center justify-center transition-all disabled:opacity-30 disabled:grayscale"
                                 style={{ background: getHarness(harness).color, color: '#000' }}
                             >

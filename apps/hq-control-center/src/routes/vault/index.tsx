@@ -81,7 +81,7 @@ function InlineSearch() {
             if (wsConnected) {
                 try {
                     const res = await fetch(
-                        `http://${window.location.hostname}:4748/search?q=${encodeURIComponent(q)}`,
+                        `${window.location.origin}/search?q=${encodeURIComponent(q)}`,
                         { signal: controller.signal }
                     )
                     if (res.ok) {

@@ -51,7 +51,7 @@ function JobsView() {
   }
 
   return (
-    <div className="p-3 md:p-5 h-full overflow-y-auto dot-grid">
+    <div className="p-3 md:p-5 pb-20 md:pb-5 h-full overflow-y-auto dot-grid">
       <div className="max-w-[1400px] mx-auto">
         <p className="hq-section-title">Job Queue</p>
 

@@ -76,6 +76,7 @@ export class TelegramBridge implements PlatformBridge {
     supportsInlineKeyboards: true,
     supportsReactions: true,
     supportsStreaming: false,
+    supportsStreamingEdit: true,
     supportsVoice: true,
     supportsMedia: true,
     formatType: "html",
@@ -225,7 +226,7 @@ export class TelegramBridge implements PlatformBridge {
         replyContent: photoReplyId !== undefined ? this.messageCache.get(photoReplyId) : undefined,
         replyFromSelf: photoReplyId !== undefined ? this.botMessageIds.has(photoReplyId) : undefined,
       };
-      if (photoContent) { this.messageCache.set(photoMsg.id, photoContent); this.evictCache(); }
+      this.messageCache.set(photoMsg.id, photoContent || "[photo]"); this.evictCache();
       this.emit(photoMsg);
     });
 
@@ -628,7 +629,7 @@ export class TelegramBridge implements PlatformBridge {
 
   // ─── Telegram-specific methods ─────────────────────────────────
 
-  async editMessage(messageId: number, newText: string): Promise<void> {
+  async editMessageById(messageId: number, newText: string): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) return;
 
@@ -651,6 +652,11 @@ export class TelegramBridge implements PlatformBridge {
         console.error("[telegram] Edit message failed:", err);
       }
     }
+  }
+
+  /** PlatformBridge.editMessage — string-based ID wrapper for streaming edits. */
+  async editMessage(msgId: string, text: string): Promise<void> {
+    await this.editMessageById(Number(msgId), text);
   }
 
   async deleteMessage(messageId: number): Promise<void> {

@@ -20,6 +20,8 @@ export interface ChatContext {
   getModelOverride(): string | undefined;
   /** Platform-specific: send a (possibly long) response to the user. */
   sendResponse(text: string, replyToId?: string): Promise<void>;
+  /** Optional: called per streaming delta when the platform supports streaming. */
+  sendDelta?: (delta: string) => void;
   /** Platform-specific: show typing indicator. */
   sendTypingIfEnabled(): Promise<void>;
   clearTyping(): void;
@@ -75,6 +77,8 @@ export async function handleChat(
         if (deltaMsg.requestId === requestId) {
           deltaCount++;
           buffer += deltaMsg.delta;
+          // Forward to bridge when platform supports streaming (e.g. PWA WebSocket)
+          ctx.sendDelta?.(deltaMsg.delta);
           if (deltaCount % 20 === 0) {
             console.log(`[${ctx.platformLabel}] Streaming: ${deltaCount} deltas, ${buffer.length} chars`);
           }

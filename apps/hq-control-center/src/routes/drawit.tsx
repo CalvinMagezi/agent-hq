@@ -244,7 +244,7 @@ function Sidebar({
       </div>
 
       {/* File list */}
-      <div className="flex-1 overflow-y-auto py-1">
+      <div className="flex-1 overflow-y-auto py-1 pb-16 md:pb-1">
         {files.length === 0 ? (
           <div className="text-center py-8 text-xs font-mono px-3" style={{ color: 'var(--text-dim)' }}>
             No .drawit files found in vault

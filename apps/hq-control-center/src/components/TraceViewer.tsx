@@ -145,14 +145,14 @@ export function TraceViewer() {
         let mounted = true
         const fetchTraces = async () => {
             try {
-                const res = await fetch(`http://${window.location.hostname}:4748/traces`)
+                const res = await fetch(`${window.location.origin}/traces`)
                 if (!res.ok) throw new Error('Failed to fetch traces list')
                 const data = await res.json()
 
                 const activeIds = (data.traces || []).map((t: any) => t.traceId)
 
                 const trees = await Promise.all(activeIds.map(async (id: string) => {
-                    const tres = await fetch(`http://${window.location.hostname}:4748/traces/${id}`)
+                    const tres = await fetch(`${window.location.origin}/traces/${id}`)
                     if (!tres.ok) return null
                     const tdata = await tres.json()
                     return tdata.trace

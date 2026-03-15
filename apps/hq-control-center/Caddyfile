@@ -1,0 +1,26 @@
+:4749 {
+	# WebSocket + WS server HTTP endpoints → port 4748
+	@ws_server path /ws /push/* /upload /search /traces /traces/*
+	handle @ws_server {
+		reverse_proxy localhost:4748
+	}
+
+	# Static assets served directly by Caddy (faster than going through Bun SSR)
+	@static_assets path /assets/* /icons/* /manifest.json /sw.js /registerSW.js /vite.svg /notification.wav /chamuka-drawit.min.js /hq-agent.svg
+	handle @static_assets {
+		root * /Users/calvinmagezi/Documents/GitHub/agent-hq/apps/hq-control-center/dist/client
+		file_server
+	}
+
+	# Public static files
+	@public_files path /icon-color.png /electron-vite.svg /electron-vite.animate.svg
+	handle @public_files {
+		root * /Users/calvinmagezi/Documents/GitHub/agent-hq/apps/hq-control-center/public
+		file_server
+	}
+
+	# Everything else → TanStack Start SSR on port 4747
+	handle {
+		reverse_proxy localhost:4747
+	}
+}

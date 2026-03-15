@@ -15,17 +15,20 @@ import { JobDrawer } from '~/components/JobDrawer'
 import { SearchOverlay } from '~/components/SearchOverlay'
 import { QuickNoteOverlay } from '~/components/QuickNoteOverlay'
 import { NewJobOverlay } from '~/components/NewJobOverlay'
+import { BottomNav } from '~/components/BottomNav'
+import { ChatPanel } from '~/components/ChatPanel'
+import { InstallPrompt } from '~/components/InstallPrompt'
 import appCss from '../../app.css?url'
 
 const WS_BASE = typeof window !== 'undefined'
-  ? `http://${window.location.hostname}:4748`
-  : 'http://localhost:4748'
+  ? `${window.location.protocol}//${window.location.host}`
+  : 'http://localhost:4749'
 
 export const Route = createRootRoute({
   head: () => ({
     meta: [
       { charSet: 'utf-8' },
-      { name: 'viewport', content: 'width=device-width, initial-scale=1' },
+      { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
       { title: 'HQ Control Center' },
       { name: 'theme-color', content: '#0a0a0f' },
     ],
@@ -79,17 +82,21 @@ function RootComponent() {
       <SearchOverlay />
       <QuickNoteOverlay />
       <NewJobOverlay />
+      <BottomNav />
     </RootDocument>
   )
 }
 
 function Shell() {
   const wsConnected = useHQStore((s) => s.wsConnected)
+  const chatPanelOpen = useHQStore((s) => s.chatPanelOpen)
+  const setChatPanelOpen = useHQStore((s) => s.setChatPanelOpen)
   const [pushPrompt, setPushPrompt] = useState(false)
 
   // Start WS connection
   useEffect(() => {
-    const wsUrl = `ws://${window.location.hostname}:4748/ws`
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`
     let ws: WebSocket | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -184,6 +191,9 @@ function Shell() {
 
   return (
     <div className="flex flex-col h-full overflow-hidden" style={{ background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
+      {/* Install prompt banner */}
+      <InstallPrompt />
+
       {/* Push permission banner */}
       {pushPrompt && (
         <div
@@ -224,7 +234,7 @@ function Shell() {
               HQ
             </h1>
           </div>
-          <nav className="flex items-center gap-1">
+          <nav className="hidden md:flex items-center gap-1">
             <Link
               to="/vault"
               className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
@@ -249,13 +259,14 @@ function Shell() {
             >
               🤖 Teams
             </Link>
-            <button
-              onClick={() => useHQStore.getState().setChatPanelOpen(!useHQStore.getState().chatPanelOpen)}
+            <Link
+              to="/plans"
               className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
-              style={{ color: 'var(--text-dim)' }}
+              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
+              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
             >
-              Chat
-            </button>
+              📋 Plans
+            </Link>
           </nav>
         </div>
         <div className="flex items-center gap-2 sm:gap-3">
@@ -274,6 +285,19 @@ function Shell() {
           >
             + Note
           </button>
+          {/* Desktop chat toggle */}
+          <button
+            onClick={() => setChatPanelOpen(!chatPanelOpen)}
+            className="hidden md:flex items-center gap-2 px-2 py-1 rounded-lg text-xs font-mono transition-colors"
+            style={{
+              background: chatPanelOpen ? 'rgba(0,255,136,0.12)' : 'var(--bg-elevated)',
+              border: chatPanelOpen ? '1px solid var(--accent-green)' : '1px solid var(--border)',
+              color: chatPanelOpen ? 'var(--accent-green)' : 'var(--text-dim)',
+            }}
+          >
+            <img src="/hq-agent.svg" alt="HQ" className="rounded-full" style={{ width: 20, height: 20 }} />
+            <span>Chat</span>
+          </button>
           <div className="flex items-center gap-1.5">
             <div className={`status-dot ${wsConnected ? 'active' : 'error'}`} />
             <span className="text-[10px] font-mono hidden sm:block" style={{ color: 'var(--text-dim)' }}>
@@ -283,10 +307,20 @@ function Shell() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 min-h-0 overflow-hidden w-full">
+      {/* Main Content — extra bottom padding on mobile for BottomNav */}
+      <main className="flex-1 min-h-0 overflow-hidden w-full md:pb-0 pb-[60px]">
         <Outlet />
       </main>
+
+      {/* Global Chat Panel — slides in from right on all routes */}
+      {chatPanelOpen && (
+        <aside
+          className="fixed inset-y-0 right-0 z-50 w-full md:w-[380px] lg:w-[400px] border-l shadow-2xl"
+          style={{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }}
+        >
+          <ChatPanel onClose={() => setChatPanelOpen(false)} />
+        </aside>
+      )}
     </div>
   )
 }

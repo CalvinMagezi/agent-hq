@@ -9,6 +9,7 @@ export default defineConfig({
   server: {
     port: 4747,
     host: '0.0.0.0',
+    allowedHosts: ['calvins-macbook-pro.tailebc87e.ts.net'],
   },
   ssr: {
     // bun: protocol modules can only be resolved by Bun's runtime, not Node/esbuild

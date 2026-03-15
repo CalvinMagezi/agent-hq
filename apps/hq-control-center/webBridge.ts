@@ -23,6 +23,10 @@ export class WebBridge implements PlatformBridge {
   private clients: Set<ServerWebSocket<unknown>>;
   private onMessageCallback: (msg: UnifiedMessage) => void = () => {};
   private onActionCallback: (action: PlatformAction) => void = () => {};
+  private doneTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Accumulate response text per chatId so ws-server can persist it before chat:done fires
+  private tokenAccumulators = new Map<string, string>();
+  private onDoneCallback: (chatId: string, accumulatedText: string) => void = () => {};
 
   constructor(clients: Set<ServerWebSocket<unknown>>) {
     this.clients = clients;
@@ -39,8 +43,18 @@ export class WebBridge implements PlatformBridge {
     this.onActionCallback = handler;
   }
 
+  /** Register a callback invoked (synchronously) just before chat:done is broadcast. */
+  onDone(handler: (chatId: string, accumulatedText: string) => void): void {
+    this.onDoneCallback = handler;
+  }
+
   // Helper for the ws-server to push incoming web messages into the unified bot
-  async handleIncoming(threadId: string, content: string, userId: string = "web-user"): Promise<void> {
+  async handleIncoming(
+    threadId: string,
+    content: string,
+    userId: string = "web-user",
+    harnessOverride?: string,
+  ): Promise<void> {
     this.onMessageCallback({
       id: `web-${Date.now()}`,
       chatId: threadId,
@@ -48,6 +62,7 @@ export class WebBridge implements PlatformBridge {
       content,
       timestamp: Date.now(),
       platform: "web",
+      harnessOverride,
     });
   }
 
@@ -66,12 +81,27 @@ export class WebBridge implements PlatformBridge {
     const chatId = opts?.chatId;
     if (!chatId) return null;
 
+    // Accumulate response for persistence
+    this.tokenAccumulators.set(chatId, (this.tokenAccumulators.get(chatId) ?? "") + text);
+
     this.broadcast(chatId, {
       type: "chat:token",
       token: text,
       replyToId: opts?.replyToId,
     });
-    
+
+    // Debounce chat:done — fires 300ms after the last token for this chatId
+    const existing = this.doneTimers.get(chatId);
+    if (existing) clearTimeout(existing);
+    this.doneTimers.set(chatId, setTimeout(() => {
+      this.doneTimers.delete(chatId);
+      // Persist BEFORE broadcasting chat:done so loadThread finds the file
+      const accumulated = this.tokenAccumulators.get(chatId) ?? "";
+      this.tokenAccumulators.delete(chatId);
+      this.onDoneCallback(chatId, accumulated);
+      this.broadcast(chatId, { type: "chat:done" });
+    }, 300));
+
     return `web-msg-${Date.now()}`;
   }
 

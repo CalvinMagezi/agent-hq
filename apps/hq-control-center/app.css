@@ -16,6 +16,15 @@
 
 * {
   box-sizing: border-box;
+  /* Prevent double-tap zoom delay on mobile */
+  touch-action: manipulation;
+}
+
+/* Prevent iOS font zoom on focused inputs */
+@media (max-width: 768px) {
+  input, textarea, select {
+    font-size: 16px;
+  }
 }
 
 html,

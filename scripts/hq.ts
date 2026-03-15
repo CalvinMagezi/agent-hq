@@ -1975,6 +1975,102 @@ async function cmdVaultOpen(): Promise<void> {
   }
 }
 
+// hq plans [list|status <planId>|search <query>]
+async function cmdPlans(sub?: string, arg?: string): Promise<void> {
+  const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+  const activeDir = path.join(vaultPath, "_plans", "active");
+  const archiveDir = path.join(vaultPath, "_plans", "archive");
+
+  // Helper to read plan frontmatter from a directory
+  function readPlan(dir: string): Record<string, any> | null {
+    const planMd = path.join(dir, "plan.md");
+    if (!fs.existsSync(planMd)) return null;
+    try {
+      const raw = fs.readFileSync(planMd, "utf-8");
+      // Quick frontmatter parse (avoid importing gray-matter for CLI speed)
+      const fmMatch = raw.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) return null;
+      const fm: Record<string, string> = {};
+      for (const line of fmMatch[1].split("\n")) {
+        const [k, ...rest] = line.split(":");
+        if (k && rest.length) fm[k.trim()] = rest.join(":").trim().replace(/^['"]|['"]$/g, "");
+      }
+      fm._dir = dir;
+      return fm;
+    } catch { return null; }
+  }
+
+  function scanDir(dir: string): Record<string, any>[] {
+    if (!fs.existsSync(dir)) return [];
+    try {
+      return fs.readdirSync(dir, { withFileTypes: true })
+        .filter(e => e.isDirectory() && e.name.startsWith("plan-"))
+        .map(e => readPlan(path.join(dir, e.name)))
+        .filter((p): p is Record<string, any> => p !== null);
+    } catch { return []; }
+  }
+
+  const statusColors: Record<string, string> = {
+    in_progress: c.cyan, delegated: c.yellow, planning: c.cyan,
+    completed: c.green, failed: c.red, abandoned: c.gray,
+  };
+
+  const modeIcons: Record<string, string> = { act: ">>", sketch: "~~", blueprint: "##" };
+
+  if (sub === "status" && arg) {
+    // Show detail for a specific plan
+    const plan = readPlan(path.join(activeDir, arg)) ?? readPlan(path.join(archiveDir, arg));
+    if (!plan) { fail(`Plan not found: ${arg}`); return; }
+
+    console.log(`\n${c.bold}━━━ Plan: ${plan.title || plan.planId || arg} ━━━${c.reset}\n`);
+    console.log(`  ID:       ${plan.planId || arg}`);
+    console.log(`  Status:   ${(statusColors[plan.status] || "")}${plan.status}${c.reset}`);
+    console.log(`  Mode:     ${modeIcons[plan.planningMode] || ""} ${plan.planningMode || "unknown"}`);
+    console.log(`  Project:  ${plan.project || "default"}`);
+    if (plan.createdAt) console.log(`  Created:  ${plan.createdAt}`);
+    if (plan.updatedAt) console.log(`  Updated:  ${plan.updatedAt}`);
+    if (plan.outcome && plan.outcome !== ">-" && plan.outcome !== "|") console.log(`  Outcome:  ${plan.outcome}`);
+    console.log();
+    return;
+  }
+
+  if (sub === "search" && arg) {
+    const q = arg.toLowerCase();
+    const all = [...scanDir(activeDir), ...scanDir(archiveDir)];
+    const matches = all.filter(p =>
+      (p.title || "").toLowerCase().includes(q) ||
+      (p.planId || "").toLowerCase().includes(q) ||
+      (p.project || "").toLowerCase().includes(q)
+    );
+    if (matches.length === 0) { info(`No plans matching "${arg}"`); return; }
+    console.log(`\n${c.bold}━━━ Plans matching "${arg}" (${matches.length}) ━━━${c.reset}\n`);
+    for (const p of matches) {
+      const color = statusColors[p.status] || "";
+      console.log(`  ${color}${(p.status || "?").padEnd(12)}${c.reset} ${(modeIcons[p.planningMode] || "  ")} ${p.title || p.planId}`);
+    }
+    console.log();
+    return;
+  }
+
+  // Default: list all plans
+  const plans = [...scanDir(activeDir), ...scanDir(archiveDir)];
+  if (plans.length === 0) {
+    info("No plans found. Create one via HQ tools: hq_call plan_create { ... }");
+    return;
+  }
+
+  console.log(`\n${c.bold}━━━ Plans (${plans.length}) ━━━${c.reset}\n`);
+  for (const p of plans) {
+    const color = statusColors[p.status] || "";
+    const mode = (modeIcons[p.planningMode] || "  ");
+    const id = (p.planId || "???").padEnd(30);
+    const status = (p.status || "?").padEnd(12);
+    console.log(`  ${color}${status}${c.reset} ${mode} ${c.bold}${p.title || p.planId}${c.reset}`);
+    console.log(`  ${c.gray}${id}  ${p.project || "default"}${c.reset}`);
+  }
+  console.log(`\n  ${c.dim}Use ${c.reset}${c.bold}hq plans status <planId>${c.reset}${c.dim} for details${c.reset}\n`);
+}
+
 // hq quickstart — guided first-run walkthrough
 async function cmdQuickstart(): Promise<void> {
   console.log(`
@@ -2089,6 +2185,7 @@ ${c.bold}SERVICES${c.reset}
 ${c.bold}MONITORING${c.reset}
   hq health                     Full health check
   hq logs [target] [N]          View last N log lines
+  hq plans [list|status|search] Browse cross-agent plans
   hq pwa                        Open the HQ web dashboard
   hq vault open                 Open vault in Obsidian`);
 
@@ -2135,6 +2232,11 @@ ${c.bold}ADVANCED${c.reset}
   hq install [target]           Install launchd daemons (macOS)
   hq uninstall [target]         Remove launchd daemons
   hq update                     Pull latest + restart services
+
+${c.bold}PLANS${c.reset}
+  hq plans                      List all cross-agent plans
+  hq plans status <planId>      Show plan details
+  hq plans search <query>       Search plans by title/project
 
 ${c.bold}DIAGRAMS${c.reset}
   hq diagram flow "A" "B" "C?"  Quick flowchart
@@ -2262,6 +2364,9 @@ switch (cmd) {
     if (arg1 === "open") { await cmdVaultOpen(); }
     else { fail(`Unknown vault subcommand: ${arg1 ?? "(none)"}`); info("Usage: hq vault open"); }
     break;
+
+  case "plans": case "plan":
+    await cmdPlans(arg1, arg2); break;
 
   case "quickstart":
     await cmdQuickstart(); break;

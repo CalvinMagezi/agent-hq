@@ -1,10 +1,10 @@
 /// <reference lib="webworker" />
 import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching'
 
-declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<{ url: string; revision: string | null }> }
+declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST?: Array<{ url: string; revision: string | null }> }
 
 cleanupOutdatedCaches()
-precacheAndRoute(self.__WB_MANIFEST)
+precacheAndRoute(self.__WB_MANIFEST ?? [])
 
 // Push notification handler
 self.addEventListener('push', (event) => {

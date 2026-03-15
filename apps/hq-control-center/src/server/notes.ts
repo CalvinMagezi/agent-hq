@@ -258,13 +258,17 @@ export const getNote = createServerFn({ method: 'GET' })
 
     if (!isText && stat.size > 1024 * 1024) return { content: '' } // Don't even try reading large non-text as string
 
-    if (stat.size > 500 * 1024) {
-      // Large file: read first 500KB
+    // Log files with JSON blobs can crash the renderer — cap at 50KB
+    const isLogFile = fullPath.includes('/_logs/') || fullPath.includes('/_jobs/')
+    const maxBytes = isLogFile ? 50 * 1024 : 500 * 1024
+
+    if (stat.size > maxBytes) {
       const fd = fs.openSync(fullPath, 'r')
-      const buffer = Buffer.alloc(500 * 1024)
-      const bytesRead = fs.readSync(fd, buffer, 0, 500 * 1024, 0)
+      const buffer = Buffer.alloc(maxBytes)
+      const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0)
       fs.closeSync(fd)
-      return { content: buffer.toString('utf-8', 0, bytesRead) + '\n\n...[TRUNCATED: File exceeds 500KB]...' }
+      const sizeKB = Math.round(stat.size / 1024)
+      return { content: buffer.toString('utf-8', 0, bytesRead) + `\n\n...[TRUNCATED: File is ${sizeKB}KB — showing first ${Math.round(maxBytes / 1024)}KB]...` }
     }
 
     try {

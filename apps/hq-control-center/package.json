@@ -7,7 +7,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "vite build && bun run build:sw",
+    "build:sw": "bun build src/sw.ts --outfile=dist/client/sw.js --target=browser --format=esm",
     "start": "bun run dist/server/server.js",
     "ws": "bun run ws-server.ts"
   },

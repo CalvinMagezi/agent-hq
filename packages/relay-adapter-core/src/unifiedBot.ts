@@ -79,11 +79,11 @@ export class UnifiedAdapterBot {
   private formatEnabled = true;
   private stateFile: string;
 
-  // Processing state
+  // Processing state — per chatId so threads can run in parallel
   private currentChatId: string | null = null;
   private chatThreads = new Map<string, string>(); // chatId -> threadId
-  private processing = false;
-  private messageQueue: UnifiedMessage[] = [];
+  private processingChats = new Map<string, number>(); // chatId -> startedAt timestamp
+  private messageQueueByChat = new Map<string, UnifiedMessage[]>(); // chatId -> queued msgs
   private processedIds = new Set<string>();
 
   // Session management
@@ -168,6 +168,7 @@ export class UnifiedAdapterBot {
     this.relay.disconnect();
     if (this.typingInterval) { clearInterval(this.typingInterval); }
     this.mediaHandler?.destroy?.();
+    this.localHarness.dispose();
     await this.bridge.stop();
     console.log(`[${this.label}] Bot stopped`);
   }
@@ -181,6 +182,17 @@ export class UnifiedAdapterBot {
     );
 
     this.currentChatId = msg.chatId;
+
+    // Apply per-message harness override (e.g. from PWA harness selector)
+    if (msg.harnessOverride) {
+      // Map PWA-specific IDs to valid harness names
+      const aliasMap: Record<string, ActiveHarness> = { "hq-agent": "auto" };
+      const resolved = aliasMap[msg.harnessOverride] ?? msg.harnessOverride;
+      const valid: ActiveHarness[] = ["auto", "claude-code", "opencode", "gemini-cli", "codex-cli"];
+      if (valid.includes(resolved as ActiveHarness)) {
+        this.activeHarness = resolved as ActiveHarness;
+      }
+    }
 
     // Resolve thread for this chat
     if (!this.chatThreads.has(msg.chatId)) {
@@ -203,18 +215,19 @@ export class UnifiedAdapterBot {
       this.threadId = this.chatThreads.get(msg.chatId)!;
     }
 
-    // Always sync activeHarness from thread store for the current thread
-    if (this.threadId) {
+    // Sync activeHarness from thread store — but only if no per-message override was applied
+    if (this.threadId && !msg.harnessOverride) {
       const threadHarness = await this.threadStore.getActiveHarness(this.threadId);
-      this.activeHarness = threadHarness as any; 
+      this.activeHarness = threadHarness as any;
     }
 
     // Dedup
     if (this.processedIds.has(msg.id)) return;
     this.processedIds.add(msg.id);
-    if (this.processedIds.size > 200) {
+    while (this.processedIds.size >= 200) {
       const first = this.processedIds.values().next().value;
-      if (first !== undefined) this.processedIds.delete(first);
+      if (first === undefined) break;
+      this.processedIds.delete(first);
     }
 
     // Update CHANNEL-PRESENCE.md (Touch Points integration)
@@ -226,14 +239,21 @@ export class UnifiedAdapterBot {
     // Voice notes
     if (msg.isVoiceNote) {
       await this.handleVoice(msg);
-      await this.processQueue();
+      await this.processQueue(msg.chatId);
       return;
     }
 
-    // Media
+    // Media — queue if already processing (same guard as text messages below)
     if (msg.mediaType && msg.mediaType !== "audio") {
+      if (this.processingChats.has(msg.chatId)) {
+        console.log(`[${this.label}] Chat ${msg.chatId} busy — queuing media: ${msg.mediaType}`);
+        const q = this.messageQueueByChat.get(msg.chatId) ?? [];
+        q.push(msg);
+        this.messageQueueByChat.set(msg.chatId, q);
+        return;
+      }
       await this.handleMedia(msg);
-      await this.processQueue();
+      await this.processQueue(msg.chatId);
       return;
     }
 
@@ -241,7 +261,7 @@ export class UnifiedAdapterBot {
     if (msg.location) {
       const { lat, lng } = msg.location;
       await this.routeText(`[Location shared]: ${lat.toFixed(6)}, ${lng.toFixed(6)}`, msg);
-      await this.processQueue();
+      await this.processQueue(msg.chatId);
       return;
     }
 
@@ -251,7 +271,7 @@ export class UnifiedAdapterBot {
         `[Contact shared]: ${msg.contactName ?? "Unknown"} — ${msg.contactPhone ?? ""}`,
         msg,
       );
-      await this.processQueue();
+      await this.processQueue(msg.chatId);
       return;
     }
 
@@ -261,22 +281,31 @@ export class UnifiedAdapterBot {
         `[Poll received]: ${msg.pollQuestion}\nOptions: ${msg.pollOptions?.join(", ")}`,
         msg,
       );
-      await this.processQueue();
+      await this.processQueue(msg.chatId);
       return;
     }
 
     const content = msg.content.trim();
     if (!content) return;
 
-    // Queue if already processing
-    if (this.processing) {
-      console.log(`[${this.label}] Already processing — queuing: "${content.substring(0, 40)}"`);
-      this.messageQueue.push(msg);
-      return;
+    // Queue if this specific chat is already processing — auto-reset after 3 minutes
+    const chatBusy = this.processingChats.get(msg.chatId);
+    if (chatBusy) {
+      const stuckMs = Date.now() - chatBusy;
+      if (stuckMs > 180_000) {
+        console.warn(`[${this.label}] Chat ${msg.chatId} stuck for ${Math.round(stuckMs / 1000)}s — force-resetting`);
+        this.processingChats.delete(msg.chatId);
+      } else {
+        console.log(`[${this.label}] Chat ${msg.chatId} busy — queuing: "${content.substring(0, 40)}"`);
+        const q = this.messageQueueByChat.get(msg.chatId) ?? [];
+        q.push(msg);
+        this.messageQueueByChat.set(msg.chatId, q);
+        return;
+      }
     }
 
     await this.routeText(content, msg);
-    await this.processQueue();
+    await this.processQueue(msg.chatId);
   }
 
   private async routeText(content: string, msg: UnifiedMessage): Promise<void> {
@@ -333,7 +362,15 @@ export class UnifiedAdapterBot {
       getModelOverride: () => this.modelOverride,
       setModelOverride: (m) => { this.modelOverride = m; },
       getThreadId: () => this.threadId,
-      setThreadId: (id) => { this.threadId = id; },
+      setThreadId: (id) => {
+        this.threadId = id;
+        // Sync chatThreads map so thread survives within the session
+        if (id && this.currentChatId) {
+          this.chatThreads.set(this.currentChatId, id);
+        } else if (!id && this.currentChatId) {
+          this.chatThreads.delete(this.currentChatId);
+        }
+      },
       getVoiceReplyEnabled: () => this.voiceReplyEnabled,
       setVoiceReplyEnabled: (v) => { this.voiceReplyEnabled = v; },
       getMediaAutoProcess: () => this.mediaAutoProcess,
@@ -439,32 +476,77 @@ export class UnifiedAdapterBot {
     harness: "claude-code" | "opencode" | "gemini-cli" | "codex-cli",
     msg: UnifiedMessage,
   ): Promise<void> {
-    this.processing = true;
+    this.processingChats.set(msg.chatId, Date.now());
     const label = harnessLabel(harness);
     const sessionId = `${this.config.platformId}-${Date.now()}`;
+    const streaming = this.bridge.capabilities.supportsStreaming;
+    const streamingEdit = this.bridge.capabilities.supportsStreamingEdit && this.bridge.editMessage;
+
+    // Edit-based streaming state for local harness
+    let editMsgId: string | null = null;
+    let editBuf = "";
+    let editTmr: ReturnType<typeof setTimeout> | null = null;
+    const EDIT_MS = 1500;
+    const doFlush = () => {
+      if (editMsgId && editBuf && this.bridge.editMessage) {
+        this.bridge.editMessage(editMsgId, editBuf + " ▍").catch(() => {});
+      }
+    };
 
     if (msg) this.bridge.sendReaction(msg.id, "⏳", msg.chatId).catch(() => {});
 
     this.startTyping(msg.chatId);
+
+    // Send placeholder for edit-based streaming
+    if (streamingEdit) {
+      try {
+        const pid = await this.bridge.sendText("Thinking… ▍", { chatId: this.currentChatId || undefined });
+        if (pid) editMsgId = pid;
+      } catch { /* non-critical */ }
+    }
+
     try {
       await this.sessionOrchestrator.run(sessionId, harness, content, {
         onStatusUpdate: (_session, message) => {
           console.log(`[${this.label}] Session ${sessionId}: ${message}`);
-          this.bridge.sendText(message).catch(console.error);
+          this.bridge.sendText(message, { chatId: this.currentChatId || undefined }).catch(console.error);
         },
         onResult: (_session, result) => {
           this.stopTyping();
+          if (editTmr) { clearTimeout(editTmr); editTmr = null; }
           if (msg) this.bridge.sendReaction(msg.id, "✅", msg.chatId).catch(() => {});
-          this.sendChunked(result).catch(console.error);
+          if (streamingEdit && editMsgId && this.bridge.editMessage) {
+            // Final edit with complete text (no cursor)
+            this.bridge.editMessage(editMsgId, result).catch(() => {});
+            // Edits don't trigger Telegram notifications — send a brief done message
+            this.bridge.sendText("✅ Response complete", { chatId: this.currentChatId || undefined }).catch(() => {});
+          } else if (!streaming) {
+            // Non-streaming platforms: send full result as one message
+            this.sendChunked(result).catch(console.error);
+          }
+          // Streaming platforms: tokens were already sent per-token via onToken; nothing to resend.
           this.flushSessionToVault(sessionId, harness, content, result);
         },
-        // onToken is intentionally not used — the full result is sent via onResult.
-        // Streaming tokens as separate messages causes double responses on non-streaming platforms.
+        // Stream tokens directly to the bridge when the platform supports it (e.g. PWA)
+        onToken: streaming ? (_session, token) => {
+          this.bridge.sendText(token, { chatId: this.currentChatId || undefined }).catch(console.error);
+        } : streamingEdit ? (_session, token) => {
+          editBuf += token;
+          if (!editTmr) {
+            editTmr = setTimeout(() => { editTmr = null; doFlush(); }, EDIT_MS);
+          }
+        } : undefined,
         onFailed: (_session, error) => {
           this.stopTyping();
+          if (editTmr) { clearTimeout(editTmr); editTmr = null; }
           if (msg) this.bridge.sendReaction(msg.id, "❌", msg.chatId).catch(() => {});
           console.error(`[${this.label}] Session ${sessionId} failed: ${error}`);
-          this.bridge.sendText(`_${label} failed: ${error}_`).catch(console.error);
+          // Update placeholder with error if we were streaming
+          if (streamingEdit && editMsgId && this.bridge.editMessage) {
+            this.bridge.editMessage(editMsgId, `_${label} failed: ${error}_`).catch(() => {});
+          } else {
+            this.bridge.sendText(`_${label} failed: ${error}_`, { chatId: this.currentChatId || undefined }).catch(console.error);
+          }
         },
       });
     } catch (err) {
@@ -473,10 +555,11 @@ export class UnifiedAdapterBot {
       console.error(`[${this.label}] Orchestrator error for session ${sessionId}:`, err);
       await this.bridge.sendText(
         `_${label} error: ${err instanceof Error ? err.message : String(err)}_`,
+        { chatId: this.currentChatId || undefined },
       );
     } finally {
       this.stopTyping();
-      this.processing = false;
+      this.processingChats.delete(msg.chatId);
     }
   }
 
@@ -488,11 +571,12 @@ export class UnifiedAdapterBot {
     role: string | undefined,
     msg: UnifiedMessage,
   ): Promise<void> {
+    const chatId = msg.chatId;
     const delegCtx: DelegationContext = {
       relay: this.relay,
       bridge: this.bridge,
       state: this.delegationState,
-      setProcessing: (b) => { this.processing = b; },
+      setProcessing: (b) => { if (b) this.processingChats.set(chatId, Date.now()); else this.processingChats.delete(chatId); },
       sendChunked: (text) => this.sendChunked(text),
       fallbackToChat: (c) => this.handleChatInternal(c),
       platformLabel: this.label,
@@ -505,7 +589,7 @@ export class UnifiedAdapterBot {
       relay: this.relay,
       bridge: this.bridge,
       state: this.delegationState,
-      setProcessing: (b) => { this.processing = b; },
+      setProcessing: () => { /* vault events are not tied to a specific chat */ },
       sendChunked: (text) => this.sendChunked(text),
       fallbackToChat: (c) => this.handleChatInternal(c),
       platformLabel: this.label,
@@ -520,26 +604,54 @@ export class UnifiedAdapterBot {
     msg?: UnifiedMessage,
     images?: Array<{ url: string; mediaType?: string }>,
   ): Promise<void> {
-    // Check relay connection — if down, tell user to pin a harness instead
+    // Check relay connection — if down, fall back to local claude-code harness
     if (!this.relay.isConnected) {
-      await this.bridge.sendText(
-        "Relay server is not running — chat mode is unavailable.\n" +
-        "Use `!harness claude` to talk directly to Claude Code, " +
-        "or start the relay server with `hq telegram` / `hq relay-server`.",
-      );
-      this.processing = false;
+      const fallback: "claude-code" | "opencode" | "gemini-cli" | "codex-cli" = "claude-code";
+      console.log(`[${this.label}] Relay not connected — falling back to local ${fallback} harness`);
+      await this.handleLocalHarness(content, fallback, msg!);
       return;
     }
 
-    this.processing = true;
+    if (msg) this.processingChats.set(msg.chatId, Date.now());
+    const streaming = this.bridge.capabilities.supportsStreaming;
+    const streamingEdit = this.bridge.capabilities.supportsStreamingEdit && this.bridge.editMessage;
+
+    // Edit-based streaming state (for Telegram-style platforms)
+    let editPlaceholderMsgId: string | null = null;
+    let editBuffer = "";
+    let editTimer: ReturnType<typeof setTimeout> | null = null;
+    const EDIT_THROTTLE_MS = 1500; // Edit every 1.5s to avoid Telegram rate limits
+
+    const flushEdit = () => {
+      if (editPlaceholderMsgId && editBuffer && this.bridge.editMessage) {
+        const text = editBuffer + " ▍"; // typing cursor
+        this.bridge.editMessage(editPlaceholderMsgId, text).catch(() => {});
+      }
+    };
 
     const chatCtx: ChatContext = {
       relay: this.relay,
       bridge: this.bridge,
       getThreadId: () => this.threadId,
-      setThreadId: (id) => { this.threadId = id; },
+      setThreadId: (id) => {
+        this.threadId = id;
+        // Sync chatThreads map so thread survives within the session
+        if (id && this.currentChatId) {
+          this.chatThreads.set(this.currentChatId, id);
+        }
+      },
       getModelOverride: () => this.modelOverride,
       sendResponse: async (text, replyToId) => {
+        // Skip resending when we've already streamed all tokens to the bridge
+        if (streaming) return;
+        // For edit-based streaming, do a final edit with the complete text (no cursor)
+        if (streamingEdit && editPlaceholderMsgId && this.bridge.editMessage) {
+          if (editTimer) { clearTimeout(editTimer); editTimer = null; }
+          await this.bridge.editMessage(editPlaceholderMsgId, text).catch(() => {});
+          // Send a brief reply notification — edits don't trigger Telegram notifications
+          await this.bridge.sendText("✅ Response complete", { chatId: this.currentChatId || undefined }).catch(() => {});
+          return;
+        }
         if (this.voiceReplyEnabled && this.voiceHandler) {
           try {
             await this.bridge.sendTyping();
@@ -552,6 +664,16 @@ export class UnifiedAdapterBot {
         }
         await this.sendChunked(text, replyToId);
       },
+      // Forward relay deltas to the bridge when it supports streaming (e.g. PWA)
+      sendDelta: streaming ? (delta) => {
+        this.bridge.sendText(delta, { chatId: this.currentChatId || undefined }).catch(console.error);
+      } : streamingEdit ? (delta) => {
+        // Accumulate and throttle-edit the placeholder message
+        editBuffer += delta;
+        if (!editTimer) {
+          editTimer = setTimeout(() => { editTimer = null; flushEdit(); }, EDIT_THROTTLE_MS);
+        }
+      } : undefined,
       sendTypingIfEnabled: async () => {
         if (this.config.notifications.showTyping) await this.bridge.sendTyping();
       },
@@ -562,6 +684,14 @@ export class UnifiedAdapterBot {
     if (msg) this.bridge.sendReaction(msg.id, "⏳", msg.chatId).catch(() => {});
     this.startTyping(msg?.chatId);
 
+    // Send a placeholder message for edit-based streaming
+    if (streamingEdit) {
+      try {
+        const placeholderId = await this.bridge.sendText("Thinking… ▍", { chatId: this.currentChatId || undefined });
+        if (placeholderId) editPlaceholderMsgId = placeholderId;
+      } catch { /* non-critical — will fall back to non-streaming */ }
+    }
+
     try {
       const result = await handleChat(
         content,
@@ -570,11 +700,12 @@ export class UnifiedAdapterBot {
         this.config.harnessTimeouts["relay"] ?? this.config.defaultTimeout,
         images,
       );
+      if (editTimer) { clearTimeout(editTimer); editTimer = null; }
       if (result && msg) this.bridge.sendReaction(msg.id, "✅", msg.chatId).catch(() => {});
       if (!result && msg) this.bridge.sendReaction(msg.id, "❌", msg.chatId).catch(() => {});
     } finally {
       this.stopTyping();
-      this.processing = false;
+      if (msg) this.processingChats.delete(msg.chatId);
     }
   }
 
@@ -694,9 +825,11 @@ export class UnifiedAdapterBot {
 
   // ─── Queue ────────────────────────────────────────────────────
 
-  private async processQueue(): Promise<void> {
-    while (this.messageQueue.length > 0) {
-      const queuedMsg = this.messageQueue.shift()!;
+  private async processQueue(chatId: string): Promise<void> {
+    const queue = this.messageQueueByChat.get(chatId);
+    if (!queue) return;
+    while (queue.length > 0) {
+      const queuedMsg = queue.shift()!;
       const content = queuedMsg.content.trim();
 
       if (queuedMsg.mediaType && queuedMsg.mediaType !== "audio") {
@@ -705,9 +838,10 @@ export class UnifiedAdapterBot {
       }
       if (!content) continue;
 
-      console.log(`[${this.label}] Processing queued message: "${content.substring(0, 40)}"`);
+      console.log(`[${this.label}] Processing queued message for ${chatId}: "${content.substring(0, 40)}"`);
       await this.routeText(content, queuedMsg);
     }
+    this.messageQueueByChat.delete(chatId);
   }
 
   // ─── Session flush (Touch Points — conversation-learner) ───────

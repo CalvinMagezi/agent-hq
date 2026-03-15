@@ -15,6 +15,23 @@ import { PlanKnowledgeEngine } from "../../packages/hq-tools/src/planKnowledge.j
 import { CodemapEngine } from "../../packages/hq-tools/src/codemap.js";
 import type { DaemonContext } from "./context.js";
 
+// ── Frontmatter helper ──────────────────────────────────────────────
+
+/**
+ * Update specific fields in a plan.md frontmatter without clobbering the body.
+ * Uses gray-matter's stringify so the body markdown is preserved exactly.
+ */
+function writePlanFrontmatter(planMd: string, updates: Record<string, any>): void {
+  try {
+    const raw = fs.readFileSync(planMd, "utf-8");
+    const file = matter(raw);
+    const newData = { ...file.data, ...updates, updatedAt: new Date().toISOString() };
+    fs.writeFileSync(planMd, matter.stringify(file.content, newData));
+  } catch (err) {
+    console.warn(`[writePlanFrontmatter] Failed to update ${planMd}:`, err);
+  }
+}
+
 // ── LLM wrapper matching vault-workers pattern ──────────────────────
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
@@ -99,37 +116,66 @@ export async function planStatusSync(ctx: DaemonContext): Promise<void> {
   if (!fs.existsSync(plansDir)) return;
 
   const db = openPlanDB(ctx.vaultPath);
-  const files = fs.readdirSync(plansDir).filter(f => f.endsWith(".md"));
+  const entries = fs.readdirSync(plansDir, { withFileTypes: true });
 
-  for (const f of files) {
+  for (const entry of entries) {
     try {
-      const raw = fs.readFileSync(path.join(plansDir, f), "utf-8");
-      const { data } = matter(raw);
-      if (!data.planId) continue;
+      let planMd: string;
+      let manifestPath: string | undefined;
 
-      // Sync frontmatter into DB
+      if (entry.isDirectory()) {
+        planMd = path.join(plansDir, entry.name, "plan.md");
+        manifestPath = path.join(plansDir, entry.name, "manifest.json");
+        if (!fs.existsSync(planMd)) continue;
+      } else if (entry.name.endsWith(".md")) {
+        planMd = path.join(plansDir, entry.name);
+      } else {
+        continue;
+      }
+
+      const raw = fs.readFileSync(planMd, "utf-8");
+      const { data } = matter(raw);
+      if (!data.planId || !/^plan-[a-zA-Z0-9_-]+$/.test(data.planId)) continue;
+
+      // Sync into DB
       upsertPlan(db, {
         id: data.planId,
         project: data.project || "default",
-        title: data.title || f.replace(".md", ""),
+        title: data.title || (entry.isDirectory() ? entry.name : entry.name.replace(".md", "")),
         status: data.status,
       });
 
-      // Check if the delegation job is done
+      // Check if delegation job is done
       const delegationJobId = `${data.planId}-delegation`;
       const doneJob = path.join(ctx.vaultPath, "_jobs", "done", `${delegationJobId}.md`);
       const failedJob = path.join(ctx.vaultPath, "_jobs", "failed", `${delegationJobId}.md`);
 
       if (fs.existsSync(doneJob) && data.status !== "completed") {
         upsertPlan(db, { id: data.planId, status: "completed", completed_at: new Date().toISOString() });
-        // Update the plan file frontmatter
-        const updated = matter.stringify(raw.replace(/^---[\s\S]*?---\n?/, ""), { ...data, status: "completed" });
-        fs.writeFileSync(path.join(plansDir, f), updated);
+        writePlanFrontmatter(planMd, { status: "completed", completedAt: new Date().toISOString() });
       } else if (fs.existsSync(failedJob) && data.status !== "failed") {
         upsertPlan(db, { id: data.planId, status: "failed" });
+        writePlanFrontmatter(planMd, { status: "failed" });
+      }
+
+      // Stale detection: "delegated" plans with no live job for >48h → abandon
+      const terminalStatuses = ["completed", "failed", "abandoned"];
+      if (!terminalStatuses.includes(data.status) && data.status === "delegated") {
+        const createdAt = data.createdAt ? new Date(data.createdAt).getTime() : 0;
+        const twoDaysAgo = Date.now() - 48 * 3600_000;
+        if (createdAt > 0 && createdAt < twoDaysAgo) {
+          const pendingJob = path.join(ctx.vaultPath, "_jobs", "pending", `${delegationJobId}.md`);
+          const runningJob = path.join(ctx.vaultPath, "_jobs", "running", `${delegationJobId}.md`);
+          const jobAlive = fs.existsSync(pendingJob) || fs.existsSync(runningJob);
+          if (!jobAlive) {
+            upsertPlan(db, { id: data.planId, status: "abandoned" });
+            writePlanFrontmatter(planMd, { status: "abandoned" });
+            console.log(`[planStatusSync] Marked stale plan as abandoned: ${data.planId}`);
+          }
+        }
       }
     } catch (err) {
-      console.warn(`[planStatusSync] Failed to sync ${f}:`, err);
+      console.warn(`[planStatusSync] Failed for ${entry.name}:`, err);
     }
   }
 }
@@ -195,13 +241,24 @@ export async function planArchival(ctx: DaemonContext): Promise<void> {
   if (fs.existsSync(activeDir)) {
     if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
 
-    const files = fs.readdirSync(activeDir).filter(f => f.endsWith(".md"));
+    const entries = fs.readdirSync(activeDir, { withFileTypes: true });
     const sevenDaysAgo = Date.now() - 7 * 86400_000;
 
-    for (const f of files) {
+    for (const entry of entries) {
       try {
-        const filePath = path.join(activeDir, f);
-        const raw = fs.readFileSync(filePath, "utf-8");
+        let planMd: string;
+        const entryPath = path.join(activeDir, entry.name);
+
+        if (entry.isDirectory()) {
+          planMd = path.join(entryPath, "plan.md");
+          if (!fs.existsSync(planMd)) continue;
+        } else if (entry.name.endsWith(".md")) {
+          planMd = entryPath;
+        } else {
+          continue;
+        }
+
+        const raw = fs.readFileSync(planMd, "utf-8");
         const { data } = matter(raw);
 
         const isTerminal = data.status === "completed" || data.status === "failed" || data.status === "abandoned";
@@ -209,11 +266,11 @@ export async function planArchival(ctx: DaemonContext): Promise<void> {
         const isOldEnough = completedAt > 0 && completedAt < sevenDaysAgo;
 
         if (isTerminal && isOldEnough) {
-          fs.renameSync(filePath, path.join(archiveDir, f));
-          console.log(`[planArchival] Archived ${f}`);
+          fs.renameSync(entryPath, path.join(archiveDir, entry.name));
+          console.log(`[planArchival] Archived ${entry.name}`);
         }
       } catch (err) {
-        console.warn(`[planArchival] Failed to archive ${f}:`, err);
+        console.warn(`[planArchival] Failed for ${entry.name}:`, err);
       }
     }
   }

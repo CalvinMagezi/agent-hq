@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { getPinnedNotes, getNoteTree, togglePinNote } from '~/server/notes'
 import type { NoteTreeNode, PinnedNote } from '~/server/notes'
 import { useHQStore } from '~/store/hqStore'
-import { ChatPanel } from '~/components/ChatPanel'
+// ChatPanel is now rendered globally in __root.tsx
 
 export const Route = createFileRoute('/vault')({
     component: VaultLayout,
@@ -88,42 +88,85 @@ function TreeNode({
     )
 }
 
-// ─── Pinned chip (horizontal) ────────────────────────────────────────────────
+// ─── Pinned card (full-width) ─────────────────────────────────────────────────
 
 export function PinnedCard({ note, isSelected, onClick, onUnpin }: { note: PinnedNote; isSelected: boolean; onClick?: () => void; onUnpin?: (path: string) => void }) {
+    const folder = note.path.includes('/') ? note.path.split('/').slice(0, -1).join('/') : null
+
     return (
-        <div className="relative group" style={{ width: '112px' }}>
+        <div className="relative group w-full">
             <Link
                 to="/vault/$"
                 params={{ _splat: note.path }}
                 onClick={onClick}
-                className="inline-flex flex-col gap-0.5 px-2.5 py-1.5 rounded-lg transition-colors w-full"
+                className="flex flex-col gap-1.5 px-3 py-2.5 rounded-xl transition-all w-full"
                 style={{
-                    background: isSelected ? 'rgba(255,179,0,0.12)' : 'var(--bg-elevated)',
-                    border: `1px solid ${isSelected ? 'rgba(255,179,0,0.35)' : 'var(--border)'}`,
+                    background: isSelected ? 'rgba(255,179,0,0.10)' : 'var(--bg-elevated)',
+                    border: `1px solid ${isSelected ? 'rgba(255,179,0,0.4)' : 'var(--border)'}`,
+                    boxShadow: isSelected ? '0 0 0 1px rgba(255,179,0,0.15)' : 'none',
                 }}
             >
-                <span
-                    className="text-[11px] font-mono font-bold leading-tight"
-                    style={{
-                        color: isSelected ? 'var(--accent-amber)' : 'var(--text-primary)',
-                        display: '-webkit-box',
-                        WebkitLineClamp: 2,
-                        WebkitBoxOrient: 'vertical',
-                        overflow: 'hidden',
-                    }}
-                >
-                    {note.title}
-                </span>
-                <span className="text-[9px] font-mono" style={{ color: 'var(--text-dim)' }}>
-                    {relTime(note.updatedAt)}
-                </span>
+                {/* Title row */}
+                <div className="flex items-start justify-between gap-2">
+                    <span
+                        className="text-[12px] font-mono font-bold leading-snug flex-1"
+                        style={{
+                            color: isSelected ? 'var(--accent-amber)' : 'var(--text-primary)',
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                        }}
+                    >
+                        {note.title}
+                    </span>
+                    <span className="text-[9px] font-mono shrink-0 mt-0.5" style={{ color: 'var(--text-dim)' }}>
+                        {relTime(note.updatedAt)}
+                    </span>
+                </div>
+
+                {/* Preview text */}
+                {note.preview && (
+                    <p
+                        className="text-[10px] leading-relaxed"
+                        style={{
+                            color: 'var(--text-secondary)',
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                        }}
+                    >
+                        {note.preview}
+                    </p>
+                )}
+
+                {/* Footer: folder path + tags */}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                    {folder && (
+                        <span
+                            className="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                            style={{ background: 'rgba(255,255,255,0.05)', color: 'var(--text-dim)' }}
+                        >
+                            {folder}
+                        </span>
+                    )}
+                    {note.tags?.slice(0, 3).map(tag => (
+                        <span
+                            key={tag}
+                            className="text-[9px] font-mono px-1.5 py-0.5 rounded"
+                            style={{ background: 'rgba(0,255,136,0.08)', color: 'var(--accent-green)' }}
+                        >
+                            #{tag}
+                        </span>
+                    ))}
+                </div>
             </Link>
             {onUnpin && (
                 <button
                     onClick={(e) => { e.stopPropagation(); onUnpin(note.path) }}
                     title="Unpin"
-                    className="absolute -top-1.5 -right-1.5 opacity-0 group-hover:opacity-100 transition-opacity w-4 h-4 flex items-center justify-center rounded-full text-[9px] font-bold"
+                    className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity w-5 h-5 flex items-center justify-center rounded-full text-[9px] font-bold"
                     style={{ background: 'var(--bg-surface)', color: 'var(--text-dim)', border: '1px solid var(--border)' }}
                 >
                     ✕
@@ -159,7 +202,7 @@ function VaultLayout() {
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
 
-    const { chatPanelOpen, setChatPanelOpen, pinnedNotes: pinned, setPinnedNotes, pinnedVersion, bumpPinnedVersion } = useHQStore()
+    const { pinnedNotes: pinned, setPinnedNotes, pinnedVersion, bumpPinnedVersion } = useHQStore()
 
     // Close sidebar on navigation (mobile)
     const closeSidebar = useCallback(() => {
@@ -271,7 +314,7 @@ function VaultLayout() {
                     <div className="text-[9px] font-mono tracking-widest uppercase mb-1.5 px-3 flex items-center gap-1.5" style={{ color: 'var(--accent-amber)' }}>
                         <span>📌</span> Pinned
                     </div>
-                    <div className="flex flex-wrap gap-2 px-3 pb-1">
+                    <div className="flex flex-col gap-1.5 px-3 pb-1">
                         {pinned.map((n) => (
                             <PinnedCard key={n.path} note={n} isSelected={activePath === n.path} onClick={closeSidebar} onUnpin={handleUnpin} />
                         ))}
@@ -329,13 +372,6 @@ function VaultLayout() {
                 <span className="text-xs font-mono truncate flex-1" style={{ color: 'var(--text-dim)', opacity: selectedFilename ? 1 : 0.4 }}>
                     {selectedFilename ?? 'Vault Home'}
                 </span>
-                <button
-                    onClick={() => setChatPanelOpen(!chatPanelOpen)}
-                    className="p-1.5 rounded text-xs font-mono flex-shrink-0"
-                    style={{ background: chatPanelOpen ? 'var(--accent-blue)' : 'var(--bg-elevated)', color: chatPanelOpen ? '#000' : 'var(--text-dim)', border: '1px solid var(--border)' }}
-                >
-                    💬
-                </button>
             </div>
 
             <div className="flex-1 flex min-h-0 relative">
@@ -365,32 +401,15 @@ function VaultLayout() {
 
                 {/* Content Outlet */}
                 <main
-                    className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 flex flex-col relative"
+                    className="flex-1 overflow-y-auto overflow-x-hidden min-w-0 flex flex-col relative pb-16 md:pb-0"
                     style={{ background: 'var(--bg-base)' }}
                 >
                     <Outlet />
 
-                    {/* FAB when chat panel is closed */}
-                    {!chatPanelOpen && (
-                        <button
-                            onClick={() => setChatPanelOpen(true)}
-                            className="fixed bottom-6 right-6 w-12 h-12 rounded-full flex items-center justify-center shadow-2xl transition-transform hover:scale-105 z-40 md:absolute"
-                            style={{ background: 'var(--accent-blue)', color: '#000' }}
-                        >
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-                        </button>
-                    )}
+
                 </main>
 
-                {/* Chat Panel — slides in from right */}
-                {chatPanelOpen && (
-                    <aside
-                        className="fixed md:relative inset-y-0 right-0 z-50 w-full md:w-[380px] lg:w-[400px] flex-shrink-0 border-l"
-                        style={{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }}
-                    >
-                        <ChatPanel onClose={() => setChatPanelOpen(false)} />
-                    </aside>
-                )}
+                {/* Chat Panel is now rendered globally in __root.tsx */}
             </div>
         </div>
     )

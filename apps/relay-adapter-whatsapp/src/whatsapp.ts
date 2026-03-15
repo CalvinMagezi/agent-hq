@@ -532,8 +532,8 @@ export class WhatsAppBridge implements PlatformBridge {
     }
   }
 
-  /** Edit a previously sent message. */
-  async editMessage(
+  /** Edit a previously sent message (Baileys-native, uses IMessageKey). */
+  async editMessageByKey(
     originalKey: proto.IMessageKey,
     newText: string,
   ): Promise<void> {

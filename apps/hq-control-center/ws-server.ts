@@ -135,11 +135,68 @@ function saveThread(thread: any) {
 const clients = new Set<ServerWebSocket<unknown>>()
 
 const vaultSync = new VaultSync({ vaultPath: VAULT_PATH, deviceId: 'hq-pwa-ws', debug: false })
-vaultSync.start().catch(console.error)
+
+// Retry VaultSync start — sync.db may be briefly locked by agent/daemon on startup
+async function startVaultSyncWithRetry(retries = 5, delayMs = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await vaultSync.start()
+      return
+    } catch (err: any) {
+      if (i < retries - 1 && (err?.code === 'SQLITE_BUSY' || err?.code === 'SQLITE_BUSY_RECOVERY')) {
+        console.warn(`[hq-ws] VaultSync SQLITE_BUSY, retrying in ${delayMs}ms... (${i + 1}/${retries})`)
+        await new Promise(r => setTimeout(r, delayMs))
+      } else {
+        console.error('[hq-ws] VaultSync failed to start, continuing without sync:', err?.message ?? err)
+        return // Non-fatal — WS server still works without VaultSync
+      }
+    }
+  }
+}
+startVaultSyncWithRetry().catch(console.error)
 
 // ─── Unified Bot Setup ───────────────────────────────────────────────
 
 const webBridge = new WebBridge(clients);
+
+// ─── Message persistence via WebBridge onDone hook ───────────────────────────
+// Track the user message for each active chat so we can persist user+assistant
+// messages to the thread file BEFORE broadcasting chat:done.
+// This ensures loadThread() succeeds when the client sends chat:load immediately after.
+
+const pendingUserMessages = new Map<string, string>()
+const pendingHarness = new Map<string, string>()
+
+webBridge.onDone((chatId: string, responseText: string) => {
+  const userMsg = pendingUserMessages.get(chatId)
+  pendingUserMessages.delete(chatId)
+  const userHarness = pendingHarness.get(chatId)
+  pendingHarness.delete(chatId)
+  if (!responseText) return
+
+  let thread = loadThread(chatId)
+  if (!thread) {
+    thread = {
+      threadId: chatId,
+      title: `Chat ${new Date().toLocaleDateString()}`,
+      harness: userHarness || 'auto',
+      messages: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCost: 0,
+    }
+  }
+  if (userHarness) thread.harness = userHarness // update thread with user's latest harness pick
+  if (userMsg) {
+    thread.messages.push({ role: 'user', content: userMsg, timestamp: new Date().toISOString() })
+  }
+  thread.messages.push({ role: 'assistant', content: responseText, timestamp: new Date().toISOString() })
+  thread.updatedAt = new Date().toISOString()
+  try { saveThread(thread) } catch (e) { console.error('[hq-ws] Failed to save thread:', e) }
+})
+
 const botConfig: UnifiedAdapterBotConfig = {
   bridge: webBridge,
   platformConfig: buildPlatformConfig("web", {
@@ -394,7 +451,14 @@ const server = Bun.serve({
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
           }
         } else if (msg.type === 'chat:send' || msg.type === 'chat:send-with-context') {
-          webBridge.handleIncoming(msg.threadId, msg.content).catch(e => 
+          if (!msg.threadId || !SAFE_THREAD_ID.test(msg.threadId)) return
+          // Track user message for persistence in the onDone handler
+          if (msg.threadId && msg.content) pendingUserMessages.set(msg.threadId, msg.content)
+          // Track user's harness selection for thread persistence
+          if (msg.threadId && msg.harness) pendingHarness.set(msg.threadId, msg.harness)
+          // Pass harness from PWA so the bot routes to the right CLI harness
+          const harnessOverride = msg.harness && msg.harness !== 'auto' ? msg.harness : undefined
+          webBridge.handleIncoming(msg.threadId, msg.content, 'web-user', harnessOverride).catch(e =>
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
           );
         }

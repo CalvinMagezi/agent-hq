@@ -14,8 +14,18 @@ export interface PlanPhase {
   title: string;
   harness: string;
   role: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
   output?: string;
+  notes?: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+}
+
+export interface AmbiguitySignal {
+  type: "missing_actor" | "undefined_scope" | "conflicting_requirements" |
+        "unreferenced_entity" | "vague_quantifier";
+  description: string;
+  excerpt: string;           // triggering text fragment
+  severity: "low" | "medium" | "high";
+  suggestedQuestion?: string;
 }
 
 export interface Plan {
@@ -31,6 +41,30 @@ export interface Plan {
   created_at: string;
   updated_at: string;
   completed_at?: string;
+  planning_mode: 'act' | 'sketch' | 'blueprint';
+  ambiguity_signals: AmbiguitySignal[];
+}
+
+export interface PlanAsset {
+  id: string;                // asset-{timestamp}-{hash6}
+  plan_id: string;
+  asset_type: "screenshot" | "diagram" | "scenario";
+  filename: string;          // relative path within plan folder (e.g. "assets/screenshots/desktop.png")
+  label: string;             // human-readable description
+  phase_id?: string;         // which phase this relates to
+  source_tool: string;       // tool that created it (e.g. "browser_screenshot", "create_diagram")
+  size_bytes: number;
+  created_at: string;
+}
+
+export interface PlanManifest {
+  planId: string;
+  version: number;
+  planningMode: "act" | "sketch" | "blueprint";
+  ambiguitySignals: AmbiguitySignal[];
+  assets: Omit<PlanAsset, "plan_id">[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PlanQuestion {
@@ -164,7 +198,24 @@ export function openPlanDB(vaultPath: string): Database {
       updated_at TEXT NOT NULL,
       UNIQUE(project, category, rule)
     );
+
+    CREATE TABLE IF NOT EXISTS plan_assets (
+      id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL,
+      asset_type TEXT NOT NULL,
+      filename TEXT NOT NULL,
+      label TEXT NOT NULL,
+      phase_id TEXT,
+      source_tool TEXT,
+      size_bytes INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(plan_id) REFERENCES plans(id) ON DELETE CASCADE
+    );
   `);
+
+  // Safe migrations
+  try { db.exec("ALTER TABLE plans ADD COLUMN planning_mode TEXT DEFAULT 'sketch'"); } catch { /* col exists */ }
+  try { db.exec("ALTER TABLE plans ADD COLUMN ambiguity_signals TEXT DEFAULT '[]'"); } catch { /* col exists */ }
 
   // FTS5 for search
   try {
@@ -215,10 +266,15 @@ export function upsertPlan(db: Database, plan: Partial<Plan> & { id: string }): 
   const now = new Date().toISOString();
 
   if (existing) {
+    const ALLOWED_COLUMNS = new Set([
+      "project", "title", "status", "created_by", "instruction",
+      "phases", "outcome", "files_touched", "completed_at",
+      "planning_mode", "ambiguity_signals",
+    ]);
     const updates: string[] = [];
     const values: any[] = [];
     for (const [key, val] of Object.entries(plan)) {
-      if (key === "id") continue;
+      if (key === "id" || !ALLOWED_COLUMNS.has(key)) continue;
       updates.push(`${key} = ?`);
       values.push(Array.isArray(val) ? JSON.stringify(val) : val);
     }
@@ -244,6 +300,48 @@ export function upsertPlan(db: Database, plan: Partial<Plan> & { id: string }): 
       now
     );
   }
+
+  // Handle new columns if provided
+  if (plan.planning_mode || plan.ambiguity_signals) {
+    const sets = [];
+    const vals = [];
+    if (plan.planning_mode) { sets.push("planning_mode = ?"); vals.push(plan.planning_mode); }
+    if (plan.ambiguity_signals) { sets.push("ambiguity_signals = ?"); vals.push(JSON.stringify(plan.ambiguity_signals)); }
+    vals.push(plan.id);
+    db.prepare(`UPDATE plans SET ${sets.join(", ")} WHERE id = ?`).run(...vals);
+  }
+}
+
+export function addPlanAsset(db: Database, asset: PlanAsset): string {
+  db.prepare(`
+    INSERT INTO plan_assets (id, plan_id, asset_type, filename, label, phase_id, source_tool, size_bytes, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    asset.id,
+    asset.plan_id,
+    asset.asset_type,
+    asset.filename,
+    asset.label,
+    asset.phase_id || null,
+    asset.source_tool,
+    asset.size_bytes,
+    asset.created_at
+  );
+  return asset.id;
+}
+
+export function getPlanAssets(db: Database, planId: string, type?: string): PlanAsset[] {
+  let sql = "SELECT * FROM plan_assets WHERE plan_id = ?";
+  const params: any[] = [planId];
+  if (type) {
+    sql += " AND asset_type = ?";
+    params.push(type);
+  }
+  return db.prepare(sql).all(...params) as PlanAsset[];
+}
+
+export function removePlanAsset(db: Database, assetId: string): void {
+  db.prepare("DELETE FROM plan_assets WHERE id = ?").run(assetId);
 }
 
 export function addQuestion(db: Database, q: Omit<PlanQuestion, "id" | "created_at">): number {
@@ -373,7 +471,8 @@ function parsePlanRow(r: any): Plan {
   return {
     ...r,
     phases: JSON.parse(r.phases || "[]"),
-    files_touched: JSON.parse(r.files_touched || "[]")
+    files_touched: JSON.parse(r.files_touched || "[]"),
+    ambiguity_signals: JSON.parse(r.ambiguity_signals || "[]")
   };
 }
 

@@ -168,7 +168,7 @@ class TelegramAdapterBot extends UnifiedAdapterBot {
           await this.tgBridge.sendText("No recent bot message to edit.");
           return;
         }
-        await this.tgBridge.editMessage(Number(lastId), argStr);
+        await this.tgBridge.editMessageById(Number(lastId), argStr);
         return;
       }
 
@@ -224,8 +224,14 @@ class TelegramAdapterBot extends UnifiedAdapterBot {
             encoding: "utf-8",
             env: { ...process.env, FORCE_COLOR: "0" },
           };
-          const safeArgs = argStr.replace(/[;&|`$(){}!\\]/g, "");
-          const output = execSync(`hq diagram ${safeArgs}`, opts) as string;
+          const diagramArgs = argStr.trim().split(/\s+/).filter(Boolean);
+          const { spawnSync } = await import("child_process");
+          const result = spawnSync("hq", ["diagram", ...diagramArgs], {
+            timeout: 30_000,
+            encoding: "utf-8",
+            env: { ...process.env, FORCE_COLOR: "0" },
+          });
+          const output = (result.stdout || "") as string;
           const fileMatch = output.match(/\[FILE:\s*([^\]|]+?)(?:\s*\|\s*([^\]]+?))?\s*\]/);
           if (fileMatch) {
             const filePath = fileMatch[1].trim();

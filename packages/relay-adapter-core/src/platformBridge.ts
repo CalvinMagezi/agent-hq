@@ -21,6 +21,8 @@ export interface PlatformCapabilities {
   supportsReactions: boolean;
   /** Platform supports token-level streaming (no need to buffer). */
   supportsStreaming: boolean;
+  /** Platform supports edit-based streaming (send placeholder, then edit with growing text). */
+  supportsStreamingEdit?: boolean;
   /** Platform supports voice note sending/receiving. */
   supportsVoice: boolean;
   /** Platform supports media uploads. */
@@ -66,6 +68,9 @@ export interface UnifiedMessage {
   // Reply context
   replyToId?: string;
   replyContent?: string;
+
+  /** Optional harness override — lets web/PWA clients pick the harness per-message. */
+  harnessOverride?: string;
 }
 
 // ─── Platform Actions ─────────────────────────────────────────────
@@ -115,4 +120,6 @@ export interface PlatformBridge {
   sendReaction(msgId: string, emoji: string, chatId?: string): Promise<void>;
   /** Send a binary file. */
   sendFile(buffer: Buffer, filename: string, caption?: string, chatId?: string): Promise<void>;
+  /** Edit an existing message (for streaming edits). Optional — only needed when supportsStreamingEdit is true. */
+  editMessage?(msgId: string, text: string, chatId?: string): Promise<void>;
 }

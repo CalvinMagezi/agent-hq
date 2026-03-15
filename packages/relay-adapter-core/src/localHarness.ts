@@ -4,12 +4,36 @@
  *
  * Sessions are persisted across restarts. Each harness type has its own
  * session entry so switching between them doesn't lose context.
+ *
+ * Orphan prevention: tracks spawned PIDs in a sidecar file and reaps them
+ * on startup (crash recovery). Kill uses process-tree walk to ensure all
+ * child processes (MCP servers, etc.) are cleaned up.
  */
 
 import { spawn } from "bun";
-import { readFileSync, writeFileSync } from "fs";
+import { execSync } from "child_process";
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from "fs";
+import { dirname, join } from "path";
 
 export type LocalHarnessType = "claude-code" | "opencode" | "gemini-cli" | "codex-cli";
+
+/** Resolve a CLI command to its full path for use in launchd/cron contexts where PATH is limited. */
+function resolveCommand(name: string): string {
+  try {
+    return execSync(`which ${name}`, { encoding: "utf8" }).trim() || name;
+  } catch {
+    // Common install locations as fallback
+    const knownPaths = [
+      `${process.env.HOME}/.local/bin/${name}`,
+      `/opt/homebrew/bin/${name}`,
+      `/usr/local/bin/${name}`,
+    ];
+    for (const p of knownPaths) {
+      if (existsSync(p)) return p;
+    }
+    return name;
+  }
+}
 
 interface SessionEntry {
   sessionId: string | null;
@@ -25,6 +49,30 @@ const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const TIMEOUT_MS = 60 * 60 * 1000; // 1 hour process timeout
 const MAX_AUTO_CONTINUES = 3; // Auto-continue up to 3 times when hitting turn limit
 
+// ─── Process tree helpers ────────────────────────────────────────────────────
+
+/** Kill a process and all its descendants (depth-first). */
+function killProcessTree(pid: number): void {
+  try {
+    // Find children first, then kill bottom-up
+    const childrenStr = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: "utf-8" }).trim();
+    for (const childPid of childrenStr.split("\n").filter(Boolean)) {
+      killProcessTree(parseInt(childPid, 10));
+    }
+  } catch { /* no children */ }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch { /* already dead */ }
+}
+
+/** Check if a PID is alive. */
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch { return false; }
+}
+
 export class LocalHarness {
   private sessions: Record<LocalHarnessType, SessionEntry> = {
     "claude-code": { ...BLANK_SESSION },
@@ -33,12 +81,33 @@ export class LocalHarness {
     "codex-cli": { ...BLANK_SESSION },
   };
   private stateFile: string;
-  private running = false;
-  private activeKill: (() => void) | null = null;
+  private pidFile: string; // tracks active child PID for orphan reaping
+  private runningHarnesses = new Set<LocalHarnessType>(); // tracks which harness types are currently running
+  private activeKills = new Map<LocalHarnessType, () => void>();
+  private activePids = new Map<LocalHarnessType, number>();
 
   constructor(stateFile: string) {
     this.stateFile = stateFile;
+    this.pidFile = join(dirname(stateFile), ".harness-active-pid");
     this.load();
+    this.reapOrphans();
+
+    // Best-effort cleanup on process exit (SIGTERM, SIGINT, uncaught exception)
+    const cleanup = () => this.dispose();
+    process.on("exit", cleanup);
+    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+    process.on("SIGINT", () => { cleanup(); process.exit(0); });
+  }
+
+  /** Clean up all active child processes. Call on graceful shutdown. */
+  dispose(): void {
+    for (const [harness, pid] of this.activePids) {
+      if (pidIsAlive(pid)) {
+        console.log(`[local-harness] Disposing ${harness} — killing process tree (PID ${pid})`);
+        killProcessTree(pid);
+      }
+    }
+    this.clearPidFile();
   }
 
   private load(): void {
@@ -65,12 +134,58 @@ export class LocalHarness {
     }
   }
 
-  isRunning(): boolean {
-    return this.running;
+  /** Reap orphaned child processes from a previous crash. */
+  private reapOrphans(): void {
+    try {
+      if (!existsSync(this.pidFile)) return;
+      const raw = readFileSync(this.pidFile, "utf8").trim();
+      const pid = parseInt(raw, 10);
+      if (isNaN(pid) || pid <= 0) return;
+      if (pidIsAlive(pid)) {
+        console.log(`[local-harness] Reaping orphaned process tree (PID ${pid})`);
+        killProcessTree(pid);
+      }
+    } catch { /* ignore */ }
+    this.clearPidFile();
   }
 
-  kill(): void {
-    this.activeKill?.();
+  /** Write the active child PID to disk for crash recovery. */
+  private writePidFile(pid: number): void {
+    try { writeFileSync(this.pidFile, String(pid), "utf8"); } catch { /* best effort */ }
+  }
+
+  /** Remove the PID file after normal completion. */
+  private clearPidFile(): void {
+    try { if (existsSync(this.pidFile)) unlinkSync(this.pidFile); } catch { /* ignore */ }
+  }
+
+  isRunning(harness?: LocalHarnessType): boolean {
+    if (harness) return this.runningHarnesses.has(harness);
+    return this.runningHarnesses.size > 0;
+  }
+
+  /** Kill a specific harness process (or all) and its entire process tree. */
+  kill(harness?: LocalHarnessType): void {
+    if (harness) {
+      const pid = this.activePids.get(harness);
+      if (pid && pidIsAlive(pid)) {
+        console.log(`[local-harness] Killing ${harness} process tree (PID ${pid})`);
+        killProcessTree(pid);
+      }
+      this.activeKills.get(harness)?.();
+      this.activePids.delete(harness);
+      this.activeKills.delete(harness);
+      this.runningHarnesses.delete(harness);
+    } else {
+      // Kill all
+      for (const [h, pid] of this.activePids) {
+        if (pidIsAlive(pid)) killProcessTree(pid);
+      }
+      this.activePids.clear();
+      this.activeKills.clear();
+      this.runningHarnesses.clear();
+    }
+    this.clearPidFile();
   }
 
   resetSession(harness: LocalHarnessType): void {
@@ -80,10 +195,10 @@ export class LocalHarness {
   }
 
   async run(harness: LocalHarnessType, prompt: string, onToken?: (token: string) => void): Promise<string> {
-    if (this.running) {
-      return "Still processing your previous message. Please wait, or type !reset to cancel.";
+    if (this.runningHarnesses.has(harness)) {
+      return `${harness} is still processing another message. Please wait, or type !reset to cancel.`;
     }
-    this.running = true;
+    this.runningHarnesses.add(harness);
     try {
       switch (harness) {
         case "claude-code": return await this.runClaude(prompt, onToken);
@@ -92,8 +207,10 @@ export class LocalHarness {
         case "codex-cli": return await this.runCodex(prompt, onToken);
       }
     } finally {
-      this.running = false;
-      this.activeKill = null;
+      this.runningHarnesses.delete(harness);
+      this.activeKills.delete(harness);
+      this.activePids.delete(harness);
+      this.clearPidFile();
     }
   }
 
@@ -155,7 +272,7 @@ export class LocalHarness {
     const hasLiveSession = session.sessionId && age < SESSION_TTL_MS;
 
     const cmd = [
-      "claude",
+      resolveCommand("claude"),
       "--dangerously-skip-permissions",
       "--output-format", "stream-json",
       "--verbose",
@@ -177,14 +294,19 @@ export class LocalHarness {
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        ...process.env,
-        // Prevent "cannot launch inside another Claude Code session" error
-        CLAUDECODE: undefined,
-        CLAUDE_CODE_ENTRYPOINT: undefined,
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([k]) =>
+            k !== "CLAUDECODE" &&
+            k !== "CLAUDE_CODE_ENTRYPOINT" &&
+            k !== "CLAUDE_CODE_SESSION_ACCESS_TOKEN"
+          ),
+        ),
         HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200",
       },
     });
-    this.activeKill = () => proc.kill();
+    this.writePidFile(proc.pid);
+    this.activePids.set("claude-code", proc.pid);
+    this.activeKills.set("claude-code", () => killProcessTree(proc.pid));
 
     let text = "";
     let newSessionId: string | null = null;
@@ -262,16 +384,16 @@ export class LocalHarness {
   }
 
   private async runOpenCode(prompt: string, onToken?: (token: string) => void): Promise<string> {
-    const cmd = ["opencode", "run", "-m", "anthropic/claude-sonnet-4-6", "-p", prompt];
-    const { stdout, stderr } = await this.exec(cmd);
+    const cmd = [resolveCommand("opencode"), "run", "-m", "anthropic/claude-sonnet-4-6", "-p", prompt];
+    const { stdout, stderr } = await this.exec(cmd, "opencode");
     const text = stdout.trim() || stderr.trim() || "No response from OpenCode.";
     if (onToken && text) onToken(text);
     return text;
   }
 
   private async runGemini(prompt: string, onToken?: (token: string) => void): Promise<string> {
-    const cmd = ["gemini", "--yolo", "-p", prompt];
-    const { stdout, stderr } = await this.exec(cmd);
+    const cmd = [resolveCommand("gemini"), "--yolo", "-p", prompt];
+    const { stdout, stderr } = await this.exec(cmd, "gemini-cli");
     const text = stdout.trim() || stderr.trim() || "No response from Gemini.";
     if (onToken && text) onToken(text);
     return text;
@@ -284,7 +406,7 @@ export class LocalHarness {
       : Infinity;
     const threadId = session.sessionId && age < SESSION_TTL_MS ? session.sessionId : null;
 
-    const cmd = ["codex", "exec"];
+    const cmd = [resolveCommand("codex"), "exec"];
     if (threadId) cmd.push("resume", threadId);
     cmd.push("--json", "--dangerously-bypass-approvals-and-sandbox", "-");
 
@@ -295,7 +417,9 @@ export class LocalHarness {
       stderr: "pipe",
       env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
     });
-    this.activeKill = () => proc.kill();
+    this.writePidFile(proc.pid);
+    this.activePids.set("codex-cli", proc.pid);
+    this.activeKills.set("codex-cli", () => killProcessTree(proc.pid));
 
     proc.stdin.write(prompt);
     proc.stdin.end();
@@ -352,7 +476,7 @@ export class LocalHarness {
     return text.trim() || "No response from Codex.";
   }
 
-  private exec(cmd: string[]): Promise<{ stdout: string; stderr: string }> {
+  private exec(cmd: string[], harnessType?: LocalHarnessType): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const proc = spawn({
         cmd,
@@ -362,10 +486,14 @@ export class LocalHarness {
         env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
       });
 
-      this.activeKill = () => proc.kill();
+      this.writePidFile(proc.pid);
+      if (harnessType) {
+        this.activePids.set(harnessType, proc.pid);
+        this.activeKills.set(harnessType, () => killProcessTree(proc.pid));
+      }
 
       const timer = setTimeout(() => {
-        proc.kill();
+        killProcessTree(proc.pid);
         reject(new Error(`Harness timed out after ${TIMEOUT_MS / 60000} minutes`));
       }, TIMEOUT_MS);
 

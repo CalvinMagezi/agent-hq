@@ -91,7 +91,7 @@ export function sh(cmd: string): string {
 
 export function isAlive(pid: string): boolean {
   if (!/^\d+$/.test(pid)) return false;
-  return sh(`kill -0 ${pid} 2>/dev/null; echo $?`) === "0";
+  try { process.kill(Number(pid), 0); return true; } catch { return false; }
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -149,6 +149,7 @@ export function pwaPid(): string | null { return daemonPid(PWA_DAEMON); }
 export function pwaWsPid(): string | null { return daemonPid(PWA_WS_DAEMON); }
 
 export function uptime(pid: string): string {
+  if (process.platform === "win32") return "?";
   return sh(`ps -o etime= -p ${pid} 2>/dev/null`).trim() || "?";
 }
 
@@ -191,6 +192,10 @@ export function serviceInfo(t: ServiceTarget) {
 }
 
 export function killProcessTree(pid: string, label: string): number {
+  if (process.platform === "win32") {
+    // Windows: just kill the process directly — no pgrep available
+    try { process.kill(Number(pid), "SIGTERM"); info(`Killed ${label} (PID ${pid})`); return 1; } catch { return 0; }
+  }
   let killed = 0;
   const children = sh(`pgrep -P ${pid} 2>/dev/null`).split("\n").filter(Boolean);
   for (const child of children) {
@@ -205,6 +210,7 @@ export function killProcessTree(pid: string, label: string): number {
 }
 
 export function findAllInstances(target: ServiceTarget): string[] {
+  if (process.platform === "win32") return []; // pgrep/lsof not available on Windows
   const svc = serviceInfo(target);
   const pids = new Set<string>();
 
@@ -229,7 +235,7 @@ export async function killAllInstances(target: ServiceTarget): Promise<number> {
   const svc = serviceInfo(target);
   let killed = 0;
 
-  sh(`launchctl stop "${svc.daemon}" 2>/dev/null`);
+  if (process.platform === "darwin") sh(`launchctl stop "${svc.daemon}" 2>/dev/null`);
 
   const primaryPid = svc.pid();
   if (primaryPid) {
@@ -244,9 +250,11 @@ export async function killAllInstances(target: ServiceTarget): Promise<number> {
     }
   }
 
-  const entryPattern = target === "relay-server" ? `${svc.dir}/src/index.ts` : `${svc.dir}/index.ts`;
-  sh(`pkill -9 -f "bun.*${entryPattern}" 2>/dev/null`);
-  sh(`pkill -9 -f "node.*${entryPattern}" 2>/dev/null`);
+  if (process.platform !== "win32") {
+    const entryPattern = target === "relay-server" ? `${svc.dir}/src/index.ts` : `${svc.dir}/index.ts`;
+    sh(`pkill -9 -f "bun.*${entryPattern}" 2>/dev/null`);
+    sh(`pkill -9 -f "node.*${entryPattern}" 2>/dev/null`);
+  }
 
   return killed;
 }
@@ -271,6 +279,10 @@ export function readLine(prompt: string, defaultValue?: string): string {
 
 /** Check if a TCP port is in use. */
 export function isPortInUse(port: number): boolean {
+  if (process.platform === "win32") {
+    // netstat works on Windows
+    return execSync(`netstat -ano 2>nul`, { encoding: "utf-8" }).includes(`:${port} `);
+  }
   try {
     execSync(`lsof -i :${port} -sTCP:LISTEN -t 2>/dev/null`, { encoding: "utf-8" });
     return true;

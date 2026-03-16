@@ -16,6 +16,7 @@
 
 import * as path from "path";
 import * as fs from "fs";
+import * as os from "os";
 import { spawn } from "child_process";
 import { VaultClient } from "@repo/vault-client";
 import { SyncedVaultClient } from "@repo/vault-sync";
@@ -239,10 +240,7 @@ async function writeCronSchedule(): Promise<void> {
   ];
 
   // ── Claude Code scheduled tasks — load from SKILL.md files ──
-  const claudeTasksDir = path.join(
-    process.env.HOME ?? "/Users/" + (process.env.USER ?? ""),
-    ".claude/scheduled-tasks"
-  );
+  const claudeTasksDir = path.join(os.homedir(), ".claude/scheduled-tasks");
   const claudeRows: { schedule: string; task: string; model: string; description: string; status: string }[] = [];
   if (fs.existsSync(claudeTasksDir)) {
     for (const entry of fs.readdirSync(claudeTasksDir, { withFileTypes: true })) {
@@ -352,7 +350,7 @@ async function writeDaemonStatus(): Promise<void> {
     lines.push("## Claude Code Scheduled Tasks");
     lines.push("");
     const scheduledLogPath = path.join(VAULT_PATH, "_logs/scheduled-tasks.log");
-    const claudeTasksDir2 = path.join(process.env.HOME ?? "", ".claude/scheduled-tasks");
+    const claudeTasksDir2 = path.join(os.homedir(), ".claude/scheduled-tasks");
     const claudeTaskNames: string[] = [];
     if (fs.existsSync(claudeTasksDir2)) {
       for (const entry of fs.readdirSync(claudeTasksDir2, { withFileTypes: true })) {
@@ -539,10 +537,7 @@ async function promoteDelegationReady(): Promise<void> {
 
 // ─── Claude Code Scheduled Tasks ─────────────────────────────────────
 
-const CLAUDE_SCHEDULED_TASKS_DIR = path.join(
-  process.env.HOME ?? "/Users/" + (process.env.USER ?? ""),
-  ".claude/scheduled-tasks"
-);
+const CLAUDE_SCHEDULED_TASKS_DIR = path.join(os.homedir(), ".claude/scheduled-tasks");
 
 interface ClaudeScheduledTask {
   name: string;
@@ -911,7 +906,7 @@ const tasks: {
           // Lazy import to avoid loading hq-tools at startup
           const { scheduledOptimizationCycle } = await import("../packages/hq-tools/src/teamOptimizer.js");
           const { initPerformanceTracker } = await import("../packages/hq-tools/src/performanceTracker.js");
-          const teamsDir = path.resolve(VAULT_PATH, "..", "Documents/GitHub/agent-hq/packages/hq-tools/teams");
+          const teamsDir = path.resolve(import.meta.dir, "../packages/hq-tools/teams");
           initPerformanceTracker(VAULT_PATH);
           await scheduledOptimizationCycle(teamsDir);
           console.log("[team-optimizer] Weekly optimization cycle complete — pending-optimizations written if data available");

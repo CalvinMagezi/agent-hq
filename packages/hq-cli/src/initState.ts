@@ -6,7 +6,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
+import { getPlatform } from "./platform.js";
 
 export type InitStep =
   | "preflight"
@@ -32,7 +32,7 @@ const STATE_VERSION = "1.0.0";
 
 /** Canonical state file path — outside repo so it survives git clean */
 function resolveStatePath(repoRoot: string): string {
-  const configDir = path.join(os.homedir(), ".config", "agent-hq");
+  const configDir = getPlatform().configDir;
   fs.mkdirSync(configDir, { recursive: true });
   // Migrate from old repo-root location if it exists
   const legacyPath = path.join(repoRoot, ".hq-init-state.json");

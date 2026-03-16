@@ -150,7 +150,7 @@ async function cmdStop(target?: string): Promise<void> {
     const svc = serviceInfo(t);
 
     // On Linux, also clean up the PID file written by cmdStart
-    if (process.platform !== "darwin") {
+    if (process.platform === "linux") {
       const pidFile = path.join(PID_DIR, `${svc.daemon}.pid`);
       if (fs.existsSync(pidFile)) fs.rmSync(pidFile);
       sh(`systemctl --user stop agent-hq-${t}.service 2>/dev/null`);
@@ -315,7 +315,7 @@ async function cmdHealth(): Promise<void> {
   section("CLI Tools");
   const claudeV = sh("claude --version 2>/dev/null");
   const geminiV = sh("gemini --version 2>/dev/null");
-  const ocV = sh("opencode --version 2>/dev/null | head -1");
+  const ocV = sh("opencode --version 2>/dev/null").split("\n")[0];
   const bunV = sh("bun --version 2>/dev/null");
 
   claudeV ? ok(`Claude CLI: ${claudeV}`) : fail("Claude CLI: not found");
@@ -348,7 +348,7 @@ async function cmdHealth(): Promise<void> {
 // hq install [agent|relay|all]
 async function cmdInstall(target?: string): Promise<void> {
   // ── Linux: generate systemd unit files ─────────────────────────────────────
-  if (process.platform !== "darwin") {
+  if (process.platform === "linux") {
     const systemdDir = path.join(os.homedir(), ".config", "systemd", "user");
     fs.mkdirSync(systemdDir, { recursive: true });
 
@@ -406,14 +406,29 @@ async function cmdInstall(target?: string): Promise<void> {
 async function cmdUninstall(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
     const svc = serviceInfo(t);
-    const plistDst = path.join(LAUNCH_AGENTS, `${svc.daemon}.plist`);
 
-    sh(`launchctl unload "${plistDst}" 2>/dev/null`);
-    if (fs.existsSync(plistDst)) {
-      fs.rmSync(plistDst);
-      ok(`${svc.label} daemon uninstalled`);
+    if (process.platform === "darwin") {
+      const plistDst = path.join(LAUNCH_AGENTS, `${svc.daemon}.plist`);
+      sh(`launchctl unload "${plistDst}" 2>/dev/null`);
+      if (fs.existsSync(plistDst)) {
+        fs.rmSync(plistDst);
+        ok(`${svc.label} daemon uninstalled`);
+      } else {
+        warn(`${svc.label} daemon was not installed`);
+      }
+    } else if (process.platform === "linux") {
+      const unitName = `agent-hq-${t}.service`;
+      sh(`systemctl --user disable --now ${unitName} 2>/dev/null`);
+      const unitPath = path.join(os.homedir(), ".config", "systemd", "user", unitName);
+      if (fs.existsSync(unitPath)) {
+        fs.rmSync(unitPath);
+        sh("systemctl --user daemon-reload 2>/dev/null");
+        ok(`${svc.label} systemd unit uninstalled`);
+      } else {
+        warn(`${svc.label} systemd unit was not installed`);
+      }
     } else {
-      warn(`${svc.label} daemon was not installed`);
+      warn(`Uninstall not supported on ${process.platform} — stop the process manually`);
     }
   }
 }
@@ -500,8 +515,9 @@ async function cmdFg(target = "agent"): Promise<void> {
   const label = isAgent ? "HQ Agent" : "Relay";
   const pid = isAgent ? agentPid() : relayPid();
 
-  sh(`launchctl stop "${daemon}" 2>/dev/null`);
-  if (pid) sh(`kill ${pid} 2>/dev/null`);
+  if (process.platform === "darwin") sh(`launchctl stop "${daemon}" 2>/dev/null`);
+  if (process.platform === "linux") sh(`systemctl --user stop agent-hq-${target}.service 2>/dev/null`);
+  if (pid) { try { process.kill(Number(pid), "SIGTERM"); } catch { /* already dead */ } }
   await sleep(1000);
 
   console.log(`Starting ${label} in foreground (Ctrl+C to stop)...`);
@@ -864,11 +880,14 @@ async function cmdDiagram(sub?: string, ...rest: string[]): Promise<void> {
   try {
     drawitBin = execSync("which drawit", { encoding: "utf-8" }).trim();
   } catch {
-    drawitBin = "/opt/homebrew/bin/drawit";
-    if (!fs.existsSync(drawitBin)) {
+    // Try common fallback locations before giving up
+    const fallbacks = ["/opt/homebrew/bin/drawit", "/usr/local/bin/drawit"];
+    const found = fallbacks.find(p => fs.existsSync(p));
+    if (!found) {
       fail("DrawIt CLI not found. Install: npm i -g @chamuka-labs/drawit-cli");
       return;
     }
+    drawitBin = found;
   }
 
   function runDrawIt(args: string[]): string {
@@ -1181,7 +1200,10 @@ async function cmdTools(nonInteractive = false): Promise<void> {
     const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
     let settings: Record<string, unknown> = {};
     if (fs.existsSync(settingsFile)) {
-      try { settings = JSON.parse(fs.readFileSync(settingsFile, "utf-8")); } catch { }
+      try { settings = JSON.parse(fs.readFileSync(settingsFile, "utf-8")); } catch (e) {
+        warn(`Could not parse ${settingsFile}: ${e} — skipping Gemini MCP config update`);
+        return;
+      }
     }
     const mcpServers = (settings.mcpServers as Record<string, unknown> ?? {});
     
@@ -1209,12 +1231,12 @@ async function cmdTools(nonInteractive = false): Promise<void> {
 
   // ── 3. OpenCode ──────────────────────────────────────────────────────────
   section("OpenCode");
-  let ocV = sh("opencode --version 2>/dev/null | head -1");
+  let ocV = sh("opencode --version 2>/dev/null").split("\n")[0];
   if (!ocV) {
     warn("OpenCode not found (optional)");
     if (!nonInteractive && confirmInstall("Install OpenCode? (npm install -g opencode)")) {
       spawnSync("npm", ["install", "-g", "opencode"], { stdio: "inherit" });
-      ocV = sh("opencode --version 2>/dev/null | head -1");
+      ocV = sh("opencode --version 2>/dev/null").split("\n")[0];
       ocV ? ok(`OpenCode installed: ${ocV}`) : warn("Install may have failed — check: https://opencode.ai");
     } else {
       info("Skipped (optional). Install with: npm install -g opencode");
@@ -1785,9 +1807,16 @@ async function cmdUpdate(argv: string[]): Promise<void> {
   info(`Location:   ${REPO_ROOT}`);
 
   // ── 1. Fetch latest commit info from GitHub (no npm lag) ──────────────────
+  if (!sh("git --version 2>/dev/null")) {
+    fail("git is not installed — cannot check for updates");
+    process.exit(1);
+  }
   info("Checking for updates...");
-  const remoteCommit = sh(`git ls-remote https://github.com/CalvinMagezi/agent-hq.git HEAD 2>/dev/null`)
-    .split(/\s+/)[0]?.slice(0, 7) ?? "";
+  const remoteCommit = (() => {
+    try {
+      return execSync(`git ls-remote https://github.com/CalvinMagezi/agent-hq.git HEAD 2>/dev/null`, { encoding: "utf-8", timeout: 10000 }).split(/\s+/)[0]?.slice(0, 7) ?? "";
+    } catch { return ""; }
+  })();
   const remoteVersion = sh(`git show origin/main:package.json 2>/dev/null | grep '"version"' | head -1`)
     .match(/"version":\s*"([^"]+)"/)?.[1]
     ?? sh(`npm view @calvin.magezi/agent-hq version 2>/dev/null`);
@@ -1833,7 +1862,11 @@ async function cmdUpdate(argv: string[]): Promise<void> {
     if (dirty) {
       if (force) {
         info("Local changes detected — stashing before update...");
-        sh("git stash push -m 'hq update auto-stash' 2>/dev/null");
+        const stashResult = spawnSync("git", ["stash", "push", "-m", "hq update auto-stash"], { cwd: REPO_ROOT, stdio: "pipe" });
+        if (stashResult.status !== 0) {
+          fail(`Could not stash local changes:\n${stashResult.stderr?.toString()}`);
+          process.exit(1);
+        }
       } else {
         fail("Local changes detected. Use --force to stash and proceed, or commit/discard changes first.");
         process.exit(1);
@@ -1882,7 +1915,7 @@ async function cmdUpdate(argv: string[]): Promise<void> {
   }
 
   // Re-install systemd units on Linux (unit file content may have changed)
-  if (process.platform !== "darwin" && fs.existsSync(path.join(os.homedir(), ".config", "systemd", "user"))) {
+  if (process.platform === "linux" && fs.existsSync(path.join(os.homedir(), ".config", "systemd", "user"))) {
     await cmdInstall("agent");
     info("systemd units refreshed");
   }

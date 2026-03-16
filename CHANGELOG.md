@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-03-16
+
+### Fixed
+- **Cross-platform hardening (Windows/Linux guards)**: Comprehensive audit and fix of all platform-specific assumptions.
+  - `isAlive()` replaced `kill -0` shell command with `process.kill(pid, 0)` — now works correctly on Windows and any POSIX platform without a shell in PATH.
+  - All `process.platform !== "darwin"` guards tightened to `=== "linux"`, preventing `systemctl` and systemd commands from running on Windows.
+  - `killAllInstances()`: `launchctl stop` now darwin-only; `pkill` calls guarded against `win32`.
+  - `findAllInstances()` / `killProcessTree()`: Unix process utilities (`pgrep`, `lsof`, `ps`) guarded with `win32` early-return.
+  - `isPortInUse()`: Windows branch added using `netstat -ano`; `uptime()` early-returns `"?"` on Windows.
+  - `cmdFg()`: `launchctl stop` guarded to darwin; Linux branch added using `systemctl --user stop`.
+  - `cmdUninstall()`: Full Linux systemd uninstall path added (was macOS-only).
+  - Post-update systemd reinstall guard changed to `=== "linux"`.
+- **Gemini settings corruption**: Silent `catch {}` on `JSON.parse` of `~/.gemini/settings.json` now aborts with a warning instead of overwriting the file with an empty object.
+- **`hq update` robustness**:
+  - Explicit `git` not-installed check before version fetch (previously showed misleading "could not reach GitHub" error).
+  - `git ls-remote` now has a 10-second timeout (was unbounded, could block 30s on slow connections).
+  - `git stash push` failure is now fatal before `git reset --hard` — prevents silent data loss.
+- **`opencode --version` pipe**: Removed `| head -1` shell pipe (broken on Windows `cmd.exe`); replaced with JS `.split("\n")[0]`.
+- **`drawit` binary fallback**: Now checks `/usr/local/bin/drawit` before failing (previously only checked `/opt/homebrew/bin/drawit`).
+- **Daemon hardcoded paths**:
+  - Three `process.env.HOME ?? "/Users/" + process.env.USER` patterns replaced with `os.homedir()`.
+  - `teamsDir` for team-optimizer now resolved via `import.meta.dir` instead of `VAULT_PATH/../Documents/GitHub/...` (personal machine path).
+- **`initState.ts`**: Config directory now uses `getPlatform().configDir` — resolves to `%AppData%\agent-hq` on Windows, `~/Library/Application Support/agent-hq` on macOS, `~/.config/agent-hq` on Linux.
+
+## [0.6.9] - 2026-03-16
+
+### Added
+- **`hq update` command** (full rewrite): Robust update flow replacing the previous stub.
+  - Version check via `git ls-remote` (no npm registry lag).
+  - Displays changelog (commits between current and `origin/main`) before applying.
+  - Stops running services → optional stash → `git fetch` + `git reset --hard origin/main` → `bun install` → post-update migration → restarts services.
+  - `--check` flag: non-destructive version check only.
+  - `--force` flag: auto-stashes local changes before reset.
+  - Refreshes systemd units on Linux after update.
+  - Re-installs CLI symlink if it changed.
+
+## [0.6.8] - 2026-03-16
+
+### Added
+- **`--skip-ollama` flag** for `hq init`: Skips Ollama installation step (for VPS/cloud environments).
+- **`--skip-tools` flag** for `hq init`: Skips CLI tool installation (Claude Code, Gemini CLI, OpenCode).
+- **`--profile vps` preset** for `hq init`: Combines `--non-interactive --skip-ollama --skip-tools` for headless server setup.
+- **`hq doctor` vault path check**: Detects if `VAULT_PATH` contains a different username than the current user (catches copy-paste path errors from other machines).
+- **`engines` field in `hq-cli/package.json`**: `bun >= 1.1.0` constraint added.
+- **`version:sync` script** in root `package.json`: Keeps `hq-cli` version in lockstep with monorepo version.
+
+### Fixed
+- **`InitStateManager` path**: Init state file moved from repo root (`.hq-init-state.json`) to `~/.config/agent-hq/init-state.json` with automatic migration of existing files. Survives `git clean`.
+- **`HQ_BROWSER_ENABLED`**: Changed from opt-out (`!== "false"`) to opt-in (`=== "true"`) — browser automation no longer starts by default on headless servers.
+- **Ollama**: No longer blocks `hq init` if not installed — gracefully skipped with a note.
+- **Dynamic binary resolution** in `morning-brief-audio.ts`: `python3`, `ffmpeg`, `gws` now resolved via `resolveBin()` walking `$PATH`; overridable via `PYTHON_BIN`, `FFMPEG_BIN`, `GWS_BIN` env vars.
+- **Hardcoded personal paths** in `train.sh` and `convert.sh`: `~/.sblu-env` now uses `$HOME` instead of `/Users/calvinmagezi/`.
+
+### Changed
+- **`hq init` non-interactive**: Skips Google Workspace OAuth prompt (can be configured manually later).
+- **Linux service management** (`hq start`): Detached spawn with PID file writing for `agent`, `relay`, `telegram`, `whatsapp`, `relay-server` targets.
+- **`hq install` on Linux**: Generates systemd user unit files at `~/.config/systemd/user/` and enables them.
+- **Log/PID paths**: Platform-conditional — `~/Library/Logs/` (macOS), `~/.local/share/agent-hq/{logs,pids}/` (Linux).
+
+## [0.6.7] - 2026-03-15
+
+### Added
+- **SSE streaming** for HQ Control Center PWA chat: Real-time token-by-token streaming via Server-Sent Events.
+- **Harness status indicator**: PWA shows which harness is active and its current state.
+- **Morning brief audio** (`scripts/morning-brief-audio.ts`): Generates local audio digest via Kokoro TTS.
+
+### Fixed
+- **VPS/Linux compatibility**: Initial pass at cross-platform setup — replaced macOS-only log paths, added Linux detection in `hq start`.
+- **`.gitignore` hardening**: Added `.discord-harness-sessions.json`, `.web-harness-sessions.json`, `.harness-active-pid`, and screenshot artifacts.
+
+## [0.6.5] - 2026-03-13
+
+### Added
+- **Cross-Agent Planning System** (`@repo/hq-tools/planDB`): SQLite-backed plan tracking with FTS5 search, knowledge extraction, and `plan-sync` daemon task.
+- **`hq plans`** CLI command: List, view, and manage agent plans from the terminal.
+- **PWA Plans UI**: View active and completed plans in the HQ Control Center.
+
+### Fixed
+- Marketplace display bug in PWA (verified with screenshots).
+
 ## [0.6.4] - 2026-03-13
 
 ### Added

@@ -191,6 +191,64 @@ hq doctor          # verify everything works
 hq                 # start chatting
 ```
 
+### VPS / Headless Server
+
+Agent-HQ runs on any Linux VPS. Only one API key is required to get started.
+
+```bash
+# 1. Install Bun
+curl -fsSL https://bun.sh/install | bash
+source ~/.bashrc
+
+# 2. Clone and install
+git clone https://github.com/CalvinMagezi/agent-hq.git ~/agent-hq
+cd ~/agent-hq && bun install
+
+# 3. Run headless setup (skips Ollama, CLI tools, browser, OAuth)
+OPENROUTER_API_KEY=sk-or-... \
+  hq init --profile vps
+
+# 4. Set your bot token for whichever channel you want
+echo "TELEGRAM_BOT_TOKEN=..." >> apps/relay-adapter-telegram/.env.local
+echo "TELEGRAM_USER_ID=..."   >> apps/relay-adapter-telegram/.env.local
+
+# 5. Verify
+hq doctor
+
+# 6. Install as persistent background services (systemd)
+hq install agent telegram
+
+# 7. Check everything is running
+hq health
+```
+
+**`--profile vps`** is equivalent to `--non-interactive --skip-ollama --skip-tools`. It:
+- Skips Ollama (no local LLM — all inference goes through OpenRouter)
+- Skips Claude Code / Gemini CLI / OpenCode installation
+- Skips Google Workspace OAuth
+- Uses file-based PID tracking and systemd units (no launchd)
+
+**Keeping it up to date:**
+```bash
+hq update          # pulls latest, reinstalls deps, refreshes systemd units
+hq update --check  # non-destructive version check only
+```
+
+**Running in foreground** (useful for first-time debugging):
+```bash
+hq fg agent        # foreground agent (Ctrl+C to stop)
+hq tg              # foreground Telegram relay
+```
+
+**Logs:**
+```bash
+hq logs agent 50        # last 50 lines
+hq follow               # live-tail all logs
+journalctl --user -u agent-hq-agent.service -f   # systemd journal
+```
+
+> **Windows**: The CLI degrades gracefully on Windows (no crashes) but background service management (`hq install`, `hq start`) is not yet implemented. Use `hq fg agent` to run in the foreground, or use WSL.
+
 ---
 
 ## Prerequisites

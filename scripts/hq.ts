@@ -1770,60 +1770,139 @@ async function cmdDaemon(sub?: string, arg?: string): Promise<void> {
   info("Usage: hq daemon [start|stop|status|logs [N]]");
 }
 
-// hq update [--check]
+// hq update [--check] [--force]
 async function cmdUpdate(argv: string[]): Promise<void> {
   const checkOnly = argv.includes("--check");
+  const force     = argv.includes("--force");
+
   const pkgPath = path.join(REPO_ROOT, "package.json");
   const currentVersion: string = JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version ?? "unknown";
+  const currentCommit = sh("git rev-parse --short HEAD 2>/dev/null") || "unknown";
+  const isGitRepo = fs.existsSync(path.join(REPO_ROOT, ".git"));
 
-  info(`Current version: ${currentVersion}`);
+  console.log(`\n${c.bold}━━━ Agent HQ — Update ━━━${c.reset}\n`);
+  info(`Installed:  v${currentVersion} (${currentCommit})`);
+  info(`Location:   ${REPO_ROOT}`);
+
+  // ── 1. Fetch latest commit info from GitHub (no npm lag) ──────────────────
   info("Checking for updates...");
+  const remoteCommit = sh(`git ls-remote https://github.com/CalvinMagezi/agent-hq.git HEAD 2>/dev/null`)
+    .split(/\s+/)[0]?.slice(0, 7) ?? "";
+  const remoteVersion = sh(`git show origin/main:package.json 2>/dev/null | grep '"version"' | head -1`)
+    .match(/"version":\s*"([^"]+)"/)?.[1]
+    ?? sh(`npm view @calvin.magezi/agent-hq version 2>/dev/null`);
 
-  const latest = sh(`npm view @calvin.magezi/agent-hq version 2>/dev/null`);
-  if (!latest) {
-    warn("Could not reach npm registry. Check your internet connection.");
+  if (!remoteCommit && !remoteVersion) {
+    warn("Could not reach GitHub. Check your internet connection.");
+    if (!force) return;
+  }
+
+  const alreadyCurrent = isGitRepo
+    ? sh("git rev-parse HEAD 2>/dev/null")?.startsWith(remoteCommit ?? "___")
+    : currentVersion === remoteVersion;
+
+  if (alreadyCurrent && !force) {
+    ok(`Already up to date — v${currentVersion} (${currentCommit})`);
     return;
   }
 
-  if (latest === currentVersion) {
-    ok(`Already up to date (${currentVersion})`);
-    return;
+  if (remoteVersion && remoteVersion !== currentVersion) {
+    console.log(`  ${c.cyan}↑${c.reset}  v${currentVersion} → ${c.bold}v${remoteVersion}${c.reset}`);
+  } else if (remoteCommit && remoteCommit !== currentCommit) {
+    console.log(`  ${c.cyan}↑${c.reset}  ${currentCommit} → ${c.bold}${remoteCommit}${c.reset} (new commits)`);
   }
-
-  console.log(`  ${c.cyan}↑${c.reset}  ${currentVersion} → ${c.bold}${latest}${c.reset} available`);
 
   if (checkOnly) {
     info(`Run ${c.bold}hq update${c.reset} to apply.`);
     return;
   }
 
-  // Pull latest from git
-  info("Pulling latest changes...");
-  const pull = spawnSync("git", ["pull", "--ff-only"], { cwd: REPO_ROOT, stdio: "inherit" });
-  if (pull.status !== 0) {
-    fail("git pull failed — you may have local changes. Stash them and retry.");
+  // ── 2. Stop running services before updating ──────────────────────────────
+  const wasRunning = { agent: !!agentPid(), relay: !!relayPid() };
+  if (wasRunning.agent || wasRunning.relay) {
+    section("Stopping services");
+    await cmdStop("all");
+    await sleep(1000);
+  }
+
+  // ── 3. Pull latest (git or fresh clone fallback) ──────────────────────────
+  section("Pulling latest");
+  if (isGitRepo) {
+    // Stash any local changes so pull never fails
+    const dirty = sh("git status --porcelain 2>/dev/null");
+    if (dirty) {
+      if (force) {
+        info("Local changes detected — stashing before update...");
+        sh("git stash push -m 'hq update auto-stash' 2>/dev/null");
+      } else {
+        fail("Local changes detected. Use --force to stash and proceed, or commit/discard changes first.");
+        process.exit(1);
+      }
+    }
+
+    // Show what's coming
+    sh("git fetch origin main --quiet 2>/dev/null");
+    const changelog = sh("git log HEAD..origin/main --oneline 2>/dev/null");
+    if (changelog) {
+      console.log(`\n${c.dim}Changes:${c.reset}`);
+      for (const line of changelog.split("\n").slice(0, 10)) {
+        console.log(`  ${c.gray}${line}${c.reset}`);
+      }
+      console.log();
+    }
+
+    const reset = spawnSync("git", ["reset", "--hard", "origin/main"], { cwd: REPO_ROOT, stdio: "pipe" });
+    if (reset.status !== 0) {
+      fail(`git reset failed:\n${reset.stderr?.toString()}`);
+      process.exit(1);
+    }
+    ok("Repository updated");
+  } else {
+    // Installed without git (unlikely but possible) — re-clone into tmp then swap
+    fail("This installation has no .git directory. Re-install with: bunx @calvin.magezi/agent-hq init --reset");
     process.exit(1);
   }
 
-  // Re-install packages
-  info("Updating packages...");
+  // ── 4. Re-install packages ────────────────────────────────────────────────
+  section("Installing packages");
   const install = spawnSync(process.execPath, ["install"], { cwd: REPO_ROOT, stdio: "inherit" });
   if (install.status !== 0) {
-    fail("bun install failed after pull");
+    fail("bun install failed — run it manually: bun install");
     process.exit(1);
   }
 
-  ok(`Updated to ${latest}`);
+  // ── 5. Post-update migration checks ──────────────────────────────────────
+  section("Post-update checks");
 
-  // Restart running services
-  const agentRunning = agentPid();
-  const relayRunning = relayPid();
-  if (agentRunning || relayRunning) {
-    info("Restarting services...");
-    await cmdRestart("all");
+  // Ensure vault is still scaffolded (new system files may have been added)
+  const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
+  if (fs.existsSync(vaultPath)) {
+    await cmdSetup();
+    ok("Vault scaffold verified");
   }
 
-  console.log(`\n${c.green}${c.bold}Update complete.${c.reset} Run ${c.bold}hq health${c.reset} to verify.\n`);
+  // Re-install systemd units on Linux (unit file content may have changed)
+  if (process.platform !== "darwin" && fs.existsSync(path.join(os.homedir(), ".config", "systemd", "user"))) {
+    await cmdInstall("agent");
+    info("systemd units refreshed");
+  }
+
+  // Re-install CLI symlink if it changed
+  await cmdInstallCli();
+
+  // Print new version
+  const newVersion = JSON.parse(fs.readFileSync(pkgPath, "utf-8")).version ?? "unknown";
+  const newCommit  = sh("git rev-parse --short HEAD 2>/dev/null") || "unknown";
+  ok(`Updated to v${newVersion} (${newCommit})`);
+
+  // ── 6. Restart services that were running ────────────────────────────────
+  if (wasRunning.agent || wasRunning.relay) {
+    section("Restarting services");
+    if (wasRunning.agent) await cmdStart("agent");
+    if (wasRunning.relay) await cmdStart("relay");
+  }
+
+  console.log(`\n${c.green}${c.bold}Update complete.${c.reset} Run ${c.bold}hq doctor${c.reset} to verify.\n`);
 }
 
 // ─── New User-Facing Commands ────────────────────────────────────────────────
@@ -2340,7 +2419,9 @@ ${c.bold}ADVANCED${c.reset}
   hq clean                      Remove stale locks & orphans
   hq install [target]           Install launchd daemons (macOS)
   hq uninstall [target]         Remove launchd daemons
-  hq update                     Pull latest + restart services
+  hq update                     Pull latest from GitHub + restart services
+  hq update --check             Check for updates without applying
+  hq update --force             Update even with local changes (auto-stashes)
 
 ${c.bold}PLANS${c.reset}
   hq plans                      List all cross-agent plans

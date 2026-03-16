@@ -5,6 +5,7 @@ import {
   Scripts,
   createRootRoute,
 } from '@tanstack/react-router'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { useEffect, useState } from 'react'
 import { useHQStore } from '~/store/hqStore'
@@ -23,6 +24,12 @@ import appCss from '../../app.css?url'
 const WS_BASE = typeof window !== 'undefined'
   ? `${window.location.protocol}//${window.location.host}`
   : 'http://localhost:4749'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: false, staleTime: 30_000 },
+  },
+})
 
 export const Route = createRootRoute({
   head: () => ({
@@ -332,8 +339,10 @@ function RootDocument({ children }: { children: ReactNode }) {
         <HeadContent />
       </head>
       <body style={{ margin: 0, height: '100dvh', overflow: 'hidden' }}>
-        {children}
-        <Scripts />
+        <QueryClientProvider client={queryClient}>
+          {children}
+          <Scripts />
+        </QueryClientProvider>
       </body>
     </html>
   )

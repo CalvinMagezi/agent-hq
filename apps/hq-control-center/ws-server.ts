@@ -351,6 +351,117 @@ const server = Bun.serve({
       }
     }
 
+    // ─── SSE Chat Stream ──────────────────────────────────────────────
+    if (url.pathname === '/chat-stream' && req.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders })
+    }
+    if (url.pathname === '/chat-stream' && req.method === 'POST') {
+      try {
+        const body = await req.json() as any
+        const { threadId, content, harness } = body
+        if (!threadId || !SAFE_THREAD_ID.test(threadId) || !content) {
+          return new Response(JSON.stringify({ error: 'Invalid request' }), { status: 400, headers: corsHeaders })
+        }
+
+        const encoder = new TextEncoder()
+        let controller!: ReadableStreamDefaultController<Uint8Array>
+        let closed = false
+
+        const close = () => {
+          if (closed) return
+          closed = true
+          webBridge.removeSseListeners(threadId)
+          try { controller.close() } catch {}
+        }
+
+        const stream = new ReadableStream<Uint8Array>({
+          start(c) { controller = c },
+          cancel() { close() },
+        })
+
+        // Register SSE listeners BEFORE handleIncoming to avoid missing early tokens
+        webBridge.registerSseListeners(threadId, {
+          onToken: (token) => {
+            if (closed) return
+            try { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'token', token })}\n\n`)) } catch {}
+          },
+          onStatus: (status) => {
+            if (closed) return
+            try { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'status', status })}\n\n`)) } catch {}
+          },
+          onDone: () => {
+            try { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done' })}\n\n`)) } catch {}
+            close()
+          },
+        })
+
+        // Track user message + harness for persistence (same as WS chat:send)
+        if (content) pendingUserMessages.set(threadId, content)
+        if (harness) pendingHarness.set(threadId, harness)
+
+        const harnessOverride = harness && harness !== 'auto' ? harness : undefined
+        webBridge.handleIncoming(threadId, content, 'web-user', harnessOverride).catch(e => {
+          if (closed) return
+          try { controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'error', error: e.message })}\n\n`)) } catch {}
+          close()
+        })
+
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+          },
+        })
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: corsHeaders })
+      }
+    }
+
+    // ─── Chat Truncate (for retry in SSE mode) ────────────────────────
+    if (url.pathname === '/chat-truncate' && req.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders })
+    }
+    if (url.pathname === '/chat-truncate' && req.method === 'POST') {
+      try {
+        const body = await req.json() as any
+        const { threadId, fromIndex } = body
+        if (!threadId || !SAFE_THREAD_ID.test(threadId) || typeof fromIndex !== 'number') {
+          return new Response(JSON.stringify({ error: 'Invalid request' }), { status: 400, headers: corsHeaders })
+        }
+        const thread = loadThread(threadId)
+        if (!thread) return new Response(JSON.stringify({ error: 'Thread not found' }), { status: 404, headers: corsHeaders })
+        thread.messages = thread.messages.slice(0, fromIndex + 1)
+        thread.updatedAt = new Date().toISOString()
+        saveThread(thread)
+        return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders })
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500, headers: corsHeaders })
+      }
+    }
+
+    // ─── Thread REST API (TanStack Query consumers) ───────────────────
+    if (url.pathname === '/threads' && req.method === 'GET') {
+      return new Response(JSON.stringify(listThreads()), { headers: corsHeaders })
+    }
+    if (url.pathname.match(/^\/threads\/[a-zA-Z0-9_-]+$/) && req.method === 'GET') {
+      const threadId = url.pathname.split('/').pop()!
+      if (!SAFE_THREAD_ID.test(threadId)) {
+        return new Response(JSON.stringify({ error: 'Invalid thread ID' }), { status: 400, headers: corsHeaders })
+      }
+      const thread = loadThread(threadId)
+      if (!thread) return new Response(JSON.stringify(null), { status: 404, headers: corsHeaders })
+      return new Response(JSON.stringify({
+        ...thread,
+        sessionTotals: {
+          inputTokens: thread.totalInputTokens ?? 0,
+          outputTokens: thread.totalOutputTokens ?? 0,
+          cost: thread.totalCost ?? 0,
+        },
+      }), { headers: corsHeaders })
+    }
+
     if (url.pathname === '/search') {
       const q = url.searchParams.get('q') || ''
       try {
@@ -387,49 +498,24 @@ const server = Bun.serve({
         const msg = JSON.parse(data.toString())
         if (msg.type === 'pong') {
           // keepalive
-        } else if (msg.type === 'chat:list') {
-          ws.send(JSON.stringify({ type: 'chat:threads', threads: listThreads() }))
-        } else if (msg.type === 'chat:load') {
-          const thread = loadThread(msg.threadId)
-          ws.send(JSON.stringify({
-            type: 'chat:history',
-            threadId: msg.threadId,
-            thread,
-            sessionTotals: thread ? {
-              inputTokens: thread.totalInputTokens ?? 0,
-              outputTokens: thread.totalOutputTokens ?? 0,
-              cost: thread.totalCost ?? 0,
-            } : undefined,
-          }))
         } else if (msg.type === 'chat:delete') {
           try {
             if (!msg.threadId || !SAFE_THREAD_ID.test(msg.threadId)) return
             const p = path.join(VAULT_PATH, '_threads', `${msg.threadId}.json`)
             if (fs.existsSync(p)) fs.unlinkSync(p)
-            ws.send(JSON.stringify({ type: 'chat:threads', threads: listThreads() }))
+            // Signal all clients to invalidate their TQ caches
+            broadcast({ type: 'chat:invalidate' })
           } catch { /* ignore */ }
         } else if (msg.type === 'chat:reset') {
-          // No-op for now in unified mode, or we could clear the session in unifiedBot
-          ws.send(JSON.stringify({ type: 'chat:reset_ok', threadId: msg.threadId }))
+          // No-op for now in unified mode
+          broadcast({ type: 'chat:invalidate' })
         } else if (msg.type === 'chat:rename') {
           const thread = loadThread(msg.threadId)
           if (thread && msg.title) {
             thread.title = String(msg.title).slice(0, 100)
             thread.updatedAt = new Date().toISOString()
             saveThread(thread)
-            broadcast({ type: 'chat:threads', threads: listThreads() })
-          }
-        } else if (msg.type === 'chat:retry') {
-          const thread = loadThread(msg.threadId)
-          if (thread && typeof msg.fromIndex === 'number') {
-            const truncatedMessages = thread.messages.slice(0, msg.fromIndex + 1)
-            const lastUserMsg = truncatedMessages[truncatedMessages.length - 1]
-            if (lastUserMsg && lastUserMsg.role === 'user') {
-              // We don't save the thread here, webBridge.handleIncoming will handle it
-              webBridge.handleIncoming(msg.threadId, lastUserMsg.content).catch(e =>
-                ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
-              )
-            }
+            broadcast({ type: 'chat:invalidate' })
           }
         } else if (msg.type === 'chat:search') {
           // Vault search inline
@@ -450,17 +536,6 @@ const server = Bun.serve({
           } catch (e: any) {
             ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
           }
-        } else if (msg.type === 'chat:send' || msg.type === 'chat:send-with-context') {
-          if (!msg.threadId || !SAFE_THREAD_ID.test(msg.threadId)) return
-          // Track user message for persistence in the onDone handler
-          if (msg.threadId && msg.content) pendingUserMessages.set(msg.threadId, msg.content)
-          // Track user's harness selection for thread persistence
-          if (msg.threadId && msg.harness) pendingHarness.set(msg.threadId, msg.harness)
-          // Pass harness from PWA so the bot routes to the right CLI harness
-          const harnessOverride = msg.harness && msg.harness !== 'auto' ? msg.harness : undefined
-          webBridge.handleIncoming(msg.threadId, msg.content, 'web-user', harnessOverride).catch(e =>
-            ws.send(JSON.stringify({ type: 'chat:error', threadId: msg.threadId, error: e.message }))
-          );
         }
       } catch { /* ignore */ }
     },

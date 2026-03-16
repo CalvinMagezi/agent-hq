@@ -4,6 +4,62 @@ import * as path from 'node:path'
 import matter from 'gray-matter'
 import { VAULT_PATH } from './vault'
 
+// ── Harness session tracking ───────────────────────────────────────────────
+
+export type HarnessStatus = 'running' | 'idle' | 'error'
+
+export interface HarnessSessionEntry {
+  sessionId: string | null
+  lastActivity: string
+  currentTask?: string
+  pid?: number
+  status?: HarnessStatus
+}
+
+export interface HarnessStatusResult {
+  sessions: Record<string, HarnessSessionEntry & { liveStatus: HarnessStatus }>
+}
+
+function pidIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const getHarnessStatus = createServerFn({ method: 'GET' }).handler(
+  async (): Promise<HarnessStatusResult> => {
+    // The sessions file lives in the hq-control-center app directory (next to ws-server.ts).
+    // VAULT_PATH is e.g. /repo/.vault, so the app dir is /repo/apps/hq-control-center
+    const appDir = path.resolve(VAULT_PATH, '../apps/hq-control-center')
+    const sessionsFile = path.join(appDir, '.web-harness-sessions.json')
+
+    let raw: Record<string, HarnessSessionEntry> = {}
+    try {
+      if (fs.existsSync(sessionsFile)) {
+        const data = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8'))
+        raw = data.sessions ?? {}
+      }
+    } catch {
+      // file not found or parse error — return empty
+    }
+
+    const result: HarnessStatusResult['sessions'] = {}
+    for (const [harness, entry] of Object.entries(raw)) {
+      let liveStatus: HarnessStatus = entry.status ?? 'idle'
+      // Cross-check PID: if stored as running but PID is dead, mark idle
+      if (liveStatus === 'running' && entry.pid) {
+        if (!pidIsAlive(entry.pid)) liveStatus = 'idle'
+      }
+      result[harness] = { ...entry, liveStatus }
+    }
+
+    return { sessions: result }
+  }
+)
+
 export interface RelayAgent {
   id: string
   name: string

@@ -24,9 +24,13 @@ export class WebBridge implements PlatformBridge {
   private onMessageCallback: (msg: UnifiedMessage) => void = () => {};
   private onActionCallback: (action: PlatformAction) => void = () => {};
   private doneTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  // Accumulate response text per chatId so ws-server can persist it before chat:done fires
+  // Accumulate response text per chatId so ws-server can persist it on done
   private tokenAccumulators = new Map<string, string>();
   private onDoneCallback: (chatId: string, accumulatedText: string) => void = () => {};
+  // Per-chatId SSE listeners — for the /chat-stream SSE endpoint
+  private sseTokenListeners = new Map<string, (token: string) => void>();
+  private sseDoneListeners = new Map<string, () => void>();
+  private sseStatusListeners = new Map<string, (status: string) => void>();
 
   constructor(clients: Set<ServerWebSocket<unknown>>) {
     this.clients = clients;
@@ -43,9 +47,27 @@ export class WebBridge implements PlatformBridge {
     this.onActionCallback = handler;
   }
 
-  /** Register a callback invoked (synchronously) just before chat:done is broadcast. */
+  /** Register a callback invoked just before SSE done is signaled (for thread persistence). */
   onDone(handler: (chatId: string, accumulatedText: string) => void): void {
     this.onDoneCallback = handler;
+  }
+
+  /** Register per-chatId SSE listeners for the /chat-stream endpoint. */
+  registerSseListeners(chatId: string, opts: {
+    onToken: (token: string) => void;
+    onDone: () => void;
+    onStatus?: (status: string) => void;
+  }): void {
+    this.sseTokenListeners.set(chatId, opts.onToken);
+    this.sseDoneListeners.set(chatId, opts.onDone);
+    if (opts.onStatus) this.sseStatusListeners.set(chatId, opts.onStatus);
+  }
+
+  /** Deregister SSE listeners for a chatId. */
+  removeSseListeners(chatId: string): void {
+    this.sseTokenListeners.delete(chatId);
+    this.sseDoneListeners.delete(chatId);
+    this.sseStatusListeners.delete(chatId);
   }
 
   // Helper for the ws-server to push incoming web messages into the unified bot
@@ -84,22 +106,20 @@ export class WebBridge implements PlatformBridge {
     // Accumulate response for persistence
     this.tokenAccumulators.set(chatId, (this.tokenAccumulators.get(chatId) ?? "") + text);
 
-    this.broadcast(chatId, {
-      type: "chat:token",
-      token: text,
-      replyToId: opts?.replyToId,
-    });
+    // Forward token to SSE listener if registered for this chatId
+    this.sseTokenListeners.get(chatId)?.(text);
 
-    // Debounce chat:done — fires 300ms after the last token for this chatId
+    // Debounce done — fires 300ms after the last token for this chatId
     const existing = this.doneTimers.get(chatId);
     if (existing) clearTimeout(existing);
     this.doneTimers.set(chatId, setTimeout(() => {
       this.doneTimers.delete(chatId);
-      // Persist BEFORE broadcasting chat:done so loadThread finds the file
+      // Persist BEFORE signaling done so loadThread finds the file
       const accumulated = this.tokenAccumulators.get(chatId) ?? "";
       this.tokenAccumulators.delete(chatId);
       this.onDoneCallback(chatId, accumulated);
-      this.broadcast(chatId, { type: "chat:done" });
+      // Signal SSE done — client triggers chat:load via SSE completion effect
+      this.sseDoneListeners.get(chatId)?.();
     }, 300));
 
     return `web-msg-${Date.now()}`;
@@ -107,20 +127,13 @@ export class WebBridge implements PlatformBridge {
 
   async sendTyping(chatId?: string): Promise<void> {
     if (chatId) {
-      this.broadcast(chatId, {
-        type: "chat:status",
-        status: "thinking",
-      });
+      this.sseStatusListeners.get(chatId)?.("thinking");
     }
   }
 
   async sendReaction(messageId: string, reaction: string, chatId?: string): Promise<void> {
     if (chatId) {
-      this.broadcast(chatId, {
-        type: "chat:status",
-        status: `reaction:${reaction}`,
-        messageId
-      });
+      this.sseStatusListeners.get(chatId)?.(`reaction:${reaction}`);
     }
   }
 

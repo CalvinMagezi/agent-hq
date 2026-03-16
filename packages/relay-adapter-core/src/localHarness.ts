@@ -38,6 +38,9 @@ function resolveCommand(name: string): string {
 interface SessionEntry {
   sessionId: string | null;
   lastActivity: string;
+  currentTask?: string;
+  pid?: number;
+  status?: "running" | "idle" | "error";
 }
 
 interface HarnessStateFile {
@@ -149,9 +152,13 @@ export class LocalHarness {
     this.clearPidFile();
   }
 
-  /** Write the active child PID to disk for crash recovery. */
-  private writePidFile(pid: number): void {
+  /** Write the active child PID to disk for crash recovery, and track it in the session entry. */
+  private writePidFile(pid: number, harness?: LocalHarnessType): void {
     try { writeFileSync(this.pidFile, String(pid), "utf8"); } catch { /* best effort */ }
+    if (harness && this.sessions[harness]) {
+      this.sessions[harness] = { ...this.sessions[harness], pid };
+      this.save();
+    }
   }
 
   /** Remove the PID file after normal completion. */
@@ -199,13 +206,44 @@ export class LocalHarness {
       return `${harness} is still processing another message. Please wait, or type !reset to cancel.`;
     }
     this.runningHarnesses.add(harness);
+
+    // Write running state before spawning so the PWA can show status immediately
+    const currentTask = prompt.slice(0, 120);
+    this.sessions[harness] = {
+      ...this.sessions[harness],
+      currentTask,
+      status: "running",
+      lastActivity: new Date().toISOString(),
+    };
+    this.save();
+
     try {
+      let result: string;
       switch (harness) {
-        case "claude-code": return await this.runClaude(prompt, onToken);
-        case "opencode": return await this.runOpenCode(prompt, onToken);
-        case "gemini-cli": return await this.runGemini(prompt, onToken);
-        case "codex-cli": return await this.runCodex(prompt, onToken);
+        case "claude-code": result = await this.runClaude(prompt, onToken); break;
+        case "opencode": result = await this.runOpenCode(prompt, onToken); break;
+        case "gemini-cli": result = await this.runGemini(prompt, onToken); break;
+        case "codex-cli": result = await this.runCodex(prompt, onToken); break;
       }
+      // Mark idle on success
+      this.sessions[harness] = {
+        ...this.sessions[harness],
+        status: "idle",
+        pid: undefined,
+        lastActivity: new Date().toISOString(),
+      };
+      this.save();
+      return result!;
+    } catch (err) {
+      // Mark error on failure
+      this.sessions[harness] = {
+        ...this.sessions[harness],
+        status: "error",
+        pid: undefined,
+        lastActivity: new Date().toISOString(),
+      };
+      this.save();
+      throw err;
     } finally {
       this.runningHarnesses.delete(harness);
       this.activeKills.delete(harness);
@@ -304,7 +342,7 @@ export class LocalHarness {
         HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200",
       },
     });
-    this.writePidFile(proc.pid);
+    this.writePidFile(proc.pid, "claude-code");
     this.activePids.set("claude-code", proc.pid);
     this.activeKills.set("claude-code", () => killProcessTree(proc.pid));
 
@@ -417,7 +455,7 @@ export class LocalHarness {
       stderr: "pipe",
       env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
     });
-    this.writePidFile(proc.pid);
+    this.writePidFile(proc.pid, "codex-cli");
     this.activePids.set("codex-cli", proc.pid);
     this.activeKills.set("codex-cli", () => killProcessTree(proc.pid));
 
@@ -486,7 +524,7 @@ export class LocalHarness {
         env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
       });
 
-      this.writePidFile(proc.pid);
+      this.writePidFile(proc.pid, harnessType);
       if (harnessType) {
         this.activePids.set(harnessType, proc.pid);
         this.activeKills.set(harnessType, () => killProcessTree(proc.pid));

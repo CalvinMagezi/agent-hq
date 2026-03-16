@@ -51,8 +51,15 @@ yarn-error.log*
 
 # Runtime state (bot sessions, locks, usage tracking)
 **/.discord-relay*/
+**/.discord-harness-sessions.json
+**/.web-harness-sessions.json
+**/.harness-active-pid
 **/.agent-hq-worker-id
 **/.agent-hq-sessions/
+
+# Screenshot artifacts from playwright/testing
+apps/relay-adapter-telegram/*.png
+apps/relay-adapter-telegram/*.html
 
 # Launchd plist files (machine-specific, use *.plist.example templates)
 *.plist

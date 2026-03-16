@@ -1,6 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { MarkdownViewer } from '~/components/MarkdownViewer'
 import { useHQStore } from '~/store/hqStore'
+import { getHarnessStatus, type HarnessSessionEntry, type HarnessStatus } from '~/server/agents'
+import { useChatStream } from '~/hooks/useChatStream'
+import { useThreadList, type ThreadMeta } from '~/hooks/useThreadList'
+import { useThread } from '~/hooks/useThread'
 
 // ─── Scroll-to-bottom button ──────────────────────────────────────────────────
 
@@ -57,29 +62,13 @@ interface MessageStats {
     contextUsed?: number
 }
 
+// Local ThreadMessage extends the hook type with full stats shape
 interface ThreadMessage {
     role: 'user' | 'assistant' | 'system'
     content: string
     harness?: string
     timestamp: string
     stats?: MessageStats
-}
-
-interface Thread {
-    threadId: string
-    title: string
-    harness: string
-    messages: ThreadMessage[]
-    createdAt: string
-    updatedAt: string
-}
-
-interface ThreadMeta {
-    threadId: string
-    title: string
-    harness: string
-    updatedAt: string
-    messageCount: number
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -394,26 +383,31 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     const [showOffline, setShowOffline] = useState(false)
     const offlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-    // Token accumulator — batch streaming tokens into state at ~50ms intervals
-    // instead of calling setState on every single token (prevents per-token re-renders)
-    const tokenBufferRef = useRef('')
-    const tokenFlushRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    // SSE streaming hook — always active
+    const sseChat = useChatStream()
+    const queryClient = useQueryClient()
 
-    const [threads, setThreads] = useState<ThreadMeta[]>([])
+    // TQ — thread list and active thread data
+    const threadList = useThreadList()
     const [activeThreadId, setActiveThreadId] = useState<string | null>(null)
-    const [messages, setMessages] = useState<ThreadMessage[]>([])
-    const [isLoadingThread, setIsLoadingThread] = useState(false)
-    const [streamingContent, setStreamingContent] = useState('')
-    const [isStreaming, setIsStreaming] = useState(false)
-    const [toolActivity, setToolActivity] = useState<string | null>(null)
+    const threadQuery = useThread(activeThreadId)
+
+    // Derive from TQ data
+    const threads = threadList.data ?? []
+    const messages = (threadQuery.data?.messages ?? []) as ThreadMessage[]
+    const isLoadingThread = !!activeThreadId && threadQuery.isPending
+    const sessionTotals = threadQuery.data?.sessionTotals ?? { inputTokens: 0, outputTokens: 0, cost: 0 }
+
+    // Content to keep visible after SSE ends, until chat:history invalidation + refetch
+    const [pendingAssistantContent, setPendingAssistantContent] = useState<string | null>(null)
+    const prevIsStreamingRef = useRef(false)
+    // Guard for first-load active thread restoration
+    const hasRestoredRef = useRef(false)
+
     const [harness, setHarness] = useState<string>(DEFAULT_HARNESS)
     const isThreadSwitchRef = useRef(false) // true when user explicitly opens a thread
     const [input, setInput] = useState('')
     const [dropdownOpen, setDropdownOpen] = useState(false)
-    // Phase 2 Stats State
-    const [sessionTotals, setSessionTotals] = useState<{ inputTokens: number; outputTokens: number; cost: number }>({ inputTokens: 0, outputTokens: 0, cost: 0 })
-    const [sessionInfo, setSessionInfo] = useState<{ active: boolean; expiresIn?: string } | null>(null)
-    const [lastMsgStats, setLastMsgStats] = useState<MessageStats | null>(null)
 
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -444,6 +438,23 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
     // Upload in progress
     const [isUploading, setIsUploading] = useState(false)
     const fileInputRef = useRef<HTMLInputElement>(null)
+
+    // Harness process status (read from .web-harness-sessions.json)
+    const [harnessStatus, setHarnessStatus] = useState<Record<string, HarnessSessionEntry & { liveStatus: HarnessStatus }>>({})
+
+    // Poll harness status every 5 seconds
+    useEffect(() => {
+        let cancelled = false
+        const poll = async () => {
+            try {
+                const result = await getHarnessStatus()
+                if (!cancelled) setHarnessStatus(result.sessions)
+            } catch { /* ignore */ }
+        }
+        poll()
+        const timer = setInterval(poll, 5000)
+        return () => { cancelled = true; clearInterval(timer) }
+    }, [])
 
     const COMMANDS = [
         { id: 'clear', name: 'clear', desc: 'Clear thread history', server: true },
@@ -493,22 +504,70 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         return () => container.removeEventListener('scroll', handleScroll)
     }, [])
 
-    // Only auto-scroll when new messages arrive (count grew) or streaming progresses
-    useLayoutEffect(() => {
+    // Message arrival animation — track count changes
+    useEffect(() => {
         const prevCount = prevMsgCountRef.current
-        const grew = messages.length > prevCount
-        if (grew) {
-            // Mark new messages for arrival animation
+        const currentCount = messages.length
+        if (currentCount > prevCount) {
             const newIndices = new Set<number>()
-            for (let i = prevCount; i < messages.length; i++) newIndices.add(i)
+            for (let i = prevCount; i < currentCount; i++) newIndices.add(i)
             setNewMsgIndices(newIndices)
             setTimeout(() => setNewMsgIndices(new Set()), 400)
         }
-        prevMsgCountRef.current = messages.length
-        if ((grew || streamingContent) && isAtBottom) {
+        prevMsgCountRef.current = currentCount
+    }, [messages.length])
+
+    // Auto-scroll when messages arrive or streaming progresses
+    useLayoutEffect(() => {
+        const grew = messages.length > 0 && prevMsgCountRef.current !== messages.length
+        if ((grew || sseChat.streamingContent || pendingAssistantContent) && isAtBottom) {
             messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
         }
-    }, [messages, streamingContent, isAtBottom])
+    }, [messages, sseChat.streamingContent, pendingAssistantContent, isAtBottom])
+
+    // First-load active thread restoration (replaces WS chat:threads initial handler)
+    useEffect(() => {
+        if (hasRestoredRef.current || activeThreadRef.current || !threadList.data?.length) return
+        hasRestoredRef.current = true
+        const saved = localStorage.getItem(LAST_THREAD_KEY)
+        const toRestore = (saved && threadList.data.find(t => t.threadId === saved))
+            ? saved
+            : threadList.data[0].threadId
+        activeThreadRef.current = toRestore
+        setActiveThreadId(toRestore)
+        prevMsgCountRef.current = 0
+        isThreadSwitchRef.current = true
+    }, [threadList.data])
+
+    // When fresh thread data arrives (after SSE completion + invalidation or thread switch):
+    // clear pending bubble + restore harness on explicit thread switch
+    useEffect(() => {
+        if (!threadQuery.data) return
+        // Server data is now confirmed — safe to dismiss the pending streaming bubble
+        setPendingAssistantContent(null)
+        if (isThreadSwitchRef.current) {
+            setHarness(threadQuery.data.harness || DEFAULT_HARNESS)
+            isThreadSwitchRef.current = false
+        }
+    }, [threadQuery.data])
+
+    // Detect SSE streaming completion → invalidate TQ caches (replaces WS chat:load/chat:list)
+    useEffect(() => {
+        const wasStreaming = prevIsStreamingRef.current
+        prevIsStreamingRef.current = sseChat.isStreaming
+        if (wasStreaming && !sseChat.isStreaming && activeThreadRef.current) {
+            // Snapshot content before sseChat.reset() clears it
+            setPendingAssistantContent(sseChat.streamingContent || null)
+            setSuggestions(['Tell me more', 'Give an example', 'Can you simplify this?'])
+            if (soundEnabled && !document.hasFocus()) {
+                try { (new Audio('/notification.wav')).play(); } catch {}
+            }
+            // Invalidate TQ caches — both hooks will refetch automatically
+            const tid = activeThreadRef.current
+            queryClient.invalidateQueries({ queryKey: ['thread', tid] })
+            queryClient.invalidateQueries({ queryKey: ['threads'] })
+        }
+    }, [sseChat.isStreaming, soundEnabled, queryClient])
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -543,7 +602,11 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                     clearTimeout(offlineTimerRef.current)
                     offlineTimerRef.current = null
                 }
-                socket.send(JSON.stringify({ type: 'chat:list' }))
+                // Invalidate TQ caches on reconnect so data is fresh
+                queryClient.invalidateQueries({ queryKey: ['threads'] })
+                if (activeThreadRef.current) {
+                    queryClient.invalidateQueries({ queryKey: ['thread', activeThreadRef.current] })
+                }
             }
 
             socket.onclose = () => {
@@ -563,105 +626,15 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
             socket.onmessage = (e) => {
                 try {
                     const msg = JSON.parse(e.data)
-                    const tid = activeThreadRef.current
 
-                    if (msg.type === 'chat:threads') {
-                        setThreads(msg.threads)
-                        // Restore last active thread on reconnect / fresh load
-                        if (!activeThreadRef.current && msg.threads.length > 0) {
-                            const saved = localStorage.getItem(LAST_THREAD_KEY)
-                            const toRestore = saved && msg.threads.find((t: ThreadMeta) => t.threadId === saved)
-                                ? saved
-                                : msg.threads[0].threadId
-                            activeThreadRef.current = toRestore
-                            setActiveThreadId(toRestore)
-                            setIsLoadingThread(true)
-                            isThreadSwitchRef.current = true // restore harness from saved thread
-                            socket.send(JSON.stringify({ type: 'chat:load', threadId: toRestore }))
-                        }
-                    } else if (msg.type === 'chat:history') {
-                        // Always clear loading state regardless of whether thread is null
-                        setIsLoadingThread(false)
-                        if (msg.thread) {
-                            // Atomic swap: replace messages and clear ALL streaming state in one batch
-                            setMessages(msg.thread.messages ?? [])
-                            setIsStreaming(false)
-                            setStreamingContent('')
-                            setToolActivity(null)
-                            // Only restore harness from thread on explicit thread switch,
-                            // not on post-response reload (preserves user's harness pick)
-                            if (isThreadSwitchRef.current) {
-                                setHarness(msg.thread.harness || DEFAULT_HARNESS)
-                                isThreadSwitchRef.current = false
-                            }
-                            prevMsgCountRef.current = 0
-                            if (msg.sessionTotals) setSessionTotals(msg.sessionTotals)
-                            if (msg.sessionInfo) setSessionInfo(msg.sessionInfo)
-                        } else {
-                            // Thread not yet on disk — streaming is done, clear state so UI doesn't hang
-                            setIsStreaming(false)
-                            setStreamingContent('')
-                            setToolActivity(null)
-                        }
-                    } else if (msg.type === 'chat:status') {
-                        if (msg.threadId === tid) {
-                            setToolActivity(msg.status ?? null)
-                        }
-                    } else if (msg.type === 'chat:token') {
-                        if (msg.threadId === tid) {
-                            setToolActivity(null)
-                            tokenBufferRef.current += msg.token
-                            if (!tokenFlushRef.current) {
-                                tokenFlushRef.current = setTimeout(() => {
-                                    tokenFlushRef.current = null
-                                    setStreamingContent(prev => prev + tokenBufferRef.current)
-                                    tokenBufferRef.current = ''
-                                }, 50)
-                            }
-                        }
-                    } else if (msg.type === 'chat:done') {
-                        if (msg.threadId === tid) {
-                            // Flush any remaining buffered tokens into streamingContent so the
-                            // bubble shows the complete response while we wait for chat:history.
-                            if (tokenFlushRef.current) {
-                                clearTimeout(tokenFlushRef.current)
-                                tokenFlushRef.current = null
-                            }
-                            if (tokenBufferRef.current) {
-                                setStreamingContent(prev => prev + tokenBufferRef.current)
-                                tokenBufferRef.current = ''
-                            }
-                            // DO NOT clear isStreaming/streamingContent here — keep the bubble
-                            // visible until chat:history arrives and atomically swaps messages.
-                            // DO NOT set isLoadingThread — no skeleton flash.
-                            if (msg.stats) setLastMsgStats(msg.stats)
-                            if (msg.sessionTotals) setSessionTotals(msg.sessionTotals)
-
-                            // Sound notification (only when tab not focused)
-                            if (soundEnabled && !document.hasFocus()) {
-                                try { (new Audio('/notification.wav')).play(); } catch {}
-                            }
-
-                            setSuggestions(['Tell me more', 'Give an example', 'Can you simplify this?'])
-
-                            // Silent reload — chat:history will atomically replace messages
-                            // AND clear streaming state in one React batch.
-                            socket.send(JSON.stringify({ type: 'chat:load', threadId: tid }))
-                            socket.send(JSON.stringify({ type: 'chat:list' }))
-                        }
-                    } else if (msg.type === 'chat:error') {
-                        if (msg.threadId === tid) {
-                            setIsStreaming(false)
-                            setStreamingContent('')
-                            setToolActivity(null)
-                            setIsLoadingThread(false)
-                            setMessages(prev => [...prev, {
-                                role: 'system',
-                                content: `[Error: ${msg.error}]`,
-                                timestamp: new Date().toISOString(),
-                            }])
+                    if (msg.type === 'chat:invalidate') {
+                        // Server signals that thread data changed (rename/delete/reset)
+                        queryClient.invalidateQueries({ queryKey: ['threads'] })
+                        if (activeThreadRef.current) {
+                            queryClient.invalidateQueries({ queryKey: ['thread', activeThreadRef.current] })
                         }
                     }
+                    // Vault events, workflow/metric signals, and ping are handled passively
                 } catch { /* ignore */ }
             }
         }
@@ -671,39 +644,34 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
             socket?.close()
             clearTimeout(retryTimer)
             if (offlineTimerRef.current) clearTimeout(offlineTimerRef.current)
-            if (tokenFlushRef.current) clearTimeout(tokenFlushRef.current)
         }
     }, [])
 
     const openThread = useCallback((threadId: string) => {
+        activeThreadRef.current = threadId
         setActiveThreadIdPersisted(threadId)
-        // Don't clear messages immediately — show skeleton overlay instead to avoid blank flash
-        setIsLoadingThread(true)
-        setStreamingContent('')
-        setIsStreaming(false)
+        prevMsgCountRef.current = 0 // reset animation counter before new thread loads
+        sseChat.stop()
+        setPendingAssistantContent(null)
         setDropdownOpen(false)
-        isThreadSwitchRef.current = true // mark: restore harness from thread
-        wsRef.current?.send(JSON.stringify({ type: 'chat:load', threadId }))
-    }, [setActiveThreadIdPersisted])
+        isThreadSwitchRef.current = true // mark: restore harness from thread data
+        // TQ auto-fetches when activeThreadId changes — no WS needed
+    }, [setActiveThreadIdPersisted, sseChat])
 
     const newThread = useCallback(() => {
         const threadId = newThreadId()
         setActiveThreadIdPersisted(threadId)
-        setMessages([])
-        setIsLoadingThread(false)
         prevMsgCountRef.current = 0
-        setStreamingContent('')
-        setIsStreaming(false)
+        sseChat.stop()
+        setPendingAssistantContent(null)
         setInput('')
         setDropdownOpen(false)
-    }, [setActiveThreadIdPersisted])
+    }, [setActiveThreadIdPersisted, sseChat])
 
     const deleteThread = useCallback((threadId: string) => {
         wsRef.current?.send(JSON.stringify({ type: 'chat:delete', threadId }))
         if (activeThreadId === threadId) {
             setActiveThreadIdPersisted(null)
-            setMessages([])
-            setIsLoadingThread(false)
             prevMsgCountRef.current = 0
         }
     }, [activeThreadId, setActiveThreadIdPersisted])
@@ -725,42 +693,60 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         a.click()
     }, [activeTitle, messages])
 
-    const retryMessage = useCallback((idx: number) => {
-        if (isStreaming || !activeThreadId) return
+    const retryMessage = useCallback(async (idx: number) => {
+        if (sseChat.isStreaming || !activeThreadId) return
         // Find the user message preceding this assistant message
         let fromIdx = idx - 1
         while (fromIdx >= 0 && messages[fromIdx].role !== 'user') fromIdx--
         if (fromIdx < 0) return
 
-        setMessages(prev => prev.slice(0, fromIdx + 1))
+        const lastUserMsg = messages[fromIdx]
+        // Optimistically truncate TQ cache to show truncated messages immediately
+        queryClient.setQueryData(['thread', activeThreadId], (old: any) =>
+            old ? { ...old, messages: old.messages.slice(0, fromIdx + 1) } : old
+        )
         prevMsgCountRef.current = fromIdx
-        setIsStreaming(true)
-        setStreamingContent('')
-        wsRef.current?.send(JSON.stringify({ type: 'chat:retry', threadId: activeThreadId, fromIndex: fromIdx }))
-    }, [isStreaming, activeThreadId, messages])
+        setPendingAssistantContent(null)
+
+        try {
+            await fetch('/chat-truncate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ threadId: activeThreadId, fromIndex: fromIdx }),
+            })
+        } catch { /* best-effort — SSE will still fire */ }
+
+        sseChat.sendMessage(lastUserMsg.content, activeThreadId, harness)
+    }, [sseChat, activeThreadId, messages, harness, queryClient])
 
     const sendMessage = useCallback(() => {
         const content = input.trim()
-        if (!content || isStreaming || !wsRef.current) return
+        if (!content || sseChat.isStreaming) return
 
         if (content.startsWith('/')) {
             const parts = content.slice(1).split(' ')
             const cmd = parts[0]
             const args = parts.slice(1).join(' ')
-            
-            if (cmd === 'clear') wsRef.current.send(JSON.stringify({ type: 'chat:reset', threadId: activeThreadId }))
+
+            if (cmd === 'clear') wsRef.current?.send(JSON.stringify({ type: 'chat:reset', threadId: activeThreadId }))
             else if (cmd === 'new') newThread()
             else if (cmd === 'export') exportThread()
             else if (cmd === 'rename') {
-                if (args && activeThreadId) wsRef.current.send(JSON.stringify({ type: 'chat:rename', threadId: activeThreadId, title: args }))
+                if (args && activeThreadId) wsRef.current?.send(JSON.stringify({ type: 'chat:rename', threadId: activeThreadId, title: args }))
             } else if (cmd === 'search') {
-                if (args && activeThreadId) wsRef.current.send(JSON.stringify({ type: 'chat:search', threadId: activeThreadId, query: args }))
+                if (args && activeThreadId) wsRef.current?.send(JSON.stringify({ type: 'chat:search', threadId: activeThreadId, query: args }))
             } else if (cmd === 'model') {
                 const h = getHarness(harness)
-                setMessages(prev => [...prev, { role: 'system', content: `[Current Model: ${h.model} | Window: ${h.contextWindow.toLocaleString()} | Caps: ${h.capabilities.join(', ')}]`, timestamp: new Date().toISOString() }])
+                const sysMsg = { role: 'system' as const, content: `[Current Model: ${h.model} | Window: ${h.contextWindow.toLocaleString()} | Caps: ${h.capabilities.join(', ')}]`, timestamp: new Date().toISOString() }
+                queryClient.setQueryData(['thread', activeThreadId], (old: any) =>
+                    old ? { ...old, messages: [...old.messages, sysMsg] } : old
+                )
             } else if (cmd === 'help') {
                 const help = COMMANDS.map(c => `/ ${c.name} — ${c.desc}`).join('\n')
-                setMessages(prev => [...prev, { role: 'system', content: `[Available Commands:\n${help}]`, timestamp: new Date().toISOString() }])
+                const sysMsg = { role: 'system' as const, content: `[Available Commands:\n${help}]`, timestamp: new Date().toISOString() }
+                queryClient.setQueryData(['thread', activeThreadId], (old: any) =>
+                    old ? { ...old, messages: [...old.messages, sysMsg] } : old
+                )
             }
             setInput('')
             return
@@ -770,16 +756,19 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         activeThreadRef.current = threadId
         if (!activeThreadId) setActiveThreadIdPersisted(threadId)
 
+        // Optimistically add user message to TQ cache
         const userMsg: ThreadMessage = { role: 'user', content, timestamp: new Date().toISOString() }
-        setMessages(prev => [...prev, userMsg])
+        queryClient.setQueryData(['thread', threadId], (old: any) =>
+            old ? { ...old, messages: [...old.messages, userMsg] }
+                : { threadId, title: `Chat ${new Date().toLocaleDateString()}`, harness, messages: [userMsg], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionTotals: { inputTokens: 0, outputTokens: 0, cost: 0 } }
+        )
+        setPendingAssistantContent(null)
         setInput('')
-        setIsStreaming(true)
-        setStreamingContent('')
-        setToolActivity(null)
         setIsAtBottom(true)
 
-        wsRef.current.send(JSON.stringify({ type: 'chat:send', threadId, content, harness }))
-    }, [input, isStreaming, activeThreadId, harness, setActiveThreadIdPersisted])
+        // Always SSE path — tokens stream via useChatStream; TQ invalidation handles reload
+        sseChat.sendMessage(content, threadId, harness)
+    }, [input, sseChat, activeThreadId, harness, setActiveThreadIdPersisted, newThread, exportThread, queryClient])
 
     const cycleHarness = useCallback(() => {
         const idx = HARNESSES.findIndex(h => h.id === harness)
@@ -873,6 +862,13 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
         }
     }
 
+    const appendSysMsg = useCallback((content: string) => {
+        const sysMsg = { role: 'system' as const, content, timestamp: new Date().toISOString() }
+        queryClient.setQueryData(['thread', activeThreadId], (old: any) =>
+            old ? { ...old, messages: [...old.messages, sysMsg] } : old
+        )
+    }, [queryClient, activeThreadId])
+
     const handlePaste = async (e: React.ClipboardEvent) => {
         const items = e.clipboardData.items
         for (let i = 0; i < items.length; i++) {
@@ -882,7 +878,6 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                 e.preventDefault()
                 setIsUploading(true)
                 try {
-                    const wsUrl = wsRef.current?.url ?? ''
                     const baseUrl = window.location.origin
                     const form = new FormData()
                     form.append('file', file)
@@ -890,12 +885,12 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                     const data = await res.json()
                     if (data.ok && data.path) {
                         setInput(prev => `${prev}[Referencing: [[${data.path}]]]\n`.trim() + '\n')
-                        setMessages(prev => [...prev, { role: 'system', content: `[Uploaded: ${data.name} (${(data.size / 1024).toFixed(1)}KB) → ${data.path}]`, timestamp: new Date().toISOString() }])
+                        appendSysMsg(`[Uploaded: ${data.name} (${(data.size / 1024).toFixed(1)}KB) → ${data.path}]`)
                     } else {
-                        setMessages(prev => [...prev, { role: 'system', content: `[Upload failed: ${data.error ?? 'Unknown error'}]`, timestamp: new Date().toISOString() }])
+                        appendSysMsg(`[Upload failed: ${data.error ?? 'Unknown error'}]`)
                     }
                 } catch (err: any) {
-                    setMessages(prev => [...prev, { role: 'system', content: `[Upload error: ${err.message}]`, timestamp: new Date().toISOString() }])
+                    appendSysMsg(`[Upload error: ${err.message}]`)
                 } finally {
                     setIsUploading(false)
                 }
@@ -917,26 +912,29 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
             const data = await res.json()
             if (data.ok && data.path) {
                 setInput(prev => `${prev}[Referencing: [[${data.path}]]]\n`.trim() + '\n')
-                setMessages(prev => [...prev, { role: 'system', content: `[Attached: ${data.name} (${(data.size / 1024).toFixed(1)}KB)]`, timestamp: new Date().toISOString() }])
+                appendSysMsg(`[Attached: ${data.name} (${(data.size / 1024).toFixed(1)}KB)]`)
             } else {
-                setMessages(prev => [...prev, { role: 'system', content: `[Upload failed: ${data.error ?? 'Unknown error'}]`, timestamp: new Date().toISOString() }])
+                appendSysMsg(`[Upload failed: ${data.error ?? 'Unknown error'}]`)
             }
         } catch (err: any) {
-            setMessages(prev => [...prev, { role: 'system', content: `[Upload error: ${err.message}]`, timestamp: new Date().toISOString() }])
+            appendSysMsg(`[Upload error: ${err.message}]`)
         } finally {
             setIsUploading(false)
         }
     }
 
-    const streamMsg: ThreadMessage | null = isStreaming ? {
+    // Streaming bubble: visible while SSE is active, or while waiting for chat:history swap
+    const streamMsg: ThreadMessage | null = (sseChat.isStreaming || pendingAssistantContent !== null) ? {
         role: 'assistant',
-        content: (toolActivity || (!toolActivity && !streamingContent)) ? '' : streamingContent,
+        content: sseChat.isStreaming
+            ? (sseChat.toolActivity || !sseChat.streamingContent) ? '' : sseChat.streamingContent
+            : pendingAssistantContent ?? '',
         harness,
         timestamp: new Date().toISOString(),
     } : null
 
     // Thinking indicator: streaming has started but no tokens yet and no tool activity
-    const showThinking = isStreaming && !streamingContent && !toolActivity
+    const showThinking = sseChat.isStreaming && !sseChat.streamingContent && !sseChat.toolActivity
 
     return (
         <div className={`h-full flex flex-col bg-transparent ${fullPage ? 'w-full' : ''}`}>
@@ -1061,47 +1059,67 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                 </div>
             </div>
 
-            {/* Phase 2: Context Utilization Bar */}
-            {activeThreadId && (
-                <div className="h-0.5 w-full bg-transparent overflow-hidden">
+            {/* Context Utilization Bar — placeholder, pct always 0 until stats wired */}
+            <div className="h-0.5 w-full bg-transparent overflow-hidden" />
+
+            {/* Phase 2: Harness Info Bar */}
+            <div className="px-3 py-1 border-b flex items-center justify-between gap-2" style={{ borderColor: 'var(--border)', background: 'rgba(0,0,0,0.1)' }}>
+                <div className="flex items-center gap-2 overflow-hidden min-w-0 flex-1">
                     {(() => {
                         const h = getHarness(harness)
-                        const used = lastMsgStats?.contextUsed ?? 0
-                        const pct = Math.min(100, (used / h.contextWindow) * 100)
-                        const color = pct > 80 ? 'var(--accent-red)' : pct > 50 ? 'var(--accent-amber)' : 'var(--accent-green)'
+                        const sess = harnessStatus[h.id]
+                        const live = sess?.liveStatus ?? 'idle'
+                        const isRunning = live === 'running'
                         return (
-                            <div 
-                                className="h-full transition-all duration-500 ease-in-out" 
-                                style={{ width: `${pct}%`, background: color, opacity: pct > 0 ? 0.6 : 0 }}
-                                title={`${used.toLocaleString()} / ${h.contextWindow.toLocaleString()} tokens (${pct.toFixed(1)}%)`}
-                            />
+                            <>
+                                {/* Process status dot */}
+                                {isRunning ? (
+                                    <span
+                                        className="w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse"
+                                        style={{ background: h.color }}
+                                        title="Harness is processing"
+                                    />
+                                ) : live === 'error' ? (
+                                    <span
+                                        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                                        style={{ background: 'var(--accent-red)' }}
+                                        title="Harness error"
+                                    />
+                                ) : null}
+                                <span className="text-[9px] font-mono whitespace-nowrap flex-shrink-0" style={{ color: 'var(--text-dim)' }}>
+                                    <span style={{ color: h.color }}>{h.model}</span>
+                                    <span className="mx-1.5 opacity-30">·</span>
+                                    <span>{h.contextWindow >= 1048576 ? `${(h.contextWindow / 1048576).toFixed(0)}M` : `${h.contextWindow / 1000}K`} ctx</span>
+                                </span>
+                                {/* Current task */}
+                                {sess?.currentTask && (
+                                    <span
+                                        className="text-[9px] font-mono truncate min-w-0"
+                                        style={{ color: isRunning ? h.color : 'var(--text-dim)', opacity: isRunning ? 0.9 : 0.5 }}
+                                        title={sess.currentTask}
+                                    >
+                                        {isRunning ? '↳ ' : ''}{sess.currentTask.slice(0, 60)}{sess.currentTask.length > 60 ? '…' : ''}
+                                    </span>
+                                )}
+                            </>
                         )
                     })()}
                 </div>
-            )}
-
-            {/* Phase 2: Harness Info Bar */}
-            <div className="px-3 py-1 border-b flex items-center justify-between" style={{ borderColor: 'var(--border)', background: 'rgba(0,0,0,0.1)' }}>
-                <div className="flex items-center gap-2 overflow-hidden">
+                <div className="flex items-center gap-2 flex-shrink-0">
+                    {/* Last activity */}
                     {(() => {
-                        const h = getHarness(harness)
+                        const sess = harnessStatus[harness]
+                        if (!sess?.lastActivity) return null
+                        const diff = Date.now() - new Date(sess.lastActivity).getTime()
+                        const m = Math.floor(diff / 60000)
+                        const label = m < 1 ? 'just now' : m < 60 ? `${m}m ago` : `${Math.floor(m / 60)}h ago`
                         return (
-                            <span className="text-[9px] font-mono whitespace-nowrap" style={{ color: 'var(--text-dim)' }}>
-                                <span style={{ color: h.color }}>{h.model}</span>
-                                <span className="mx-1.5 opacity-30">·</span>
-                                <span>{h.contextWindow >= 1048576 ? `${(h.contextWindow / 1048576).toFixed(0)}M` : `${h.contextWindow / 1000}K`} ctx</span>
-                                <span className="mx-1.5 opacity-30">·</span>
-                                <span>{h.capabilities.join(', ')}</span>
+                            <span className="text-[8px] font-mono" style={{ color: 'var(--text-dim)', opacity: 0.5 }}>
+                                {label}
                             </span>
                         )
                     })()}
                 </div>
-                {sessionInfo?.active && (
-                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 rounded bg-green-500/10 border border-green-500/20">
-                        <span className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
-                        <span className="text-[8px] font-mono text-green-500/80 uppercase">Session active {sessionInfo.expiresIn && `(${sessionInfo.expiresIn})`}</span>
-                    </div>
-                )}
             </div>
 
             {/* In-conversation message search bar */}
@@ -1185,7 +1203,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                                     />
                                 </div>
                             ))}
-                            {suggestions.length > 0 && !isStreaming && (
+                            {suggestions.length > 0 && !sseChat.isStreaming && (
                                 <div className="flex flex-wrap gap-2 px-12 py-2">
                                     {suggestions.map((s, i) => (
                                         <button 
@@ -1228,7 +1246,7 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
                     )}
                 </div>
                 <ScrollToBottomButton
-                    visible={!isAtBottom && (messages.length > 0 || isStreaming)}
+                    visible={!isAtBottom && (messages.length > 0 || sseChat.isStreaming)}
                     onClick={scrollToBottom}
                 />
             </div>
@@ -1322,11 +1340,11 @@ export function ChatPanel({ onClose, fullPage = false }: { onClose?: () => void;
 
                             <button
                                 onClick={sendMessage}
-                                disabled={!wsReady || !input.trim()}
+                                disabled={sseChat.isStreaming || !input.trim()}
                                 className="w-6 h-6 rounded-lg flex items-center justify-center transition-all disabled:opacity-30 disabled:grayscale"
                                 style={{ background: getHarness(harness).color, color: '#000' }}
                             >
-                                {isStreaming ? (
+                                {sseChat.isStreaming ? (
                                     <span className="w-1 h-1 bg-black rounded-full animate-pulse" />
                                 ) : (
                                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>

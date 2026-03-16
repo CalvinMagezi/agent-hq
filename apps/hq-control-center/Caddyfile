@@ -1,6 +1,6 @@
 :4749 {
 	# WebSocket + WS server HTTP endpoints → port 4748
-	@ws_server path /ws /push/* /upload /search /traces /traces/*
+	@ws_server path /ws /push/* /upload /search /traces /traces/* /chat-stream /chat-truncate /threads /threads/*
 	handle @ws_server {
 		reverse_proxy localhost:4748
 	}

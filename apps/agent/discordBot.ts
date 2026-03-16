@@ -514,6 +514,7 @@ export class DiscordBot extends DiscordBotBase {
 
           if (!res.ok) {
             if (res.status === 404) {
+              this.stopTyping(jobId);
               this.trackedJobs.delete(jobId);
             }
             continue;

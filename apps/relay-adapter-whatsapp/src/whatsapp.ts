@@ -548,8 +548,8 @@ export class WhatsAppBridge implements PlatformBridge {
     }
   }
 
-  /** Delete a message (for everyone). */
-  async deleteMessage(originalKey: proto.IMessageKey): Promise<void> {
+  /** Delete a message (for everyone) using the raw Baileys key. */
+  async deleteMessageByKey(originalKey: proto.IMessageKey): Promise<void> {
     if (!this.sock) return;
     try {
       await this.sock.sendMessage(this.guard.ownerJid, {

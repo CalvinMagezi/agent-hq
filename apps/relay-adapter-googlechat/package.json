@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@repo/agent-relay-protocol": "workspace:*",
+    "@repo/env-loader": "workspace:*",
     "@repo/relay-adapter-core": "workspace:*",
     "dotenv": "^16.4.5",
     "jose": "^5.9.0"

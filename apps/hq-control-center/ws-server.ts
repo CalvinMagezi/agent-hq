@@ -1,3 +1,4 @@
+import "@repo/env-loader";
 /**
  * Standalone Bun WebSocket server on port 4748.
  * Bridges VaultSync events → connected PWA clients.

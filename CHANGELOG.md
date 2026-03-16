@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-03-16
+
+### Added
+- **Provider-agnostic LLM abstraction** (`packages/vault-client/src/models.ts`): New `resolveEmbeddingProvider()`, `resolveChatProvider()`, `resolveVisionProvider()` functions auto-detect the best available provider from env vars. Priority: Gemini → Anthropic → OpenRouter → Ollama → none. New `fetchEmbedding()` function uses plain `fetch()` with zero SDK dependencies.
+- **Anthropic direct API support** (`apps/agent/lib/modelConfig.ts`): Added `ANTHROPIC_API_KEY` env var and `isAnthropicModel()` detection. Agent routing: Ollama → Gemini → Anthropic → OpenRouter. Users with only a Claude API key can now run the agent directly.
+- **Multi-provider vision** (`packages/relay-adapter-core/src/media.ts`): Image description now supports Gemini (generateContent API), Anthropic (Messages API with base64 images), and OpenRouter. Auto-detected from env vars.
+- **Multi-provider chat fallback** (`packages/agent-relay-server/src/handlers/chat.ts`): Relay server chat fallback now supports Gemini, Anthropic, and OpenRouter with proper SSE streaming for each. Lazy provider resolution avoids module-load-order issues with env-loader.
+- **CLI harness availability check** in `hq doctor`: Reports which CLI tools (claude, codex, gemini, opencode) are on PATH.
+- **Anthropic API key prompt** in `hq env` interactive setup (step 2b).
+- **`@repo/env-loader`** adopted across all apps/adapters, replacing per-app `dotenv` calls.
+
+### Changed
+- **`hq init`**: API key warning changed from blocking to informational — "Relay harnesses (Claude, Codex, Gemini) work without keys."
+- **`hq doctor`**: Missing API keys downgraded from `fail()` to `warn()` — no longer increments issue count. Relay adapters are functional with zero LLM keys via CLI harnesses.
+- **`hq quickstart`**: Updated messaging to clarify API keys are optional for relay-only setups.
+- **Daemon embedding processor**: Uses provider abstraction instead of hardcoded OpenRouter `fetch()`. Gracefully skips embeddings when no provider is configured (FTS5 keyword search remains active).
+- **`.env.example`**: Expanded with all documented env vars (Telegram, WhatsApp, voice, Google Workspace, Ollama), all values blank/commented.
+
+### Fixed
+- **`process.env` mutation in MediaHandler**: Removed global side-effect where legacy `openRouterApiKey` config was injected into `process.env`. Now uses direct provider config without env pollution.
+- **Module-load-order race**: Chat handler provider detection changed from module-level constant to lazy resolution, preventing `{ type: "none" }` when env-loader hasn't run yet.
+- **Misleading Ollama fallback**: Embedding provider no longer optimistically returns Ollama when no keys are set. Only returns Ollama if `OLLAMA_BASE_URL` is explicitly configured.
+- **Discord bot typing indicator**: Fixed stuck typing indicator on 404 job status responses.
+
 ## [0.6.10] - 2026-03-16
 
 ### Fixed

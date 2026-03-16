@@ -26,6 +26,7 @@ export interface ChatSessionConfig {
     modelId: string;
     openrouterApiKey?: string;
     geminiApiKey?: string;
+    anthropicApiKey?: string;
     convexBaseUrl?: string;
     vaultClient?: any;
     apiKey?: string;
@@ -394,6 +395,7 @@ export class ChatSessionManager {
         const model = buildModelConfig({
             modelId: config.modelId,
             geminiApiKey: config.geminiApiKey,
+            anthropicApiKey: config.anthropicApiKey,
             openrouterApiKey: config.openrouterApiKey,
         });
 

@@ -7,6 +7,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { fetchEmbedding, isEmbeddingProviderAvailable } from "@repo/vault-client";
 import type { DaemonContext } from "./context.js";
 
 // ─── Config ────────────────────────────────────────────────────────
@@ -172,12 +173,15 @@ export async function relayHealthCheck(ctx: DaemonContext): Promise<void> {
 // ─── Task: Embedding Processor (every 30 min) ──────────────────────
 
 export async function processEmbeddings(ctx: DaemonContext): Promise<void> {
-  if (!ctx.openrouterApiKey) return;
+  const provider = ctx.embeddingProvider;
+
+  // Check if provider is available (handles Ollama health check, "none" type, etc.)
+  if (!(await isEmbeddingProviderAvailable(provider))) return;
 
   const pendingNotes = await ctx.vault.getNotesForEmbedding("pending", 10);
   if (pendingNotes.length === 0) return;
 
-  console.log(`[embeddings] Processing ${pendingNotes.length} note(s)...`);
+  console.log(`[embeddings] Processing ${pendingNotes.length} note(s) via ${provider.type}...`);
 
   for (const note of pendingNotes) {
     try {
@@ -186,41 +190,19 @@ export async function processEmbeddings(ctx: DaemonContext): Promise<void> {
       });
 
       const text = `${note.title}\n\n${note.content}`.substring(0, 8000);
-      const response = await fetch(
-        "https://openrouter.ai/api/v1/embeddings",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${ctx.openrouterApiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: ctx.embeddingModel,
-            input: text,
-          }),
-        },
-      );
-
-      if (!response.ok) {
-        throw new Error(`Embedding API error: ${response.status}`);
-      }
-
-      const result = (await response.json()) as {
-        data: Array<{ embedding: number[] }>;
-      };
-      const embedding = result.data[0]?.embedding;
+      const embedding = await fetchEmbedding(text, provider);
 
       if (!embedding) {
         throw new Error("No embedding returned");
       }
 
-      ctx.search.storeEmbedding(note._filePath, embedding, ctx.embeddingModel);
+      ctx.search.storeEmbedding(note._filePath, embedding, provider.model);
       ctx.search.indexNote(note._filePath, note.title, note.content, note.tags);
 
       await ctx.vault.updateNote(note._filePath, undefined, {
         embeddingStatus: "embedded",
         embeddedAt: new Date().toISOString(),
-        embeddingModel: ctx.embeddingModel,
+        embeddingModel: provider.model,
       });
 
       console.log(`[embeddings] Embedded: ${note.title}`);

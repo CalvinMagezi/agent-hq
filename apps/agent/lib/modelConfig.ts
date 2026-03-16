@@ -6,6 +6,7 @@
  *
  * Supports:
  * - Google Generative AI (via GEMINI_API_KEY)
+ * - Anthropic direct (via ANTHROPIC_API_KEY)
  * - OpenRouter (via OPENROUTER_API_KEY, fallback for all models)
  */
 
@@ -15,6 +16,7 @@ export { getFallbackChain } from "./modelFallback.js";
 export interface BuildModelConfigOptions {
     modelId: string;
     geminiApiKey?: string;
+    anthropicApiKey?: string;
     openrouterApiKey?: string;
     ollamaBaseUrl?: string;
 }
@@ -78,6 +80,19 @@ export function isOllamaModel(modelId: string): boolean {
 }
 
 /**
+ * Returns true if the model ID refers to an Anthropic model.
+ * Matches bare IDs like "claude-sonnet-4-6" and prefixed IDs like "anthropic/claude-sonnet-4-6".
+ */
+export function isAnthropicModel(modelId: string): boolean {
+    return modelId.startsWith("claude-") || modelId.startsWith("anthropic/claude-");
+}
+
+/** Strip the "anthropic/" prefix from a model ID. */
+function stripAnthropicPrefix(modelId: string): string {
+    return modelId.startsWith("anthropic/") ? modelId.slice("anthropic/".length) : modelId;
+}
+
+/**
  * Check if the local Ollama server is healthy.
  * Returns true if the server responds within 2 seconds.
  */
@@ -112,7 +127,7 @@ function ensureGooglePrefix(modelId: string): string {
  *  - All other models → OpenRouter
  */
 export function buildModelConfig(options: BuildModelConfigOptions): any {
-    const { modelId, geminiApiKey, openrouterApiKey, ollamaBaseUrl } = options;
+    const { modelId, geminiApiKey, anthropicApiKey, openrouterApiKey, ollamaBaseUrl } = options;
 
     // ── Ollama local path ───────────────────────────────────────────
     if (isOllamaModel(modelId)) {
@@ -154,6 +169,31 @@ export function buildModelConfig(options: BuildModelConfigOptions): any {
             cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 },
             contextWindow: 1048576,
             maxTokens: 65536,
+        };
+    }
+
+    // ── Anthropic direct path ──────────────────────────────────────
+    if (isAnthropicModel(modelId) && anthropicApiKey) {
+        const bareId = stripAnthropicPrefix(modelId);
+
+        // Try the Pi SDK built-in registry first
+        const registryModel = getModel("anthropic", bareId as any);
+        if (registryModel) {
+            return registryModel;
+        }
+
+        // Unknown Anthropic model — construct a sensible default
+        return {
+            id: bareId,
+            name: bareId,
+            provider: "anthropic",
+            api: "anthropic",
+            baseUrl: "https://api.anthropic.com/v1",
+            reasoning: bareId.includes("opus"),
+            input: ["text", "image"],
+            cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+            contextWindow: 200000,
+            maxTokens: 16000,
         };
     }
 

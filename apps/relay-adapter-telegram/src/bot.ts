@@ -154,7 +154,7 @@ class TelegramAdapterBot extends UnifiedAdapterBot {
           await this.tgBridge.sendText("No recent bot message to delete.");
           return;
         }
-        await this.tgBridge.deleteMessage(Number(lastId));
+        await this.tgBridge.deleteMessageById(Number(lastId));
         return;
       }
 

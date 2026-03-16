@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@repo/vault-client": "*",
+    "@repo/env-loader": "workspace:*",
     "@repo/vault-memory": "workspace:*",
     "@repo/context-engine": "workspace:*",
     "@repo/discord-core": "workspace:*",

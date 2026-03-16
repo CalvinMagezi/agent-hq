@@ -515,11 +515,13 @@ export class UnifiedAdapterBot {
           this.stopTyping();
           if (editTmr) { clearTimeout(editTmr); editTmr = null; }
           if (msg) this.bridge.sendReaction(msg.id, "✅", msg.chatId).catch(() => {});
-          if (streamingEdit && editMsgId && this.bridge.editMessage) {
-            // Final edit with complete text (no cursor)
-            this.bridge.editMessage(editMsgId, result).catch(() => {});
-            // Edits don't trigger Telegram notifications — send a brief done message
-            this.bridge.sendText("✅ Response complete", { chatId: this.currentChatId || undefined }).catch(() => {});
+          if (streamingEdit && editMsgId) {
+            // Delete the streaming placeholder and send final text as a reply
+            // to the original message — this triggers a native notification
+            if (this.bridge.deleteMessage) {
+              this.bridge.deleteMessage(editMsgId, this.currentChatId || undefined).catch(() => {});
+            }
+            this.sendChunked(result, msg?.id).catch(console.error);
           } else if (!streaming) {
             // Non-streaming platforms: send full result as one message
             this.sendChunked(result).catch(console.error);
@@ -644,12 +646,14 @@ export class UnifiedAdapterBot {
       sendResponse: async (text, replyToId) => {
         // Skip resending when we've already streamed all tokens to the bridge
         if (streaming) return;
-        // For edit-based streaming, do a final edit with the complete text (no cursor)
-        if (streamingEdit && editPlaceholderMsgId && this.bridge.editMessage) {
+        // For edit-based streaming, delete the placeholder and send as a reply
+        // to the original message — this triggers a native notification
+        if (streamingEdit && editPlaceholderMsgId) {
           if (editTimer) { clearTimeout(editTimer); editTimer = null; }
-          await this.bridge.editMessage(editPlaceholderMsgId, text).catch(() => {});
-          // Send a brief reply notification — edits don't trigger Telegram notifications
-          await this.bridge.sendText("✅ Response complete", { chatId: this.currentChatId || undefined }).catch(() => {});
+          if (this.bridge.deleteMessage) {
+            await this.bridge.deleteMessage(editPlaceholderMsgId, this.currentChatId || undefined).catch(() => {});
+          }
+          await this.sendChunked(text, replyToId);
           return;
         }
         if (this.voiceReplyEnabled && this.voiceHandler) {
@@ -909,6 +913,8 @@ export class UnifiedAdapterBot {
       clearInterval(this.typingInterval);
       this.typingInterval = null;
     }
+    // Also stop the bridge's internal typing keepalive (e.g. TypingManager on Discord)
+    this.bridge.stopTyping?.().catch(() => {});
   }
 
   // ─── Text chunking ─────────────────────────────────────────────

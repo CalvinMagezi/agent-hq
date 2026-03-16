@@ -659,7 +659,7 @@ export class TelegramBridge implements PlatformBridge {
     await this.editMessageById(Number(msgId), text);
   }
 
-  async deleteMessage(messageId: number): Promise<void> {
+  async deleteMessageById(messageId: number): Promise<void> {
     const chatId = this.chatId;
     if (!chatId) return;
 
@@ -805,6 +805,11 @@ export class TelegramBridge implements PlatformBridge {
   /** PlatformBridge.sendReaction */
   async sendReaction(msgId: string, emoji: string): Promise<void> {
     await this.reactToMessage(Number(msgId), emoji);
+  }
+
+  /** PlatformBridge.deleteMessage — string-based ID wrapper. */
+  async deleteMessage(msgId: string): Promise<void> {
+    await this.deleteMessageById(Number(msgId));
   }
 
   /** PlatformBridge.sendFile */

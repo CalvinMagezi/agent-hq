@@ -40,3 +40,19 @@ export { SearchClient } from "./search";
 export { TraceDB } from "./traceDb";
 export { BudgetGuard } from "./budgetGuard";
 export type { BudgetCheckResult } from "./budgetGuard";
+
+// Provider abstraction
+export {
+  resolveEmbeddingProvider,
+  resolveChatProvider,
+  resolveVisionProvider,
+  fetchEmbedding,
+  isEmbeddingProviderAvailable,
+  MODEL_DEFAULTS,
+} from "./models";
+export type {
+  EmbeddingProviderConfig,
+  EmbeddingProviderType,
+  ChatProviderConfig,
+  ChatProviderType,
+} from "./models";

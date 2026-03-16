@@ -1,12 +1,10 @@
-import dotenv from "dotenv";
+import "@repo/env-loader";
 import { acquireLock, releaseLock } from "./src/lock.js";
 import { buildConfig, BotInstance } from "./src/bot.js";
 import { ClaudeHarness } from "./src/claude.js";
 import { OpenCodeHarness } from "./src/harnesses/opencode.js";
 import { GeminiHarness } from "./src/harnesses/gemini.js";
 import { CodexHarness } from "./src/harnesses/codex.js";
-
-dotenv.config({ path: ".env.local" });
 
 // Prevent unhandled errors from crashing the relay process
 process.on("unhandledRejection", (reason: any) => {

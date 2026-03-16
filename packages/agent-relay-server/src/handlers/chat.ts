@@ -3,7 +3,7 @@
  *
  * Priority order for chat routing:
  * 1. AgentBridge (if connected) — routes to local agent WS for full tool use + streaming
- * 2. OpenRouter fallback — direct LLM call with vault context injection
+ * 2. LLM fallback — direct API call with vault context injection (supports multiple providers)
  *
  * Both paths use ContextEnricher for system prompt building and
  * MemoryProcessor to persist [REMEMBER:]/[GOAL:]/[DONE:] tags.
@@ -16,9 +16,14 @@ import type { AgentBridge } from "../bridges/agentBridge";
 import type { ContextEnricher } from "../bridges/contextEnricher";
 import type { MemoryProcessor } from "../bridges/memoryProcessor";
 import type { ChatSendMessage, ChatAbortMessage } from "@repo/agent-relay-protocol";
+import { resolveChatProvider, type ChatProviderConfig } from "@repo/vault-client";
 
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "moonshotai/kimi-k2.5";
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? "";
+// Lazy — resolved on first use so env vars are loaded by the time we need them
+let _chatProvider: ChatProviderConfig | null = null;
+function getChatProvider(): ChatProviderConfig {
+  if (!_chatProvider) _chatProvider = resolveChatProvider();
+  return _chatProvider;
+}
 
 export class ChatHandler {
   private bridge: VaultBridge;
@@ -59,20 +64,19 @@ export class ChatHandler {
       );
       if (routed) {
         console.log("[chat-handler] Routed to agent bridge — waiting for agent response");
-        // Safety timeout: if agent doesn't respond within 30s, fall back to OpenRouter
+        // Safety timeout: if agent doesn't respond within 30s, fall back to LLM
         setTimeout(async () => {
-          // Check if the agent bridge still has a pending stream for this request
           if (this.agentBridge.hasPendingRequest(msg.requestId)) {
-            console.warn("[chat-handler] Agent bridge timeout (30s) — falling back to OpenRouter");
+            console.warn("[chat-handler] Agent bridge timeout (30s) — falling back to LLM");
             this.agentBridge.clearPendingRequest(msg.requestId);
             try {
-              await this.handleOpenRouterChat(ws, msg);
+              await this.handleLLMChat(ws, msg);
             } catch (err) {
-              console.error("[chat-handler] OpenRouter fallback also failed:", err);
+              console.error("[chat-handler] LLM fallback also failed:", err);
               ws.send(JSON.stringify({
                 type: "error",
                 code: "CHAT_TIMEOUT",
-                message: "Agent did not respond and OpenRouter fallback failed",
+                message: "Agent did not respond and LLM fallback failed",
                 requestId: msg.requestId,
               }));
             }
@@ -80,12 +84,12 @@ export class ChatHandler {
         }, 30_000);
         return;
       }
-      console.log("[chat-handler] Agent bridge connected but sendChatMessage returned false, falling back to OpenRouter");
+      console.log("[chat-handler] Agent bridge connected but sendChatMessage returned false, falling back to LLM");
     }
 
-    // Fallback: direct OpenRouter call with vault context
-    console.log(`[chat-handler] Using OpenRouter fallback (key configured: ${OPENROUTER_API_KEY ? "yes" : "NO"})`);
-    await this.handleOpenRouterChat(ws, msg);
+    // Fallback: direct LLM call with vault context
+    console.log(`[chat-handler] Using LLM fallback (provider: ${getChatProvider().type})`);
+    await this.handleLLMChat(ws, msg);
   }
 
   handleChatAbort(
@@ -103,35 +107,35 @@ export class ChatHandler {
     );
   }
 
-  private async handleOpenRouterChat(
+  private async handleLLMChat(
     ws: ServerWebSocket<ClientData>,
     msg: ChatSendMessage,
   ): Promise<void> {
-    if (!OPENROUTER_API_KEY) {
-      console.error("[chat-handler] OPENROUTER_API_KEY is not set — cannot process chat");
+    const provider = getChatProvider();
+
+    if (provider.type === "none") {
+      console.error("[chat-handler] No LLM provider configured — cannot process chat");
       ws.send(
         JSON.stringify({
           type: "error",
           code: "NO_API_KEY",
-          message: "OPENROUTER_API_KEY is not configured on the relay server. Set it in your environment before starting the relay.",
+          message: "No LLM provider configured. Chat only works when the HQ Agent is connected, or set GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY for standalone chat.",
           requestId: msg.requestId,
         }),
       );
       return;
     }
 
-    const model = msg.modelOverride ?? DEFAULT_MODEL;
-    console.log(`[chat-handler] OpenRouter call: model=${model}, content="${msg.content.substring(0, 60)}..."`);
+    const model = msg.modelOverride ?? provider.model;
+    console.log(`[chat-handler] ${provider.type} call: model=${model}, content="${msg.content.substring(0, 60)}..."`);
 
     try {
-      // Build enriched system prompt
       const systemPrompt = await this.enricher.buildSystemPrompt({
         userMessage: msg.content,
         threadId: msg.threadId,
         clientType: ws.data.clientType,
       });
 
-      // Build user message — text-only or multimodal with images
       const userMessage: any = msg.images && msg.images.length > 0
         ? {
             role: "user",
@@ -145,79 +149,39 @@ export class ChatHandler {
           }
         : { role: "user", content: msg.content };
 
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      const { url, headers, body } = this.buildRequest(provider, model, systemPrompt, userMessage);
+
+      const response = await fetch(url, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://agent-hq.local",
-          "X-Title": "Agent HQ Relay",
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            userMessage,
-          ],
-          stream: true,
-        }),
+        headers,
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`OpenRouter API error ${response.status}: ${errorText}`);
+        throw new Error(`${provider.type} API error ${response.status}: ${errorText}`);
       }
 
       if (!response.body) throw new Error("No response body");
 
       let fullResponse = "";
       let chunkIndex = 0;
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
-
-        for (const line of lines) {
-          const data = line.substring(6).trim();
-          if (data === "[DONE]") continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta?.content;
-            if (delta) {
-              fullResponse += delta;
-              ws.send(
-                JSON.stringify({
-                  type: "chat:delta",
-                  requestId: msg.requestId,
-                  threadId: msg.threadId,
-                  delta,
-                  index: chunkIndex++,
-                }),
-              );
-            }
-          } catch {
-            // Skip malformed chunks
-          }
-        }
+      if (provider.type === "anthropic") {
+        // Anthropic uses SSE with different event format
+        fullResponse = await this.streamAnthropicResponse(response, ws, msg, chunkIndex);
+      } else {
+        // OpenRouter and Gemini use OpenAI-compatible SSE
+        fullResponse = await this.streamOpenAIResponse(response, ws, msg, chunkIndex);
       }
 
-      // Process memory tags, clean response
       const cleaned = await this.memoryProcessor.processResponse(fullResponse);
 
-      // Save to thread if threadId provided
       if (msg.threadId) {
         try {
           await this.bridge.client.appendMessage(msg.threadId, "user", msg.content);
           await this.bridge.client.appendMessage(msg.threadId, "assistant", cleaned);
-        } catch {
-          // Non-fatal
-        }
+        } catch { /* Non-fatal */ }
       }
 
       ws.send(
@@ -229,9 +193,9 @@ export class ChatHandler {
         }),
       );
 
-      console.log(`[chat-handler] OpenRouter response complete (${cleaned.length} chars)`);
+      console.log(`[chat-handler] ${provider.type} response complete (${cleaned.length} chars)`);
     } catch (err) {
-      console.error("[chat-handler] OpenRouter error:", err instanceof Error ? err.message : err);
+      console.error(`[chat-handler] ${provider.type} error:`, err instanceof Error ? err.message : err);
       ws.send(
         JSON.stringify({
           type: "error",
@@ -241,5 +205,157 @@ export class ChatHandler {
         }),
       );
     }
+  }
+
+  private buildRequest(
+    provider: ChatProviderConfig,
+    model: string,
+    systemPrompt: string,
+    userMessage: any,
+  ): { url: string; headers: Record<string, string>; body: any } {
+    if (provider.type === "anthropic") {
+      return {
+        url: `${provider.baseUrl}/messages`,
+        headers: {
+          "x-api-key": provider.apiKey!,
+          "anthropic-version": "2023-06-01",
+          "Content-Type": "application/json",
+        },
+        body: {
+          model,
+          system: systemPrompt,
+          messages: [userMessage],
+          max_tokens: 4096,
+          stream: true,
+        },
+      };
+    }
+
+    if (provider.type === "gemini") {
+      // Use OpenAI-compatible endpoint for streaming
+      return {
+        url: `${provider.baseUrl}/openai/chat/completions`,
+        headers: {
+          Authorization: `Bearer ${provider.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: {
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            userMessage,
+          ],
+          stream: true,
+        },
+      };
+    }
+
+    // OpenRouter (default)
+    return {
+      url: `${provider.baseUrl}/chat/completions`,
+      headers: {
+        Authorization: `Bearer ${provider.apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://agent-hq.local",
+        "X-Title": "Agent HQ Relay",
+      },
+      body: {
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          userMessage,
+        ],
+        stream: true,
+      },
+    };
+  }
+
+  private async streamOpenAIResponse(
+    response: Response,
+    ws: ServerWebSocket<ClientData>,
+    msg: ChatSendMessage,
+    startIndex: number,
+  ): Promise<string> {
+    let fullResponse = "";
+    let chunkIndex = startIndex;
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n").filter((l) => l.startsWith("data: "));
+
+      for (const line of lines) {
+        const data = line.substring(6).trim();
+        if (data === "[DONE]") continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullResponse += delta;
+            ws.send(
+              JSON.stringify({
+                type: "chat:delta",
+                requestId: msg.requestId,
+                threadId: msg.threadId,
+                delta,
+                index: chunkIndex++,
+              }),
+            );
+          }
+        } catch { /* Skip malformed chunks */ }
+      }
+    }
+
+    return fullResponse;
+  }
+
+  private async streamAnthropicResponse(
+    response: Response,
+    ws: ServerWebSocket<ClientData>,
+    msg: ChatSendMessage,
+    startIndex: number,
+  ): Promise<string> {
+    let fullResponse = "";
+    let chunkIndex = startIndex;
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const data = line.substring(6).trim();
+        if (!data) continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          if (parsed.type === "content_block_delta" && parsed.delta?.text) {
+            const delta = parsed.delta.text;
+            fullResponse += delta;
+            ws.send(
+              JSON.stringify({
+                type: "chat:delta",
+                requestId: msg.requestId,
+                threadId: msg.threadId,
+                delta,
+                index: chunkIndex++,
+              }),
+            );
+          }
+        } catch { /* Skip malformed chunks */ }
+      }
+    }
+
+    return fullResponse;
   }
 }

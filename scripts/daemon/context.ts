@@ -8,6 +8,7 @@
 
 import type { SyncedVaultClient } from "@repo/vault-sync";
 import type { SearchClient } from "@repo/vault-client/search";
+import type { EmbeddingProviderConfig } from "@repo/vault-client";
 
 export interface MemorySystem {
   forgetter: { runCycle: () => { decayed: number; pruned: number; statsAfter: { total: number } } };
@@ -28,8 +29,10 @@ export interface DaemonContext {
   search: SearchClient;
   memorySystem: MemorySystem;
   vaultPath: string;
+  /** @deprecated Use embeddingProvider instead */
   openrouterApiKey: string | undefined;
   embeddingModel: string;
+  embeddingProvider: EmbeddingProviderConfig;
 
   // Daemon utilities
   localTimestamp: () => string;

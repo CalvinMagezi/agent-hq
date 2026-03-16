@@ -14,11 +14,12 @@
  * Usage: bun run scripts/agent-hq-daemon.ts
  */
 
+import "@repo/env-loader";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 import { spawn } from "child_process";
-import { VaultClient } from "@repo/vault-client";
+import { VaultClient, resolveEmbeddingProvider, isEmbeddingProviderAvailable } from "@repo/vault-client";
 import { SyncedVaultClient } from "@repo/vault-sync";
 import { SearchClient } from "@repo/vault-client/search";
 import { calculateCost } from "@repo/vault-client/pricing";
@@ -53,6 +54,7 @@ const VAULT_PATH =
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+const embeddingProvider = resolveEmbeddingProvider();
 const STALE_JOB_DAYS = 7;
 const STUCK_JOB_HOURS = 2;
 const OFFLINE_WORKER_SECONDS = 30;
@@ -90,6 +92,7 @@ function getDaemonCtx(): DaemonContext {
       vault, search, memorySystem, vaultPath: VAULT_PATH,
       openrouterApiKey: OPENROUTER_API_KEY,
       embeddingModel: EMBEDDING_MODEL,
+      embeddingProvider,
       localTimestamp, recordTaskRun, recordDailyActivity,
       notify, notifyIfMeaningful,
     };
@@ -142,8 +145,13 @@ function extractTaskIdFromPath(filePath: string): string {
 function validatePrerequisites(): void {
   const warnings: string[] = [];
 
-  if (!OPENROUTER_API_KEY) {
-    warnings.push("OPENROUTER_API_KEY is not set — embeddings will be skipped");
+  if (embeddingProvider.type === "ollama") {
+    // Ollama needs async check — just note it
+    warnings.push(`Embedding provider: Ollama (${embeddingProvider.baseUrl}) — will verify at first use`);
+  } else if (embeddingProvider.type === "none") {
+    warnings.push("No embedding provider configured — FTS5 keyword search active, vector search disabled. Set GEMINI_API_KEY, OPENROUTER_API_KEY, or OLLAMA_BASE_URL for embeddings.");
+  } else {
+    console.log(`[daemon] Embedding provider: ${embeddingProvider.type} (model: ${embeddingProvider.model})`);
   }
   const requiredFiles = ["SOUL.md", "MEMORY.md", "PREFERENCES.md", "HEARTBEAT.md"];
   for (const file of requiredFiles) {
@@ -319,16 +327,18 @@ async function writeDaemonStatus(): Promise<void> {
       pid: process.pid,
       apiKeys: {
         openrouter: !!OPENROUTER_API_KEY,
-        brave: !!process.env.BRAVE_API_KEY,
         gemini: !!process.env.GEMINI_API_KEY,
+        anthropic: !!process.env.ANTHROPIC_API_KEY,
       },
+      embeddingProvider: embeddingProvider.type,
     };
 
     const lines: string[] = ["# Daemon Status", ""];
     lines.push(`**Started:** ${daemonStartedAt}`);
     lines.push(`**PID:** ${process.pid}`);
     lines.push(`**Vault:** ${VAULT_PATH}`);
-    lines.push(`**API Keys:** OpenRouter=${OPENROUTER_API_KEY ? "set" : "MISSING"}, Brave=${process.env.BRAVE_API_KEY ? "set" : "not set"}, Gemini=${process.env.GEMINI_API_KEY ? "set" : "not set"}`);
+    lines.push(`**Embedding Provider:** ${embeddingProvider.type} (model: ${embeddingProvider.model || "n/a"})`);
+    lines.push(`**API Keys:** OpenRouter=${OPENROUTER_API_KEY ? "set" : "not set"}, Gemini=${process.env.GEMINI_API_KEY ? "set" : "not set"}, Anthropic=${process.env.ANTHROPIC_API_KEY ? "set" : "not set"}`);
     lines.push("");
     lines.push("## Task Status");
     lines.push("");

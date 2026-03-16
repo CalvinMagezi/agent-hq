@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "@repo/env-loader";
 import { startHQMcpServer } from "./mcpServer.js";
 import { SearchClient } from "@repo/vault-client/search";
 import * as path from "path";

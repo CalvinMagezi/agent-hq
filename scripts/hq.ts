@@ -1651,13 +1651,14 @@ async function cmdInit(argv: string[]): Promise<void> {
     // Agents can pass keys via environment variables
     const orKey = process.env.OPENROUTER_API_KEY ?? "";
     const gemKey = process.env.GEMINI_API_KEY ?? "";
+    const anKey = process.env.ANTHROPIC_API_KEY ?? "";
     const model = process.env.DEFAULT_MODEL ?? "gemini-2.5-flash";
     fs.writeFileSync(agentEnv,
-      `# apps/agent/.env.local\nVAULT_PATH=${vaultPath}\nOPENROUTER_API_KEY=${orKey}\nGEMINI_API_KEY=${gemKey}\nDEFAULT_MODEL=${model}\n`,
+      `# apps/agent/.env.local\nVAULT_PATH=${vaultPath}\nOPENROUTER_API_KEY=${orKey}\nGEMINI_API_KEY=${gemKey}\nANTHROPIC_API_KEY=${anKey}\nDEFAULT_MODEL=${model}\n`,
       "utf-8"
     );
     ok(`Created ${agentEnv}`);
-    if (!orKey && !gemKey) warn("Set OPENROUTER_API_KEY or GEMINI_API_KEY before starting the agent");
+    if (!orKey && !gemKey && !anKey) info("No API keys set. Relay harnesses (Claude, Codex, Gemini) work without keys. Set OPENROUTER_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY for embeddings & chat fallback.");
   } else {
     info("apps/agent/.env.local exists (skipped)");
   }
@@ -1992,12 +1993,28 @@ async function cmdDoctor(): Promise<void> {
   const agentEnv = parseEnvFile(agentEnvPath);
   const hasOpenRouter = !!agentEnv.OPENROUTER_API_KEY;
   const hasGemini = !!agentEnv.GEMINI_API_KEY;
-  if (hasOpenRouter || hasGemini) {
-    ok(`API keys configured (${hasOpenRouter ? "OpenRouter" : ""}${hasOpenRouter && hasGemini ? " + " : ""}${hasGemini ? "Gemini" : ""})`);
+  const hasAnthropic = !!agentEnv.ANTHROPIC_API_KEY;
+  const configuredKeys = [hasOpenRouter && "OpenRouter", hasGemini && "Gemini", hasAnthropic && "Anthropic"].filter(Boolean);
+  if (configuredKeys.length > 0) {
+    ok(`API keys configured (${configuredKeys.join(" + ")})`);
   } else if (fs.existsSync(agentEnvPath)) {
-    fail(`No API keys set — run: ${c.bold}hq env${c.reset}`); issues++;
+    warn(`No LLM API keys set — relay harnesses work without keys, but embeddings/chat fallback require one. Run: ${c.bold}hq env${c.reset}`);
   } else {
-    fail(`No .env.local found — run: ${c.bold}hq env${c.reset}`); issues++;
+    warn(`No .env.local found — run: ${c.bold}hq env${c.reset}`);
+  }
+
+  // 5b. CLI harness availability
+  const harnesses: string[] = [];
+  for (const cli of ["claude", "codex", "gemini", "opencode"] as const) {
+    try {
+      require("child_process").execSync(`which ${cli}`, { stdio: "ignore" });
+      harnesses.push(cli);
+    } catch { /* not installed */ }
+  }
+  if (harnesses.length > 0) {
+    ok(`CLI harnesses available: ${harnesses.join(", ")}`);
+  } else {
+    dim("  SKIP  No CLI harnesses found (optional) — install with: hq tools");
   }
 
   // 6. Discord (optional)
@@ -2066,7 +2083,7 @@ async function cmdEnv(): Promise<void> {
   const mask = (val: string) => val ? val.slice(0, 8) + "..." : "(not set)";
 
   // 1. OpenRouter API Key
-  console.log(`${c.bold}1. OpenRouter API Key${c.reset} ${c.dim}(required for AI chat)${c.reset}`);
+  console.log(`${c.bold}1. OpenRouter API Key${c.reset} ${c.dim}(optional — routes to any model)${c.reset}`);
   console.log(`   Get one at: ${c.cyan}https://openrouter.ai/keys${c.reset}`);
   console.log(`   Current: ${c.dim}${mask(agentEnv.OPENROUTER_API_KEY || "")}${c.reset}`);
   const orKey = readLine("   Enter key (or press Enter to skip)");
@@ -2079,6 +2096,14 @@ async function cmdEnv(): Promise<void> {
   console.log(`   Current: ${c.dim}${mask(agentEnv.GEMINI_API_KEY || "")}${c.reset}`);
   const gemKey = readLine("   Enter key (or press Enter to skip)");
   if (gemKey) agentEnv.GEMINI_API_KEY = gemKey;
+  console.log();
+
+  // 2b. Anthropic API Key (optional)
+  console.log(`${c.bold}2b. Anthropic API Key${c.reset} ${c.dim}(optional — for direct Claude API access)${c.reset}`);
+  console.log(`   Get one at: ${c.cyan}https://console.anthropic.com/settings/keys${c.reset}`);
+  console.log(`   Current: ${c.dim}${mask(agentEnv.ANTHROPIC_API_KEY || "")}${c.reset}`);
+  const anKey = readLine("   Enter key (or press Enter to skip)");
+  if (anKey) agentEnv.ANTHROPIC_API_KEY = anKey;
   console.log();
 
   // 3. Default model
@@ -2310,9 +2335,9 @@ Welcome! Let's get you set up step by step.
   // Step 2: API keys
   const agentEnvPath = path.join(REPO_ROOT, "apps/agent/.env.local");
   const agentEnv = parseEnvFile(agentEnvPath);
-  if (!agentEnv.OPENROUTER_API_KEY && !agentEnv.GEMINI_API_KEY) {
+  if (!agentEnv.OPENROUTER_API_KEY && !agentEnv.GEMINI_API_KEY && !agentEnv.ANTHROPIC_API_KEY) {
     console.log(`\n${c.bold}Step 1: API Keys${c.reset}`);
-    console.log("You need at least one API key to use AI chat.\n");
+    console.log("API keys are optional — relay harnesses (Claude, Codex, Gemini) work without them.\nKeys enable embeddings, chat fallback, and vision features.\n");
 
     const wantsKeys = confirmInstall("Set up API keys now?");
     if (wantsKeys) {

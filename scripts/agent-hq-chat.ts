@@ -15,6 +15,7 @@
  * the relay server for real-time streaming and agent tool use.
  */
 
+import "@repo/env-loader";
 import * as readline from "readline";
 import * as path from "path";
 import * as fs from "fs";

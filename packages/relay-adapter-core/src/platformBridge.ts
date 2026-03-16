@@ -116,6 +116,10 @@ export interface PlatformBridge {
   sendText(text: string, opts?: SendOpts): Promise<string | null>;
   /** Send a typing / composing indicator. */
   sendTyping(chatId?: string): Promise<void>;
+  /** Stop the typing / composing indicator. Optional — defaults to no-op. */
+  stopTyping?(chatId?: string): Promise<void>;
+  /** Delete a previously sent message by ID. Optional. */
+  deleteMessage?(msgId: string, chatId?: string): Promise<void>;
   /** Send an emoji reaction to a specific message. */
   sendReaction(msgId: string, emoji: string, chatId?: string): Promise<void>;
   /** Send a binary file. */

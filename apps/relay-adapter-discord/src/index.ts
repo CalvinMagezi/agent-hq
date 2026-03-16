@@ -14,12 +14,8 @@
  *   AGENTHQ_API_KEY          API key for relay server authentication
  */
 
-import { config as loadEnv } from "dotenv";
+import "@repo/env-loader";
 import { RelayDiscordBot } from "./bot.js";
-
-// Load .env.local first, then .env
-loadEnv({ path: ".env.local" });
-loadEnv();
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN_RELAY ?? process.env.DISCORD_BOT_TOKEN;
 const DISCORD_USER_ID = process.env.DISCORD_USER_ID;

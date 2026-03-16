@@ -16,7 +16,7 @@ import {
     type AgentToolState,
 } from "./lib/agentTools.js";
 import { AgentAdapter } from "@repo/vault-client/agent-adapter";
-import dotenv from "dotenv";
+import "@repo/env-loader";
 import * as fs from "fs";
 import * as path from "path";
 import { ToolGuardian, SecurityProfile, DEFAULT_POLICIES, PROFILE_TOOL_NAMES, createSecuritySpawnHook, type ApprovalCallback } from "./governance.js";
@@ -55,8 +55,6 @@ import { SearchClient } from "@repo/vault-client/search";
 import { BudgetGuard } from "@repo/vault-client";
 
 
-dotenv.config({ path: ".env.local" });
-
 // Load environment variables
 const VAULT_PATH = process.env.VAULT_PATH || path.resolve(process.cwd(), "../../.vault");
 const TARGET_DIR = process.env.TARGET_DIR || process.cwd();
@@ -64,14 +62,15 @@ const API_KEY = process.env.AGENTHQ_API_KEY || "local-master-key";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GOOGLE_WORKSPACE_CREDENTIALS_FILE = process.env.GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE;
 
-if (!OPENROUTER_API_KEY && !GEMINI_API_KEY) {
-    console.warn("Warning: Neither OPENROUTER_API_KEY nor GEMINI_API_KEY is set. LLM calls will fail.");
+if (!OPENROUTER_API_KEY && !GEMINI_API_KEY && !ANTHROPIC_API_KEY) {
+    console.warn("Warning: No LLM API keys set (OPENROUTER_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY). LLM calls will fail unless using local Ollama.");
 } else {
     if (GEMINI_API_KEY) console.log("✓ GEMINI_API_KEY configured — Gemini models will use Google API directly");
-    if (OPENROUTER_API_KEY) console.log("✓ OPENROUTER_API_KEY configured — non-Gemini models available via OpenRouter");
-    if (!GEMINI_API_KEY) console.log("Note: GEMINI_API_KEY not set — Gemini models will route through OpenRouter");
+    if (ANTHROPIC_API_KEY) console.log("✓ ANTHROPIC_API_KEY configured — Claude models will use Anthropic API directly");
+    if (OPENROUTER_API_KEY) console.log("✓ OPENROUTER_API_KEY configured — all models available via OpenRouter");
 }
 
 const MODEL_ID = process.env.DEFAULT_MODEL || "gemini-2.5-flash";
@@ -128,6 +127,7 @@ const hqGatewayContext = {
     vaultPath: VAULT_PATH,
     openrouterApiKey: OPENROUTER_API_KEY,
     geminiApiKey: GEMINI_API_KEY,
+    anthropicApiKey: ANTHROPIC_API_KEY,
     googleWorkspaceCredentialsFile: GOOGLE_WORKSPACE_CREDENTIALS_FILE,
     searchClient,
     planDB,
@@ -239,13 +239,14 @@ async function setupAgent() {
     }, 10000); // 10 seconds
 
     // 4. Initialize Chat Session (shared brain for all clients: Discord, WebSocket, etc.)
-    if (OPENROUTER_API_KEY || GEMINI_API_KEY) {
+    if (OPENROUTER_API_KEY || GEMINI_API_KEY || ANTHROPIC_API_KEY) {
         chatSession = new ChatSessionManager({
             targetDir: TARGET_DIR,
             workerId: WORKER_ID,
             modelId: MODEL_ID,
             openrouterApiKey: OPENROUTER_API_KEY,
             geminiApiKey: GEMINI_API_KEY,
+            anthropicApiKey: ANTHROPIC_API_KEY,
             vaultClient: adapter.client,
             apiKey: API_KEY,
             contextFile: CONTEXT_FILE,
@@ -748,6 +749,7 @@ async function handleJob(job: any) {
         const model = buildModelConfig({
             modelId: effectiveModelId,
             geminiApiKey: GEMINI_API_KEY,
+            anthropicApiKey: ANTHROPIC_API_KEY,
             openrouterApiKey: OPENROUTER_API_KEY,
         });
 
@@ -1165,7 +1167,7 @@ Remember: You are the ORCHESTRATOR. Clarify first, then delegate, monitor progre
                 // Fallback: rebuild session with new model and re-subscribe event handler
                 logger.warn(`Falling back to model: ${modelId}`, { previousModel: effectiveModelId, jobId: job._id });
                 await adapter.addJobLog({ jobId: job._id, type: "warning", content: `Model ${effectiveModelId} failed — retrying with ${modelId}` });
-                const fallbackModel = buildModelConfig({ modelId, geminiApiKey: GEMINI_API_KEY, openrouterApiKey: OPENROUTER_API_KEY });
+                const fallbackModel = buildModelConfig({ modelId, geminiApiKey: GEMINI_API_KEY, anthropicApiKey: ANTHROPIC_API_KEY, openrouterApiKey: OPENROUTER_API_KEY });
                 const { session: fallbackSession } = await createAgentSession({ ...sessionOptions, model: fallbackModel });
                 currentSession = fallbackSession;
                 if (profileToolNames !== "*") {

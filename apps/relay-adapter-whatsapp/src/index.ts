@@ -28,17 +28,13 @@
  *   MEDIA_AUTO_PROCESS    Auto-process received media with AI (default: true)
  */
 
+import "@repo/env-loader";
 import path from "node:path";
-import { config as loadEnv } from "dotenv";
 import { WhatsAppGuard } from "./guard.js";
 import { WhatsAppBridge } from "./whatsapp.js";
 import { RelayWhatsAppBot } from "./bot.js";
 import { VoiceHandler } from "./voice.js";
 import { MediaHandler } from "./media.js";
-
-// Load .env.local first, then .env
-loadEnv({ path: ".env.local" });
-loadEnv();
 
 const OWNER_JID = process.env.WHATSAPP_OWNER_JID;
 

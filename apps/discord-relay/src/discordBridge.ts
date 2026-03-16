@@ -104,6 +104,10 @@ export class DiscordBridge extends DiscordBotBase implements PlatformBridge {
     if (chatId) this.startTyping("unified-bot", chatId);
   }
 
+  async stopTyping(): Promise<void> {
+    this.typing.stopAll();
+  }
+
   async sendFile(
     buffer: Buffer,
     filename: string,

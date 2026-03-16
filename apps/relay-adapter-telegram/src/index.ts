@@ -28,20 +28,13 @@
  *   MEDIA_AUTO_PROCESS    Auto-process received media (default: true)
  */
 
-import { config as loadEnv } from "dotenv";
+import "@repo/env-loader";
 import path from "node:path";
 import { TelegramGuard } from "./guard.js";
 import { TelegramBridge } from "./telegram.js";
 import { RelayTelegramBot } from "./bot.js";
 import { VoiceHandler } from "./voice.js";
 import { MediaHandler } from "./media.js";
-
-// Load env: local .env.local first, then root .env.local, then .env
-// This lets the root .env.local hold shared keys (API keys, bot token, etc.)
-const rootDir = path.resolve(import.meta.dir, "../../..");
-loadEnv({ path: ".env.local" });
-loadEnv({ path: path.join(rootDir, ".env.local") });
-loadEnv();
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const USER_ID = process.env.TELEGRAM_USER_ID;

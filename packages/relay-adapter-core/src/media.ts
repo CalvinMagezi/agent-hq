@@ -2,7 +2,7 @@
  * MediaHandler — shared media processing for relay adapters.
  *
  * Handles:
- * - AI vision for image description via OpenRouter
+ * - AI vision for image description (supports Gemini, OpenRouter, Anthropic)
  * - Document text extraction (rich format support)
  * - Temp file management with periodic cleanup
  *
@@ -13,8 +13,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { resolveVisionProvider, type ChatProviderConfig } from "@repo/vault-client";
 
 export interface MediaHandlerConfig {
+  /** @deprecated Use auto-detection or set env vars (GEMINI_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY) */
   openRouterApiKey?: string;
   visionModel?: string;
   tempDir?: string;
@@ -22,15 +24,28 @@ export interface MediaHandlerConfig {
 }
 
 export class MediaHandler {
-  protected openRouterApiKey: string | null;
-  protected visionModel: string;
+  protected visionProvider: ChatProviderConfig;
   protected tempDir: string;
   protected tempMaxAge: number;
   protected cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: MediaHandlerConfig = {}) {
-    this.openRouterApiKey = config.openRouterApiKey ?? null;
-    this.visionModel = config.visionModel ?? "google/gemini-2.5-flash-preview-05-20";
+    // Auto-detect vision provider from env vars
+    this.visionProvider = resolveVisionProvider();
+
+    // Legacy backward compat: if explicit key was passed and no provider was detected, use it
+    if (config.openRouterApiKey && this.visionProvider.type === "none") {
+      this.visionProvider = {
+        type: "openrouter",
+        apiKey: config.openRouterApiKey,
+        baseUrl: "https://openrouter.ai/api/v1",
+        model: config.visionModel ?? "google/gemini-2.5-flash-preview-05-20",
+      };
+    }
+    if (config.visionModel && this.visionProvider.type !== "none") {
+      this.visionProvider = { ...this.visionProvider, model: config.visionModel };
+    }
+
     this.tempDir = config.tempDir ?? path.join(process.cwd(), ".media-temp");
     this.tempMaxAge = config.tempMaxAge ?? 60 * 60 * 1000;
 
@@ -39,61 +54,137 @@ export class MediaHandler {
   }
 
   get canDescribe(): boolean {
-    return !!this.openRouterApiKey;
+    return this.visionProvider.type !== "none";
   }
 
   async describeImage(buffer: Buffer, prompt?: string): Promise<string> {
-    if (!this.openRouterApiKey) {
-      return "(AI vision not available — set OPENROUTER_API_KEY)";
+    if (this.visionProvider.type === "none") {
+      return "(AI vision not available — set GEMINI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY)";
     }
 
     const base64 = buffer.toString("base64");
     const mimeGuess = detectImageMime(buffer);
-
     const systemPrompt = "You are a helpful assistant. Describe what you see in the image concisely.";
     const userPrompt = prompt ?? "What is in this image? Be concise but thorough.";
 
     try {
-      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.openRouterApiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": "https://agent-hq.local",
-        },
-        body: JSON.stringify({
-          model: this.visionModel,
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: [
-                { type: "text", text: userPrompt },
-                {
-                  type: "image_url",
-                  image_url: { url: `data:${mimeGuess};base64,${base64}` },
-                },
-              ],
-            },
-          ],
-          max_tokens: 500,
-        }),
-      });
-
-      if (!response.ok) {
-        const err = await response.text();
-        console.error(`[media] Vision API error (${response.status}):`, err);
-        return `(Vision API error: ${response.status})`;
+      if (this.visionProvider.type === "gemini") {
+        return await this.describeViaGemini(base64, mimeGuess, systemPrompt, userPrompt);
       }
-
-      const json = (await response.json()) as {
-        choices?: { message?: { content?: string } }[];
-      };
-      return json.choices?.[0]?.message?.content?.trim() ?? "(No description generated)";
+      if (this.visionProvider.type === "anthropic") {
+        return await this.describeViaAnthropic(base64, mimeGuess, systemPrompt, userPrompt);
+      }
+      // OpenRouter (default)
+      return await this.describeViaOpenAI(base64, mimeGuess, systemPrompt, userPrompt);
     } catch (err) {
       console.error("[media] Vision API call failed:", err);
       return `(Vision failed: ${err instanceof Error ? err.message : String(err)})`;
     }
+  }
+
+  private async describeViaOpenAI(
+    base64: string, mime: string, system: string, user: string,
+  ): Promise<string> {
+    const response = await fetch(`${this.visionProvider.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.visionProvider.apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://agent-hq.local",
+      },
+      body: JSON.stringify({
+        model: this.visionProvider.model,
+        messages: [
+          { role: "system", content: system },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: user },
+              { type: "image_url", image_url: { url: `data:${mime};base64,${base64}` } },
+            ],
+          },
+        ],
+        max_tokens: 500,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error(`[media] Vision API error (${response.status}):`, err);
+      return `(Vision API error: ${response.status})`;
+    }
+
+    const json = (await response.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    return json.choices?.[0]?.message?.content?.trim() ?? "(No description generated)";
+  }
+
+  private async describeViaGemini(
+    base64: string, mime: string, system: string, user: string,
+  ): Promise<string> {
+    const url = `${this.visionProvider.baseUrl}/models/${this.visionProvider.model}:generateContent?key=${this.visionProvider.apiKey}`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{
+          parts: [
+            { text: user },
+            { inlineData: { mimeType: mime, data: base64 } },
+          ],
+        }],
+        generationConfig: { maxOutputTokens: 500 },
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error(`[media] Gemini Vision error (${response.status}):`, err);
+      return `(Vision API error: ${response.status})`;
+    }
+
+    const json = (await response.json()) as {
+      candidates?: { content?: { parts?: { text?: string }[] } }[];
+    };
+    return json.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "(No description generated)";
+  }
+
+  private async describeViaAnthropic(
+    base64: string, mime: string, system: string, user: string,
+  ): Promise<string> {
+    const response = await fetch(`${this.visionProvider.baseUrl}/messages`, {
+      method: "POST",
+      headers: {
+        "x-api-key": this.visionProvider.apiKey!,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: this.visionProvider.model,
+        system,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mime, data: base64 } },
+            { type: "text", text: user },
+          ],
+        }],
+        max_tokens: 500,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      console.error(`[media] Anthropic Vision error (${response.status}):`, err);
+      return `(Vision API error: ${response.status})`;
+    }
+
+    const json = (await response.json()) as {
+      content?: { type: string; text?: string }[];
+    };
+    return json.content?.find((b) => b.type === "text")?.text?.trim() ?? "(No description generated)";
   }
 
   extractDocumentText(buffer: Buffer, mimetype: string, filename?: string): string {

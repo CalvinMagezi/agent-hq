@@ -37,19 +37,13 @@
  *   10. Start this adapter: bun googlechat
  */
 
-import { config as loadEnv } from "dotenv";
+import "@repo/env-loader";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { GoogleChatGuard } from "./guard.js";
 import { GoogleChatBridge } from "./googlechat.js";
 import { RelayGoogleChatBot } from "./bot.js";
 import { loadServiceAccount } from "./gwsClient.js";
-
-// Load env: local .env.local first, then root .env.local, then .env
-const rootDir = path.resolve(import.meta.dir, "../../..");
-loadEnv({ path: ".env.local" });
-loadEnv({ path: path.join(rootDir, ".env.local") });
-loadEnv();
 
 const SA_KEY_FILE = process.env.GOOGLE_CHAT_SA_KEY_FILE;
 const USER_ID = process.env.GOOGLE_CHAT_USER_ID;

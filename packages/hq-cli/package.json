@@ -1,6 +1,6 @@
 {
   "name": "@calvin.magezi/agent-hq",
-  "version": "0.6.4",
+  "version": "0.6.8",
   "description": "HQ CLI — local-first AI agent hub for Claude, Gemini & Discord",
   "homepage": "https://github.com/CalvinMagezi/agent-hq",
   "repository": {
@@ -27,7 +27,8 @@
     "README.md"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.0.0",
+    "bun": ">=1.1.0"
   },
   "scripts": {
     "prepublishOnly": "echo 'Publishing hq CLI...'"

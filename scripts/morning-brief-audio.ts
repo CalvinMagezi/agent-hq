@@ -26,9 +26,18 @@ const OLLAMA_URL  = process.env.OLLAMA_URL ?? "http://localhost:11434";
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "qwen3.5:9b";
 
 const KOKORO_MODEL = "mlx-community/Kokoro-82M-bf16";
-const PYTHON       = "/opt/homebrew/bin/python3.13";
-const FFMPEG       = "/opt/homebrew/bin/ffmpeg";
+const PYTHON       = process.env.PYTHON_BIN   ?? resolveBin(["python3.13", "python3", "python"]);
+const FFMPEG       = process.env.FFMPEG_BIN   ?? resolveBin(["ffmpeg"]);
 const TMP_DIR      = "/tmp/morning-brief-audio";
+
+/** Resolve the first binary found on PATH; falls back to the last name in the list. */
+function resolveBin(names: string[]): string {
+  for (const name of names) {
+    const result = spawnSync("which", [name], { encoding: "utf-8", stdio: "pipe" });
+    if (result.status === 0 && result.stdout.trim()) return result.stdout.trim();
+  }
+  return names[names.length - 1]; // will produce a clear error at use-time
+}
 
 // Feature flag — default OFF. Set MORNING_BRIEF_ENABLED=true to enable.
 const ENABLED = process.env.MORNING_BRIEF_ENABLED === "true";
@@ -363,8 +372,8 @@ function mergeAudio(audioFiles: string[], outputPath: string): void {
 
 // ── Step 6: Deliver — Drive upload + optional Telegram ───────────────────────
 
-const GWS     = "/opt/homebrew/bin/gws";
-const CURL    = "/usr/bin/curl";
+const GWS     = process.env.GWS_BIN  ?? resolveBin(["gws"]);
+const CURL    = process.env.CURL_BIN ?? resolveBin(["curl"]);
 
 interface DeliveryResult {
   driveLink: string | null;

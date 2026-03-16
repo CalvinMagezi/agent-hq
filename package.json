@@ -40,7 +40,8 @@
     "tasks:follow": "bun run scripts/monitor-scheduled-tasks.ts --follow",
     "vault-pwa": "bun --cwd apps/hq-control-center run dev",
     "vault-pwa:ws": "bun --cwd apps/hq-control-center run ws",
-    "native:build": "turbo build:native"
+    "native:build": "turbo build:native",
+    "version:sync": "node -e \"const v=require('./package.json').version;const f='packages/hq-cli/package.json';const p=JSON.parse(require('fs').readFileSync(f,'utf-8'));p.version=v;require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\\n');console.log('hq-cli synced to v'+v)\""
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

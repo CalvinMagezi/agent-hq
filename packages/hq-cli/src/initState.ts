@@ -1,11 +1,12 @@
 /**
  * Idempotent init state tracker.
- * Reads/writes .hq-init-state.json at the repo root so re-running
- * `hq init` skips steps already completed.
+ * Reads/writes agent-hq init state in ~/.config/agent-hq/ so re-running
+ * `hq init` skips steps already completed. Survives `git clean -fd`.
  */
 
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 
 export type InitStep =
   | "preflight"
@@ -29,12 +30,25 @@ export interface InitState {
 
 const STATE_VERSION = "1.0.0";
 
+/** Canonical state file path — outside repo so it survives git clean */
+function resolveStatePath(repoRoot: string): string {
+  const configDir = path.join(os.homedir(), ".config", "agent-hq");
+  fs.mkdirSync(configDir, { recursive: true });
+  // Migrate from old repo-root location if it exists
+  const legacyPath = path.join(repoRoot, ".hq-init-state.json");
+  const newPath = path.join(configDir, "init-state.json");
+  if (fs.existsSync(legacyPath) && !fs.existsSync(newPath)) {
+    try { fs.renameSync(legacyPath, newPath); } catch { /* non-fatal */ }
+  }
+  return newPath;
+}
+
 export class InitStateManager {
   private filePath: string;
   private state: InitState;
 
   constructor(repoRoot: string) {
-    this.filePath = path.join(repoRoot, ".hq-init-state.json");
+    this.filePath = resolveStatePath(repoRoot);
     this.state = this.load();
   }
 

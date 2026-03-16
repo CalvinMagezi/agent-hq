@@ -1509,8 +1509,14 @@ async function cmdSetup(): Promise<void> {
   ok(`Vault ready at ${VAULT_PATH} (${created} dirs created, ${seeded} files seeded)`);
 }
 
-// hq init [--non-interactive] [--reset] [--vault <path>] [--repo-url <url>] [--skip-ollama] [--skip-tools]
+// hq init [--non-interactive] [--reset] [--vault <path>] [--repo-url <url>]
+//         [--skip-ollama] [--skip-tools] [--profile vps|desktop]
 async function cmdInit(argv: string[]): Promise<void> {
+  // --profile vps is a shorthand for --non-interactive --skip-ollama --skip-tools
+  const profile = argv.includes("--profile") ? argv[argv.indexOf("--profile") + 1] : undefined;
+  if (profile === "vps") {
+    argv = [...argv, "--non-interactive", "--skip-ollama", "--skip-tools"];
+  }
   const nonInteractive = argv.includes("--non-interactive") || argv.includes("-y") || !process.stdout.isTTY;
   const doReset = argv.includes("--reset");
   const skipOllama = argv.includes("--skip-ollama");
@@ -1848,6 +1854,14 @@ async function cmdDoctor(): Promise<void> {
   const vaultPath = process.env.VAULT_PATH ?? path.resolve(REPO_ROOT, ".vault");
   if (fs.existsSync(path.join(vaultPath, "_system/SOUL.md"))) {
     ok(`Vault scaffolded at ${vaultPath}`);
+    // Warn if vault path contains a different user's home directory
+    const currentUser = os.userInfo().username;
+    const pathUser = vaultPath.match(/\/(?:Users|home)\/([^/]+)\//)?.[1];
+    if (pathUser && pathUser !== currentUser) {
+      warn(`VAULT_PATH contains username "${pathUser}" but current user is "${currentUser}" — path may be stale from another machine`);
+      warn(`  Run: ${c.bold}hq init --reset${c.reset} to regenerate env files with the correct path`);
+      issues++;
+    }
   } else if (fs.existsSync(vaultPath)) {
     fail(`Vault exists at ${vaultPath} but not scaffolded — run: ${c.bold}hq setup${c.reset}`); issues++;
   } else {
@@ -2294,6 +2308,9 @@ ${c.dim}Run ${c.reset}${c.bold}hq help --agent${c.reset}${c.dim} for AI agent qu
 
 ${c.bold}SETUP & TOOLS${c.reset}
   hq init --non-interactive     Unattended setup (safe for CI / agent execution)
+  hq init --profile vps         VPS preset (implies --non-interactive --skip-ollama --skip-tools)
+  hq init --skip-ollama         Skip Ollama model pulls (headless/VPS safe)
+  hq init --skip-tools          Skip Claude/Gemini/OpenCode CLI install
   hq setup                      Scaffold vault directories only
   hq tools                      Install Claude/Gemini/OpenCode CLIs
   hq mcp                        Auto-install HQ MCP server to all AI agents

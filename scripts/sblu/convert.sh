@@ -94,7 +94,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
 fi
 
 # ── Resolve Python ────────────────────────────────────────────────────────────
-SBLU_PYTHON="${SBLU_PYTHON:-${SBLU_VENV:-/Users/calvinmagezi/.sblu-env}/bin/python3}"
+SBLU_PYTHON="${SBLU_PYTHON:-${SBLU_VENV:-$HOME/.sblu-env}/bin/python3}"
 if [[ ! -x "$SBLU_PYTHON" ]]; then SBLU_PYTHON="python3"; fi
 
 # ── Check prerequisites ───────────────────────────────────────────────────────

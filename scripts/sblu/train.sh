@@ -95,7 +95,7 @@ if [[ ! -f "$VAL_FILE" ]]; then
 fi
 
 # ── Resolve Python (use dedicated SBLU venv if available) ─────────────────────
-SBLU_PYTHON="${SBLU_PYTHON:-${SBLU_VENV:-/Users/calvinmagezi/.sblu-env}/bin/python3}"
+SBLU_PYTHON="${SBLU_PYTHON:-${SBLU_VENV:-$HOME/.sblu-env}/bin/python3}"
 if [[ ! -x "$SBLU_PYTHON" ]]; then
     SBLU_PYTHON="python3"
 fi

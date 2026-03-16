@@ -16,6 +16,16 @@ export const HQ_DIR = path.join(REPO_ROOT, "apps/agent");
 export const SCRIPTS_DIR = path.join(REPO_ROOT, "scripts");
 export const LAUNCH_AGENTS = path.join(os.homedir(), "Library/LaunchAgents");
 
+/** Platform-appropriate log directory */
+export const LOG_DIR = process.platform === "darwin"
+  ? path.join(os.homedir(), "Library/Logs")
+  : path.join(os.homedir(), ".local", "share", "agent-hq", "logs");
+
+/** Platform-appropriate PID directory (for Linux detached process tracking) */
+export const PID_DIR = process.platform === "darwin"
+  ? path.join(os.homedir(), "Library/Logs")
+  : path.join(os.homedir(), ".local", "share", "agent-hq", "pids");
+
 export const WA_DIR = path.join(REPO_ROOT, "apps/relay-adapter-whatsapp");
 export const TG_DIR = path.join(REPO_ROOT, "apps/relay-adapter-telegram");
 export const RELAY_SERVER_DIR = path.join(REPO_ROOT, "packages/agent-relay-server");
@@ -27,32 +37,32 @@ export const WA_DAEMON = "com.agent-hq.whatsapp";
 export const TG_DAEMON = "com.agent-hq.telegram";
 export const RELAY_SERVER_DAEMON = "com.agent-hq.relay-server";
 
-export const AGENT_LOG = path.join(os.homedir(), "Library/Logs/hq-agent.log");
-export const AGENT_ERR = path.join(os.homedir(), "Library/Logs/hq-agent.error.log");
-export const RELAY_LOG = path.join(os.homedir(), "Library/Logs/discord-relay.log");
-export const RELAY_ERR = path.join(os.homedir(), "Library/Logs/discord-relay.error.log");
-export const WA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.log");
-export const WA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-whatsapp.error.log");
-export const TG_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.log");
-export const TG_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-telegram.error.log");
-export const RELAY_SERVER_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.log");
-export const RELAY_SERVER_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-relay-server.error.log");
+export const AGENT_LOG = path.join(LOG_DIR, "hq-agent.log");
+export const AGENT_ERR = path.join(LOG_DIR, "hq-agent.error.log");
+export const RELAY_LOG = path.join(LOG_DIR, "discord-relay.log");
+export const RELAY_ERR = path.join(LOG_DIR, "discord-relay.error.log");
+export const WA_LOG = path.join(LOG_DIR, "agent-hq-whatsapp.log");
+export const WA_ERR = path.join(LOG_DIR, "agent-hq-whatsapp.error.log");
+export const TG_LOG = path.join(LOG_DIR, "agent-hq-telegram.log");
+export const TG_ERR = path.join(LOG_DIR, "agent-hq-telegram.error.log");
+export const RELAY_SERVER_LOG = path.join(LOG_DIR, "agent-hq-relay-server.log");
+export const RELAY_SERVER_ERR = path.join(LOG_DIR, "agent-hq-relay-server.error.log");
 export const VAULT_SYNC_DIR = path.join(REPO_ROOT, "packages/vault-sync-server");
 export const VAULT_SYNC_DAEMON = "com.agent-hq.vault-sync";
-export const VAULT_SYNC_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-vault-sync.log");
-export const VAULT_SYNC_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-vault-sync.error.log");
+export const VAULT_SYNC_LOG = path.join(LOG_DIR, "agent-hq-vault-sync.log");
+export const VAULT_SYNC_ERR = path.join(LOG_DIR, "agent-hq-vault-sync.error.log");
 export const ICLOUD_BRIDGE_DAEMON = "com.agent-hq.icloud-bridge";
-export const ICLOUD_BRIDGE_LOG = path.join(os.homedir(), "Library/Logs/com.agent-hq.icloud-bridge.log");
-export const DAEMON_LOG = path.join(os.homedir(), "Library/Logs/hq-daemon.log");
-export const DAEMON_PID = path.join(os.homedir(), "Library/Logs/hq-daemon.pid");
+export const ICLOUD_BRIDGE_LOG = path.join(LOG_DIR, "com.agent-hq.icloud-bridge.log");
+export const DAEMON_LOG = path.join(LOG_DIR, "hq-daemon.log");
+export const DAEMON_PID = path.join(PID_DIR, "hq-daemon.pid");
 
 export const PWA_DIR = path.join(REPO_ROOT, "apps/hq-control-center");
 export const PWA_DAEMON = "com.agent-hq.pwa";
 export const PWA_WS_DAEMON = "com.agent-hq.pwa-ws";
-export const PWA_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-pwa.log");
-export const PWA_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-pwa.error.log");
-export const PWA_WS_LOG = path.join(os.homedir(), "Library/Logs/agent-hq-pwa-ws.log");
-export const PWA_WS_ERR = path.join(os.homedir(), "Library/Logs/agent-hq-pwa-ws.error.log");
+export const PWA_LOG = path.join(LOG_DIR, "agent-hq-pwa.log");
+export const PWA_ERR = path.join(LOG_DIR, "agent-hq-pwa.error.log");
+export const PWA_WS_LOG = path.join(LOG_DIR, "agent-hq-pwa-ws.log");
+export const PWA_WS_ERR = path.join(LOG_DIR, "agent-hq-pwa-ws.error.log");
 
 export const RELAY_LOCK = path.join(RELAY_DIR, ".discord-relay/bot.lock");
 
@@ -107,10 +117,17 @@ export type ServiceTarget = "agent" | "relay" | "whatsapp" | "telegram" | "relay
 // ─── Daemon / process helpers ─────────────────────────────────────────────────
 
 export function daemonPid(daemon: string): string | null {
-  const line = sh(`launchctl list 2>/dev/null | grep "${daemon}"`);
-  if (!line) return null;
-  const pid = line.trim().split(/\s+/)[0];
-  return pid && pid !== "-" && isAlive(pid) ? pid : null;
+  if (process.platform === "darwin") {
+    const line = sh(`launchctl list 2>/dev/null | grep "${daemon}"`);
+    if (!line) return null;
+    const pid = line.trim().split(/\s+/)[0];
+    return pid && pid !== "-" && isAlive(pid) ? pid : null;
+  }
+  // Linux: check file-based PID written by hq start
+  const pidFile = path.join(PID_DIR, `${daemon}.pid`);
+  if (!fs.existsSync(pidFile)) return null;
+  const pid = fs.readFileSync(pidFile, "utf-8").trim();
+  return pid && isAlive(pid) ? pid : null;
 }
 
 export function agentPid(): string | null { return daemonPid(AGENT_DAEMON); }

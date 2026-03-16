@@ -15,7 +15,7 @@ import * as os from "os";
 import { execSync, spawnSync } from "child_process";
 
 import {
-  REPO_ROOT, RELAY_DIR, HQ_DIR, SCRIPTS_DIR, LAUNCH_AGENTS,
+  REPO_ROOT, RELAY_DIR, HQ_DIR, SCRIPTS_DIR, LAUNCH_AGENTS, LOG_DIR, PID_DIR,
   WA_DIR, TG_DIR, RELAY_SERVER_DIR, WA_AUTH_DIR, PWA_DIR,
   AGENT_DAEMON, RELAY_DAEMON, RELAY_SERVER_DAEMON,
   DAEMON_LOG, DAEMON_PID, RELAY_LOCK,
@@ -64,6 +64,36 @@ async function cmdStatus(onlyTarget?: string): Promise<void> {
 // hq start [agent|relay|whatsapp|relay-server|all]
 async function cmdStart(target?: string): Promise<void> {
   const targets = resolveTargets(target);
+
+  // ── Linux: use detached spawn instead of launchd ────────────────────────────
+  if (process.platform !== "darwin") {
+    const { spawn } = await import("child_process");
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.mkdirSync(PID_DIR, { recursive: true });
+
+    for (const t of targets) {
+      const svc = serviceInfo(t);
+      const existingPid = svc.pid();
+      if (existingPid) { warn(`${svc.label} already running (PID: ${existingPid})`); continue; }
+
+      const entryFile = t === "relay-server" ? "src/index.ts" : "index.ts";
+      const out = fs.openSync(svc.log, "a");
+      const err = fs.openSync(svc.err, "a");
+
+      const child = spawn(process.execPath, [entryFile], {
+        cwd: svc.dir,
+        detached: true,
+        stdio: ["ignore", out, err],
+        env: { ...process.env },
+      });
+      child.unref();
+
+      const pidFile = path.join(PID_DIR, `${svc.daemon}.pid`);
+      fs.writeFileSync(pidFile, String(child.pid), "utf-8");
+      ok(`${svc.label} started (PID: ${child.pid}) — logs: ${svc.log}`);
+    }
+    return;
+  }
 
   // If starting whatsapp or telegram, ensure relay-server is started first
   if ((targets.includes("whatsapp") || targets.includes("telegram")) && !targets.includes("relay-server")) {
@@ -118,6 +148,13 @@ async function cmdStart(target?: string): Promise<void> {
 async function cmdStop(target?: string): Promise<void> {
   for (const t of resolveTargets(target)) {
     const svc = serviceInfo(t);
+
+    // On Linux, also clean up the PID file written by cmdStart
+    if (process.platform !== "darwin") {
+      const pidFile = path.join(PID_DIR, `${svc.daemon}.pid`);
+      if (fs.existsSync(pidFile)) fs.rmSync(pidFile);
+      sh(`systemctl --user stop agent-hq-${t}.service 2>/dev/null`);
+    }
 
     const killed = await killAllInstances(t);
     await sleep(500);
@@ -310,6 +347,45 @@ async function cmdHealth(): Promise<void> {
 
 // hq install [agent|relay|all]
 async function cmdInstall(target?: string): Promise<void> {
+  // ── Linux: generate systemd unit files ─────────────────────────────────────
+  if (process.platform !== "darwin") {
+    const systemdDir = path.join(os.homedir(), ".config", "systemd", "user");
+    fs.mkdirSync(systemdDir, { recursive: true });
+
+    for (const t of resolveTargets(target)) {
+      const svc = serviceInfo(t);
+      const entryFile = t === "relay-server" ? "src/index.ts" : "index.ts";
+      const unitName = `agent-hq-${t}.service`;
+      const unitPath = path.join(systemdDir, unitName);
+      const unitContent = [
+        "[Unit]",
+        `Description=Agent HQ — ${svc.label}`,
+        "After=network.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        "Restart=on-failure",
+        "RestartSec=5",
+        `WorkingDirectory=${svc.dir}`,
+        `ExecStart=${process.execPath} ${entryFile}`,
+        `StandardOutput=append:${svc.log}`,
+        `StandardError=append:${svc.err}`,
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+      ].join("\n");
+
+      fs.writeFileSync(unitPath, unitContent, "utf-8");
+      sh("systemctl --user daemon-reload 2>/dev/null");
+      sh(`systemctl --user enable --now ${unitName} 2>/dev/null`);
+      ok(`${svc.label} systemd unit installed: ${unitPath}`);
+      info(`  Control with: systemctl --user start|stop|status ${unitName}`);
+    }
+    return;
+  }
+
+  // ── macOS: launchd ──────────────────────────────────────────────────────────
   for (const t of resolveTargets(target)) {
     const svc = serviceInfo(t);
     const plistSrc = path.join(svc.dir, `${svc.daemon}.plist`);
@@ -1084,7 +1160,7 @@ async function cmdTools(nonInteractive = false): Promise<void> {
       ok("Google Workspace extension: already configured");
     } else {
       info("Provides access to: Keep, Drive, Calendar, Gmail, Docs, Sheets");
-      if (nonInteractive || confirmInstall("Install Google Workspace extension for Gemini CLI?")) {
+      if (!nonInteractive && confirmInstall("Install Google Workspace extension for Gemini CLI?")) {
         const installResult = spawnSync("gemini", [
           "extensions", "install",
           "https://github.com/gemini-cli-extensions/workspace"
@@ -1096,6 +1172,7 @@ async function cmdTools(nonInteractive = false): Promise<void> {
         }
       } else {
         info("Skipped. Install manually: gemini extensions install https://github.com/gemini-cli-extensions/workspace");
+        if (nonInteractive) info("Or run: hq tools  (interactive mode) to install with guided prompts");
       }
     }
 
@@ -1432,10 +1509,12 @@ async function cmdSetup(): Promise<void> {
   ok(`Vault ready at ${VAULT_PATH} (${created} dirs created, ${seeded} files seeded)`);
 }
 
-// hq init [--non-interactive] [--reset] [--vault <path>] [--repo-url <url>]
+// hq init [--non-interactive] [--reset] [--vault <path>] [--repo-url <url>] [--skip-ollama] [--skip-tools]
 async function cmdInit(argv: string[]): Promise<void> {
   const nonInteractive = argv.includes("--non-interactive") || argv.includes("-y") || !process.stdout.isTTY;
   const doReset = argv.includes("--reset");
+  const skipOllama = argv.includes("--skip-ollama");
+  const skipTools = argv.includes("--skip-tools");
   const vaultIdx = argv.indexOf("--vault");
   const repoIdx = argv.indexOf("--repo-url");
   const customVault = vaultIdx >= 0 ? argv[vaultIdx + 1] : undefined;
@@ -1500,9 +1579,14 @@ async function cmdInit(argv: string[]): Promise<void> {
 
   // ── Step 4: CLI Tools (Claude, Gemini, OpenCode) ─────────────────────────────
   if (!state.isDone("tools")) {
-    section("CLI Tools");
-    await cmdTools(nonInteractive);
-    state.markDone("tools");
+    if (skipTools) {
+      info("CLI tools skipped (--skip-tools) — run 'hq tools' interactively to install");
+      state.markDone("tools");
+    } else {
+      section("CLI Tools");
+      await cmdTools(nonInteractive);
+      state.markDone("tools");
+    }
   }
 
   // ── Step 5: Scaffold vault ────────────────────────────────────────────────────
@@ -1513,11 +1597,20 @@ async function cmdInit(argv: string[]): Promise<void> {
     state.markDone("vault");
   }
 
-  // ── Step 6: Ollama models ─────────────────────────────────────────────────────
+  // ── Step 6: Ollama models (optional — local memory features only) ────────────
   if (!state.isDone("models")) {
-    section("Ollama models");
-    await ensureOllamaModels(["qwen3.5:9b", "gemma3:1b"]);
-    state.markDone("models");
+    if (skipOllama) {
+      info("Ollama skipped (--skip-ollama) — local memory features will be unavailable");
+      info("Enable later: hq tools ollama");
+      state.markDone("models");
+    } else if (sh("ollama --version 2>/dev/null")) {
+      section("Ollama models");
+      await ensureOllamaModels(["qwen3.5:9b", "gemma3:1b"]);
+      state.markDone("models");
+    } else {
+      info("Ollama not installed — skipping local model setup (run 'hq tools ollama' to install)");
+      state.markDone("models");
+    }
   }
 
   // ── Step 7: Environment files (with env-var injection for agents) ─────────────
@@ -1571,9 +1664,8 @@ async function cmdInit(argv: string[]): Promise<void> {
       await cmdInstall("all");
       state.markDone("services");
     } else if (platform.serviceManager === "systemd") {
-      warn("systemd service installation is not yet automated — run services manually:");
-      info("  hq fg agent    # run agent in foreground");
-      info("  hq fg relay    # run relay in foreground");
+      await cmdInstall("agent");
+      state.markDone("services");
     } else if (platform.serviceManager === "taskscheduler") {
       warn("Windows Task Scheduler integration coming soon — run services manually:");
       info("  hq fg agent");

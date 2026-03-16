@@ -89,13 +89,14 @@ const DEPS: DepSpec[] = [
   {
     name: "Ollama",
     check: "ollama --version 2>/dev/null",
-    required: true,
-    autoInstall: true,
+    required: false,
+    autoInstall: false,
     install: {
       macos:   ["brew install ollama"],
       linux:   ["curl -fsSL https://ollama.com/install.sh | sh"],
       windows: ["winget install --id Ollama.Ollama -e || powershell -c \"irm https://ollama.com/install.ps1 | iex\""],
     },
+    skipNote: "optional — needed for local memory features only (run: hq tools ollama)",
   },
   {
     name: "Claude CLI",

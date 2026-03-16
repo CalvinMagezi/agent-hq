@@ -58,7 +58,7 @@ const OFFLINE_WORKER_SECONDS = 30;
 const RELAY_STALE_SECONDS = 60;
 
 const HQ_BROWSER_PORT = parseInt(process.env.HQ_BROWSER_PORT ?? "19200", 10);
-const HQ_BROWSER_ENABLED = process.env.HQ_BROWSER_ENABLED !== "false"; // opt-out to disable
+const HQ_BROWSER_ENABLED = process.env.HQ_BROWSER_ENABLED === "true"; // opt-in to enable
 
 // ─── Initialization ──────────────────────────────────────────────────
 
@@ -235,6 +235,7 @@ async function writeCronSchedule(): Promise<void> {
     { interval: "Every 2hr", task: "note-linking", description: "Add semantic Related Notes sections to all embedded notes" },
     { interval: "Every 12hr", task: "topic-mocs", description: "Auto-generate Maps of Content per tag cluster" },
     { interval: "Daily 8pm", task: "daily-brief", description: "Send end-of-day summary to Telegram with all task activity" },
+    { interval: "Daily 6am", task: "morning-brief-audio", description: "Generate local audio brief via Kokoro TTS (MORNING_BRIEF_ENABLED=true)" },
   ];
 
   // ── Claude Code scheduled tasks — load from SKILL.md files ──
@@ -813,6 +814,46 @@ const tasks: {
         const nowHour = new Date().getHours();
         if (nowHour === DAILY_BRIEF_HOUR_EAT) {
           await sendDailyBrief();
+        }
+      },
+      lastRun: 0,
+    },
+    {
+      name: "morning-brief-audio",
+      intervalMs: 60 * 60 * 1000, // checked every hour
+      fn: async () => {
+        // Only enabled when MORNING_BRIEF_ENABLED=true
+        if (process.env.MORNING_BRIEF_ENABLED !== "true") return;
+
+        // Fire at 6 AM EAT
+        const nowHour = new Date().getHours();
+        if (nowHour !== 6) return;
+
+        // Flag file prevents re-running if daemon restarts mid-morning
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const flagPath = path.join(VAULT_PATH, "_embeddings", `.morning-brief-${todayKey}`);
+        if (fs.existsSync(flagPath)) return;
+
+        console.log("[morning-brief] 6 AM — generating daily audio brief...");
+        fs.writeFileSync(flagPath, new Date().toISOString());
+
+        const scriptPath = path.join(path.dirname(new URL(import.meta.url).pathname), "morning-brief-audio.ts");
+        const result = Bun.spawnSync(
+          ["bun", "run", scriptPath],
+          {
+            env: { ...process.env, MORNING_BRIEF_ENABLED: "true" },
+            stdout: "inherit",
+            stderr: "inherit",
+          }
+        );
+
+        if (result.exitCode === 0) {
+          console.log("[morning-brief] Audio brief generated successfully");
+          logActivity("morning-brief-audio", "Daily audio brief generated");
+        } else {
+          console.warn(`[morning-brief] Script exited with code ${result.exitCode}`);
+          // Remove flag so it can retry next hour if it failed
+          fs.rmSync(flagPath, { force: true });
         }
       },
       lastRun: 0,

@@ -14,10 +14,19 @@
  * Usage: bun run scripts/agent-hq-daemon.ts
  */
 
-import "@repo/env-loader";
+import { loadMonorepoEnv } from "@repo/env-loader";
+// Daemon runs from repo root but many agent-specific vars live in apps/agent/.env.local.
+// Load from both locations so MORNING_BRIEF_ENABLED, etc. are picked up.
+loadMonorepoEnv();
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
+const DAEMON_SCRIPT_DIR = import.meta.dir;
+const REPO_ROOT = path.resolve(DAEMON_SCRIPT_DIR, "..");
+// Also load agent-specific env (dotenv won't override already-set vars)
+import { config as dotenvConfig } from "dotenv";
+const agentEnvPath = path.join(REPO_ROOT, "apps/agent/.env.local");
+if (fs.existsSync(agentEnvPath)) dotenvConfig({ path: agentEnvPath });
 import { spawn } from "child_process";
 import { VaultClient, resolveEmbeddingProvider, isEmbeddingProviderAvailable } from "@repo/vault-client";
 import { SyncedVaultClient } from "@repo/vault-sync";

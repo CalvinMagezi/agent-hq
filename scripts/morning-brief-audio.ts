@@ -428,14 +428,15 @@ async function deliver(audioPath: string, dateStr: string, estimatedMin: number)
   if (botToken && chatId) {
     console.log("📱 Sending Telegram notification...");
 
+    // Use HTML parse mode — more forgiving than Markdown with special chars in URLs
     const message = result.driveLink
-      ? `🌅 *Morning Brief — ${dateStr}*\n\n~${estimatedMin} minutes · ${todaysVoice()} voice\n\n[▶️ Listen on Drive](${result.driveLink})`
-      : `🌅 *Morning Brief — ${dateStr}* generated (~${estimatedMin} min). Drive upload failed — check vault.`;
+      ? `🌅 <b>Morning Brief — ${dateStr}</b>\n\n~${estimatedMin} minutes · ${todaysVoice()} voice\n\n<a href="${result.driveLink}">▶️ Listen on Drive</a>`
+      : `🌅 <b>Morning Brief — ${dateStr}</b> generated (~${estimatedMin} min). Drive upload failed — check vault.`;
 
     const tgResult = spawnSync(CURL, [
       "-s", "-X", "POST",
       `https://api.telegram.org/bot${botToken}/sendMessage`,
-      "-d", `chat_id=${chatId}&parse_mode=Markdown&text=${encodeURIComponent(message)}`,
+      "-d", `chat_id=${chatId}&parse_mode=HTML&text=${encodeURIComponent(message)}`,
     ], { encoding: "utf-8", timeout: 15_000 });
 
     if (tgResult.status === 0) {

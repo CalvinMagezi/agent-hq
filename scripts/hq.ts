@@ -2429,6 +2429,8 @@ ${c.bold}MONITORING${c.reset}
   hq health                     Full health check
   hq logs [target] [N]          View last N log lines
   hq plans [list|status|search] Browse cross-agent plans
+  hq brief                      Generate morning brief (local Kokoro TTS)
+  hq brief --nlm                Generate morning brief (NotebookLM deep-dive)
   hq pwa                        Open the HQ web dashboard
   hq vault open                 Open vault in Obsidian`);
 
@@ -2618,6 +2620,20 @@ switch (cmd) {
 
   case "quickstart":
     await cmdQuickstart(); break;
+
+  case "brief": {
+    // hq brief [--notebooklm|--local] [--format deep_dive|debate|critique|brief] [--voice NAME] [--dry-run]
+    const useNlm = process.argv.includes("--notebooklm") || process.argv.includes("--nlm");
+    const scriptName = useNlm ? "morning-brief-notebooklm.ts" : "morning-brief-audio.ts";
+    const scriptPath = path.join(REPO_ROOT, "scripts", scriptName);
+    const passthrough = process.argv.slice(3).filter(a => a !== "--notebooklm" && a !== "--nlm" && a !== "--local");
+    console.log(`Running ${useNlm ? "NotebookLM" : "local Kokoro"} morning brief...`);
+    const r = spawnSync(process.execPath, ["run", scriptPath, ...passthrough], {
+      stdio: "inherit",
+      env: { ...process.env, MORNING_BRIEF_ENABLED: "true" },
+    });
+    process.exit(r.status ?? 1);
+  }
 
   case "help": case "--help": case "-h":
     cmdHelp(arg1); break;

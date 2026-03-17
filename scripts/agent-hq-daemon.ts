@@ -252,6 +252,7 @@ async function writeCronSchedule(): Promise<void> {
     { interval: "Every 12hr", task: "topic-mocs", description: "Auto-generate Maps of Content per tag cluster" },
     { interval: "Daily 8pm", task: "daily-brief", description: "Send end-of-day summary to Telegram with all task activity" },
     { interval: "Daily 6am", task: "morning-brief-audio", description: "Generate local audio brief via Kokoro TTS (MORNING_BRIEF_ENABLED=true)" },
+    { interval: "Daily 6:30am", task: "morning-brief-notebooklm", description: "Generate NotebookLM deep-dive audio brief (MORNING_BRIEF_ENABLED=true)" },
     { interval: "Daily 8am + Mon 9am", task: "model-intelligence", description: "AI model catalog diff (daily) + deep analysis with news (weekly Mondays)" },
   ];
 
@@ -855,6 +856,44 @@ const tasks: {
         } else {
           console.warn(`[morning-brief] Script exited with code ${result.exitCode}`);
           // Remove flag so it can retry next hour if it failed
+          fs.rmSync(flagPath, { force: true });
+        }
+      },
+      lastRun: 0,
+    },
+    {
+      name: "morning-brief-notebooklm",
+      intervalMs: 60 * 60 * 1000, // checked every hour
+      fn: async () => {
+        if (process.env.MORNING_BRIEF_ENABLED !== "true") return;
+
+        // Fire at 6:30 AM EAT — 30 min after the local Kokoro brief
+        const now = new Date();
+        if (now.getHours() !== 6 || now.getMinutes() < 25) return;
+
+        const todayKey = now.toISOString().slice(0, 10);
+        const flagPath = path.join(VAULT_PATH, "_embeddings", `.morning-brief-nlm-${todayKey}`);
+        if (fs.existsSync(flagPath)) return;
+
+        console.log("[morning-brief-nlm] 6:30 AM — generating NotebookLM deep-dive...");
+        fs.writeFileSync(flagPath, new Date().toISOString());
+
+        const scriptPath = path.join(DAEMON_SCRIPT_DIR, "morning-brief-notebooklm.ts");
+        const result = Bun.spawnSync(
+          ["bun", "run", scriptPath],
+          {
+            env: { ...process.env, MORNING_BRIEF_ENABLED: "true" },
+            stdout: "inherit",
+            stderr: "inherit",
+            timeout: 20 * 60 * 1000, // 20 min timeout (NLM generation is slow)
+          }
+        );
+
+        if (result.exitCode === 0) {
+          console.log("[morning-brief-nlm] NotebookLM brief generated successfully");
+          logActivity("morning-brief-notebooklm", "NotebookLM deep-dive brief generated");
+        } else {
+          console.warn(`[morning-brief-nlm] Script exited with code ${result.exitCode}`);
           fs.rmSync(flagPath, { force: true });
         }
       },

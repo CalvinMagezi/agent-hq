@@ -34,7 +34,10 @@ export const APIRoute = createAPIFileRoute('/api/vault-asset')({
             contentType = `image/${ext.replace('.', '')}`
             if (ext === '.svg') contentType = 'image/svg+xml'
             if (ext === '.jpg') contentType = 'image/jpeg'
-        }
+        } else if (ext === '.docx') contentType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        else if (ext === '.pptx') contentType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        else if (ext === '.xlsx') contentType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else if (ext === '.html' || ext === '.htm') contentType = 'text/html'
 
         const buffer = fs.readFileSync(fullPath)
 

@@ -2,12 +2,14 @@ import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Save, FileText } from 'lucide-react'
 import { useRouter } from '@tanstack/react-router'
-import { createNote } from '../server/notes'
+import { createNote, createNoteInFolder, getFolderList } from '../server/notes'
 
 export function QuickNoteOverlay() {
     const [open, setOpen] = useState(false)
     const [title, setTitle] = useState('')
     const [content, setContent] = useState('')
+    const [folder, setFolder] = useState('Notebooks/Inbox')
+    const [folders, setFolders] = useState<string[]>(['Notebooks/Inbox'])
     const [saving, setSaving] = useState(false)
     const router = useRouter()
 
@@ -24,15 +26,27 @@ export function QuickNoteOverlay() {
         return () => window.removeEventListener('keydown', onKeyDown)
     }, [])
 
+    // Load folder list when overlay opens
+    useEffect(() => {
+        if (open) {
+            getFolderList().then((res) => setFolders(res.folders))
+        }
+    }, [open])
+
     const handleSave = async () => {
         if (!title && !content) return
         setSaving(true)
         try {
-            await createNote({ data: { title, content } })
+            if (folder === 'Notebooks/Inbox') {
+                await createNote({ data: { title, content } })
+            } else {
+                await createNoteInFolder({ data: { folder, title, content } })
+            }
             setOpen(false)
             setTitle('')
             setContent('')
-            router.invalidate() // refresh note tree
+            setFolder('Notebooks/Inbox')
+            router.invalidate()
         } catch (err) {
             console.error('Failed to create note', err)
         } finally {
@@ -67,7 +81,6 @@ export function QuickNoteOverlay() {
                             <div className="flex items-center gap-2 text-slate-300">
                                 <FileText className="w-4 h-4 text-emerald-500" />
                                 <span className="text-sm font-semibold tracking-wide">Quick Note</span>
-                                <span className="text-xs text-slate-500 font-mono ml-2 border border-slate-700 rounded px-1.5 py-0.5">Notebooks/Inbox</span>
                             </div>
                             <button onClick={() => setOpen(false)} className="text-slate-500 hover:text-slate-300 transition-colors">
                                 <X className="w-5 h-5" />
@@ -84,6 +97,19 @@ export function QuickNoteOverlay() {
                                     onChange={e => setTitle(e.target.value)}
                                     className="w-full bg-slate-950/50 border border-slate-800 rounded-lg px-4 py-3 text-slate-200 outline-none focus:border-emerald-500/50 transition-colors font-medium"
                                 />
+                            </div>
+
+                            {/* Folder picker */}
+                            <div>
+                                <select
+                                    value={folder}
+                                    onChange={e => setFolder(e.target.value)}
+                                    className="w-full bg-slate-950/50 border border-slate-800 rounded-lg px-4 py-2.5 text-xs text-slate-400 outline-none focus:border-emerald-500/50 transition-colors font-mono"
+                                >
+                                    {folders.map(f => (
+                                        <option key={f} value={f}>{f}</option>
+                                    ))}
+                                </select>
                             </div>
 
                             <div className="flex-1 min-h-[200px]">
@@ -113,7 +139,7 @@ export function QuickNoteOverlay() {
                             >
                                 {saving ? 'Saving...' : (
                                     <>
-                                        <Save className="w-4 h-4" /> Save to Inbox
+                                        <Save className="w-4 h-4" /> Save
                                     </>
                                 )}
                             </button>

@@ -41,12 +41,13 @@ OUTPUT_DIR=""
 
 # ── Model map (SBLU name → HuggingFace model ID for MLX) ─────────────────────
 declare -A MODEL_MAP
-MODEL_MAP["cartographer"]="mlx-community/gemma-3-1b-it-4bit"
-MODEL_MAP["crystallizer"]="mlx-community/gemma-3-4b-it-4bit"
-MODEL_MAP["pulse"]="mlx-community/Qwen2.5-3B-Instruct-4bit"
-MODEL_MAP["weaver"]="mlx-community/SmolLM2-1.7B-Instruct-4bit"
-MODEL_MAP["world-lens"]="mlx-community/phi-4-mini-instruct-4bit"
-MODEL_MAP["auditor"]="mlx-community/gemma-3-1b-it-4bit"
+# All SBLUs standardized on Qwen 3.5 family (2026-03-17)
+MODEL_MAP["cartographer"]="mlx-community/Qwen3.5-2B-OptiQ-4bit"
+MODEL_MAP["crystallizer"]="mlx-community/Qwen3.5-2B-OptiQ-4bit"
+MODEL_MAP["pulse"]="mlx-community/Qwen3.5-2B-OptiQ-4bit"
+MODEL_MAP["weaver"]="mlx-community/Qwen3.5-2B-OptiQ-4bit"
+MODEL_MAP["world-lens"]="mlx-community/Qwen3.5-2B-OptiQ-4bit"
+MODEL_MAP["auditor"]="mlx-community/Qwen3.5-2B-OptiQ-4bit"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do

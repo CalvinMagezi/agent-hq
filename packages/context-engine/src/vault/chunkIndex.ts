@@ -168,16 +168,32 @@ export class ChunkIndex {
 
     /**
      * Query the index and return top-K scored chunks.
+     * When metadataOnly is true, chunk text is replaced with the first sentence
+     * (progressive disclosure tier-1). Callers can expand via the full query later.
      */
     query(
         queryText: string,
         conversationTags: string[],
-        topK: number
+        topK: number,
+        metadataOnly = false
     ): ScoredChunk[] {
         const allChunks = Array.from(this.chunks.values()).flat();
         const scored = scoreChunks(allChunks, queryText, conversationTags);
         scored.sort((a, b) => b.score - a.score);
-        return scored.slice(0, topK);
+        const results = scored.slice(0, topK);
+
+        if (metadataOnly) {
+            return results.map((chunk) => {
+                const firstSentence = extractFirstSentence(chunk.text);
+                return {
+                    ...chunk,
+                    text: firstSentence,
+                    tokens: Math.ceil(firstSentence.length / 3.5),
+                };
+            });
+        }
+
+        return results;
     }
 
     /** Total number of indexed notes */
@@ -189,4 +205,15 @@ export class ChunkIndex {
     get chunkCount(): number {
         return Array.from(this.chunks.values()).reduce((sum, c) => sum + c.length, 0);
     }
+}
+
+/**
+ * Extract the first sentence from a chunk for progressive disclosure.
+ * Falls back to the first 80 characters if no sentence boundary is found.
+ */
+function extractFirstSentence(text: string): string {
+    const match = text.match(/^[^.!?]*[.!?]/);
+    if (match && match[0].length <= 200) return match[0].trim();
+    // No sentence boundary — take first 80 chars
+    return text.length > 80 ? text.slice(0, 80) + "..." : text;
 }

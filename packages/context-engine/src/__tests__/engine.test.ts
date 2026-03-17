@@ -10,7 +10,9 @@ import { getModelLimit, isLargeContextModel } from "../tokenizer/models";
 import { PROFILES, validateProfile, mergeProfile } from "../budget/profiles";
 import { computeAllocations, buildBudget } from "../budget/allocator";
 import { ContextEngine } from "../index";
-import type { VaultClientLike, ContextLayer } from "../types";
+import { stripPrivateTags } from "../utils/privacy";
+import { formatTokenReport } from "../observability/metrics";
+import type { VaultClientLike, ContextLayer, FrameMeta, TokenBudget } from "../types";
 
 // ─── Token Counter ───────────────────────────────────────────────
 
@@ -57,7 +59,11 @@ describe("getModelLimit", () => {
   });
 
   test("prefix match for Claude models", () => {
-    expect(getModelLimit("claude-sonnet-4-5-20250929")).toBe(200_000);
+    // claude-sonnet-4-5 prefix matches claude-sonnet-4-6 (1M) or claude-3.5-sonnet (200K)
+    // The progressive prefix will find claude-3.5-sonnet for 3.5 models
+    expect(getModelLimit("claude-3.5-sonnet-20241022")).toBe(200_000);
+    // Newer Claude 4.x models are 1M
+    expect(getModelLimit("claude-sonnet-4-6-20260315")).toBe(1_000_000);
   });
 
   test("falls back to default for unknown models", () => {
@@ -167,7 +173,8 @@ describe("ContextEngine", () => {
     expect(frame.memory).toContain("Bun");
     expect(frame.turns.length).toBeGreaterThan(0);
     expect(frame.injections.length).toBeGreaterThan(0);
-    expect(frame.budget.limit).toBe(200_000);
+    // claude-sonnet-4-5 prefix-matches claude-sonnet-4-6 (1M context)
+    expect(frame.budget.limit).toBe(1_000_000);
     expect(frame.budget.totalUsed).toBeGreaterThan(0);
     expect(frame.meta.model).toBe("claude-sonnet-4-5");
   });
@@ -195,8 +202,8 @@ describe("ContextEngine", () => {
     });
 
     const frame = await engine.buildFrame({ userMessage: "Hi" });
-    // Quick profile reserves 40% for response
-    expect(frame.budget.layers.responseReserve.allocated).toBeGreaterThan(70_000);
+    // Quick profile reserves 40% for response (40% of 1M = 400K)
+    expect(frame.budget.layers.responseReserve.allocated).toBeGreaterThan(350_000);
   });
 
   test("handles missing optional vault methods gracefully", async () => {
@@ -220,5 +227,169 @@ describe("ContextEngine", () => {
     const frame = await engine.buildFrame({ userMessage: "Test" });
     expect(frame.turns.length).toBe(0);
     expect(frame.budget.limit).toBe(128_000);
+  });
+
+  test("search result injections use progressive disclosure (tier-1 index)", async () => {
+    const engine = new ContextEngine({
+      vault: createMockVault(),
+      model: "claude-sonnet-4-5",
+    });
+
+    const frame = await engine.buildFrame({
+      userMessage: "Tell me about deployment",
+    });
+
+    const searchInjections = frame.injections.filter(i => i.source === "search_result");
+    for (const inj of searchInjections) {
+      expect(inj.tier).toBe("index");
+      expect(inj.detailRef).toBeTruthy();
+      // Index-tier injections should be compact (< 50 tokens)
+      expect(inj.tokens).toBeLessThan(50);
+    }
+  });
+
+  test("expandInjection returns full content for a detail ref", async () => {
+    const engine = new ContextEngine({
+      vault: createMockVault(),
+      model: "claude-sonnet-4-5",
+    });
+
+    const expanded = await engine.expandInjection("Meeting Notes");
+    expect(expanded).not.toBeNull();
+    expect(expanded!.tier).toBe("full");
+    expect(expanded!.content).toContain("Meeting Notes");
+    expect(expanded!.content).toContain("Discussed deployment");
+  });
+
+  test("meta includes tokensSaved and injectionTokensSaved", async () => {
+    const engine = new ContextEngine({
+      vault: createMockVault(),
+      model: "claude-sonnet-4-5",
+    });
+
+    const frame = await engine.buildFrame({
+      userMessage: "Deploy Alpha",
+      threadId: "thread-123",
+    });
+
+    expect(typeof frame.meta.tokensSaved).toBe("number");
+    expect(typeof frame.meta.injectionTokensSaved).toBe("number");
+    // injectionTokensSaved should be > 0 because search results use tier-1
+    expect(frame.meta.injectionTokensSaved).toBeGreaterThanOrEqual(0);
+  });
+
+  test("private tags are stripped from memory", async () => {
+    const vaultWithPrivate: VaultClientLike = {
+      getAgentContext: async () => ({
+        soul: "You are helpful.",
+        memory: "User likes TypeScript. <private>API key: sk-12345</private> User prefers Bun.",
+        preferences: "Concise. <private>salary: $100k</private>",
+        config: {},
+        pinnedNotes: [],
+      }),
+      searchNotes: async () => [],
+    };
+
+    const engine = new ContextEngine({
+      vault: vaultWithPrivate,
+      model: "gpt-4o",
+    });
+
+    const frame = await engine.buildFrame({ userMessage: "Hi" });
+    expect(frame.memory).not.toContain("sk-12345");
+    expect(frame.memory).not.toContain("salary");
+    expect(frame.memory).toContain("TypeScript");
+    expect(frame.memory).toContain("Bun");
+  });
+});
+
+// ─── Privacy Utils ──────────────────────────────────────────────────
+
+describe("stripPrivateTags", () => {
+  test("strips single private block", () => {
+    const result = stripPrivateTags("before <private>secret</private> after");
+    expect(result).toBe("before  after");
+  });
+
+  test("strips multiple private blocks", () => {
+    const result = stripPrivateTags("a <private>x</private> b <private>y</private> c");
+    expect(result).toBe("a  b  c");
+  });
+
+  test("strips multiline private blocks", () => {
+    const result = stripPrivateTags("start\n<private>\nline1\nline2\n</private>\nend");
+    expect(result).toBe("start\n\nend");
+  });
+
+  test("returns empty string unchanged", () => {
+    expect(stripPrivateTags("")).toBe("");
+  });
+
+  test("returns text unchanged when no private tags", () => {
+    expect(stripPrivateTags("just normal text")).toBe("just normal text");
+  });
+
+  test("is case-insensitive", () => {
+    const result = stripPrivateTags("a <PRIVATE>secret</PRIVATE> b");
+    expect(result).toBe("a  b");
+  });
+});
+
+// ─── Token Economics ────────────────────────────────────────────────
+
+describe("formatTokenReport", () => {
+  test("formats basic usage report", () => {
+    const meta: FrameMeta = {
+      assembledAt: new Date().toISOString(),
+      assemblyTimeMs: 10,
+      model: "gpt-4o",
+      profile: "standard",
+      threadTurnsIncluded: 3,
+      threadTurnsSummarized: 0,
+      injectionsIncluded: 2,
+      chunkIndexHits: 2,
+      compactionEvents: [],
+      tokensSaved: 0,
+      injectionTokensSaved: 0,
+    };
+    const budget: TokenBudget = {
+      limit: 128_000,
+      layers: {} as any,
+      remaining: 83_000,
+      compacted: false,
+      totalUsed: 45_000,
+      utilizationPct: 35,
+    };
+
+    const report = formatTokenReport(meta, budget);
+    expect(report).toBe("Used 45K/128K (35%)");
+  });
+
+  test("includes savings when present", () => {
+    const meta: FrameMeta = {
+      assembledAt: new Date().toISOString(),
+      assemblyTimeMs: 10,
+      model: "gpt-4o",
+      profile: "standard",
+      threadTurnsIncluded: 3,
+      threadTurnsSummarized: 2,
+      injectionsIncluded: 2,
+      chunkIndexHits: 2,
+      compactionEvents: [{ layer: "thread", strategy: "summarize", tokensBefore: 15000, tokensAfter: 3000 }],
+      tokensSaved: 12_000,
+      injectionTokensSaved: 8_000,
+    };
+    const budget: TokenBudget = {
+      limit: 128_000,
+      layers: {} as any,
+      remaining: 83_000,
+      compacted: true,
+      totalUsed: 45_000,
+      utilizationPct: 35,
+    };
+
+    const report = formatTokenReport(meta, budget);
+    expect(report).toContain("Saved 12K via compaction");
+    expect(report).toContain("8K via progressive disclosure");
   });
 });

@@ -315,7 +315,7 @@ export class LocalHarness {
       "--output-format", "stream-json",
       "--verbose",
       "--max-turns", "100",
-      "--model", "sonnet",
+      "--model", "opus",
     ];
     if (hasLiveSession && session.sessionId) {
       if (useResume) {

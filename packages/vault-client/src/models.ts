@@ -92,7 +92,7 @@ export function resolveChatProvider(): ChatProviderConfig {
       type: "anthropic",
       apiKey: anthropicKey,
       baseUrl: "https://api.anthropic.com/v1",
-      model: process.env.DEFAULT_MODEL ?? "claude-sonnet-4-6",
+      model: process.env.DEFAULT_MODEL ?? "claude-opus-4-6",
     };
   }
 
@@ -140,7 +140,7 @@ export function resolveVisionProvider(): ChatProviderConfig {
       type: "anthropic",
       apiKey: anthropicKey,
       baseUrl: "https://api.anthropic.com/v1",
-      model: process.env.VISION_MODEL ?? "claude-sonnet-4-6",
+      model: process.env.VISION_MODEL ?? "claude-opus-4-6",
     };
   }
 

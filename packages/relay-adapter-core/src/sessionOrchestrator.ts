@@ -31,8 +31,8 @@ export interface OrchestratedSession {
 
 export interface SessionReactions {
   onStatusUpdate: (session: OrchestratedSession, message: string) => void;
-  onResult: (session: OrchestratedSession, result: string) => void;
-  onFailed: (session: OrchestratedSession, error: string) => void;
+  onResult: (session: OrchestratedSession, result: string) => void | Promise<void>;
+  onFailed: (session: OrchestratedSession, error: string) => void | Promise<void>;
   onToken?: (session: OrchestratedSession, token: string) => void;
 }
 
@@ -123,15 +123,15 @@ export class SessionOrchestrator {
       const result = await this._runWithRetry(session, reactions, label);
       session.state = "done";
       session.result = result;
-      reactions.onResult(session, result);
+      await reactions.onResult(session, result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("timed out")) {
         session.state = "timed_out";
-        reactions.onFailed(session, `${label} timed out after 1 hour.`);
+        await reactions.onFailed(session, `${label} timed out after 1 hour.`);
       } else {
         session.state = "failed";
-        reactions.onFailed(session, msg);
+        await reactions.onFailed(session, msg);
       }
     } finally {
       clearInterval(progressTimer);

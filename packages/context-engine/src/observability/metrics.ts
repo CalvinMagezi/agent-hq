@@ -7,7 +7,7 @@
  * - Aggregated by the daemon for weekly reports
  */
 
-import type { ContextFrame, CompactionEvent } from "../types.js";
+import type { ContextFrame, CompactionEvent, FrameMeta, TokenBudget } from "../types.js";
 
 export interface FrameMetrics {
     frameId: string;
@@ -120,4 +120,28 @@ export class MetricsCollector {
     reset(): void {
         this.history = [];
     }
+}
+
+/**
+ * Format a human-readable token usage report from frame metadata.
+ *
+ * Example output:
+ *   "Used 45K/128K (35%) | Saved 12K via compaction, 8K via progressive disclosure"
+ */
+export function formatTokenReport(meta: FrameMeta, budget: TokenBudget): string {
+    const fmtK = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}K` : `${n}`;
+
+    const parts = [
+        `Used ${fmtK(budget.totalUsed)}/${fmtK(budget.limit)} (${budget.utilizationPct}%)`,
+    ];
+
+    const savings: string[] = [];
+    if (meta.tokensSaved > 0) savings.push(`${fmtK(meta.tokensSaved)} via compaction`);
+    if (meta.injectionTokensSaved > 0) savings.push(`${fmtK(meta.injectionTokensSaved)} via progressive disclosure`);
+
+    if (savings.length > 0) {
+        parts.push(`Saved ${savings.join(", ")}`);
+    }
+
+    return parts.join(" | ");
 }

@@ -59,6 +59,10 @@ export interface ContextInjection {
   score: number;
   /** Original note/chunk ID for tracing */
   sourceId?: string;
+  /** Disclosure tier: "index" = compact metadata only, "full" = complete content */
+  tier?: "index" | "full";
+  /** Reference for on-demand expansion of index-tier injections */
+  detailRef?: string;
 }
 
 // ─── Token Budget ────────────────────────────────────────────────
@@ -137,6 +141,10 @@ export interface FrameMeta {
   compactionEvents: CompactionEvent[];
   /** Harness hint passed by the caller */
   harnessHint?: string;
+  /** Tokens saved by compaction (sum of before - after across events) */
+  tokensSaved: number;
+  /** Tokens saved by progressive disclosure (index tier vs full content) */
+  injectionTokensSaved: number;
 }
 
 export interface CompactionEvent {

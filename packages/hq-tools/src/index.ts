@@ -85,6 +85,7 @@ import {
   VaultWriteNoteTool,
   VaultCreateJobTool
 } from "./tools/vault.js";
+import { BenchmarkModelTool } from "./tools/modelBenchmark.js";
 import { browserTools } from "./tools/browser.js";
 import {
   PlanCreateTool,
@@ -106,6 +107,7 @@ export {
   GoogleWorkspaceWriteTool
 };
 export { SpeakTool } from "./tools/tts.js";
+export { BenchmarkModelTool } from "./tools/modelBenchmark.js";
 export {
   ListAgentsTool,
   LoadAgentTool,
@@ -179,6 +181,8 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(VaultBatchReadTool);
   registry.register(VaultWriteNoteTool);
   registry.register(VaultCreateJobTool);
+  // AI model benchmarking (user-triggered only, never automated)
+  registry.register(BenchmarkModelTool);
   // Browser automation tools (requires hq-browser server running on :19200)
   for (const tool of browserTools) registry.register(tool);
   // Cross-agent planning system tools

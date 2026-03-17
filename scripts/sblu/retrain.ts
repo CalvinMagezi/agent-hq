@@ -49,7 +49,7 @@ if (!VAULT_PATH || !fs.existsSync(VAULT_PATH)) {
 // ── Readiness thresholds ──────────────────────────────────────────────
 const MIN_SHADOW_RUNS = 10;          // Need this many shadow runs before first train
 const RETRAIN_INTERVAL_DAYS = 30;    // Don't retrain more often than this
-const MIN_EXAMPLES = 50;             // Minimum JSONL examples to proceed
+const MIN_EXAMPLES = 30;             // Minimum JSONL examples to proceed (lowered from 50 to unblock bootstrap)
 const MLXLM_ITERS_FIRST = 600;       // Iterations for first fine-tune
 const MLXLM_ITERS_INCREMENTAL = 300; // Iterations for incremental retrains
 

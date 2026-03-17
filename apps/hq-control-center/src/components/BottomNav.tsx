@@ -16,12 +16,11 @@ export function BottomNav() {
 
   return (
     <nav
-      className="md:hidden fixed bottom-0 left-0 right-0 z-40 flex items-stretch"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-40 flex items-stretch glass-heavy"
       style={{
-        background: 'var(--bg-surface)',
-        borderTop: '1px solid var(--border)',
+        borderTop: '1px solid rgba(255, 255, 255, 0.06)',
         paddingBottom: 'env(safe-area-inset-bottom)',
-        height: 'calc(60px + env(safe-area-inset-bottom))',
+        height: 'calc(64px + env(safe-area-inset-bottom))',
       }}
     >
       {/* Left nav items */}
@@ -29,38 +28,39 @@ export function BottomNav() {
         <Link
           key={item.to}
           to={item.to}
-          className="flex-1 flex flex-col items-center justify-center gap-0.5 text-center transition-colors"
+          className="flex-1 flex flex-col items-center justify-center gap-0.5 text-center transition-all active:scale-95"
           style={{ minHeight: 48 }}
           activeProps={{
             style: {
               color: 'var(--accent-green)',
-              background: 'rgba(0,255,136,0.06)',
             },
           }}
           inactiveProps={{ style: { color: 'var(--text-dim)' } }}
         >
           <span className="text-lg leading-none">{item.icon}</span>
-          <span className="text-[10px] font-mono font-bold tracking-wide">{item.label}</span>
+          <span className="text-[9px] font-mono font-bold tracking-wide">{item.label}</span>
         </Link>
       ))}
 
-      {/* Center chat button — elevated */}
+      {/* Center chat button — floating glass orb */}
       <div className="flex-1 flex items-center justify-center relative">
         <button
           onClick={() => setChatPanelOpen(!chatPanelOpen)}
-          className="absolute -top-5 flex items-center justify-center rounded-full shadow-lg transition-transform active:scale-95"
+          className="absolute -top-5 flex items-center justify-center rounded-full transition-all active:scale-90"
           style={{
             width: 56,
             height: 56,
             background: chatPanelOpen
-              ? 'linear-gradient(135deg, var(--accent-green), var(--accent-blue))'
-              : 'var(--bg-elevated)',
+              ? 'rgba(0, 255, 136, 0.15)'
+              : 'rgba(20, 20, 36, 0.7)',
             border: chatPanelOpen
-              ? '2px solid var(--accent-green)'
-              : '2px solid var(--border)',
+              ? '1.5px solid rgba(0, 255, 136, 0.4)'
+              : '1.5px solid rgba(255, 255, 255, 0.1)',
             boxShadow: chatPanelOpen
-              ? '0 0 20px rgba(0,255,136,0.3)'
-              : '0 4px 12px rgba(0,0,0,0.4)',
+              ? '0 0 24px rgba(0, 255, 136, 0.2), 0 0 48px rgba(0, 255, 136, 0.05)'
+              : '0 4px 20px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
+            backdropFilter: 'blur(20px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
           }}
         >
           <img
@@ -68,14 +68,14 @@ export function BottomNav() {
             alt="HQ Agent"
             className="rounded-full"
             style={{
-              width: 36,
-              height: 36,
-              filter: chatPanelOpen ? 'brightness(1.2)' : 'none',
+              width: 34,
+              height: 34,
+              filter: chatPanelOpen ? 'brightness(1.3) drop-shadow(0 0 8px rgba(0,255,136,0.3))' : 'none',
             }}
           />
         </button>
         <span
-          className="text-[10px] font-mono font-bold tracking-wide mt-6"
+          className="text-[9px] font-mono font-bold tracking-wide mt-6"
           style={{ color: chatPanelOpen ? 'var(--accent-green)' : 'var(--text-dim)' }}
         >
           HQ
@@ -87,18 +87,17 @@ export function BottomNav() {
         <Link
           key={item.to}
           to={item.to}
-          className="flex-1 flex flex-col items-center justify-center gap-0.5 text-center transition-colors"
+          className="flex-1 flex flex-col items-center justify-center gap-0.5 text-center transition-all active:scale-95"
           style={{ minHeight: 48 }}
           activeProps={{
             style: {
               color: 'var(--accent-green)',
-              background: 'rgba(0,255,136,0.06)',
             },
           }}
           inactiveProps={{ style: { color: 'var(--text-dim)' } }}
         >
           <span className="text-lg leading-none">{item.icon}</span>
-          <span className="text-[10px] font-mono font-bold tracking-wide">{item.label}</span>
+          <span className="text-[9px] font-mono font-bold tracking-wide">{item.label}</span>
         </Link>
       ))}
     </nav>

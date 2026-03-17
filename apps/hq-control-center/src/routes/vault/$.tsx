@@ -1,4 +1,4 @@
-import { createFileRoute } from '@tanstack/react-router'
+import { createFileRoute, useRouter } from '@tanstack/react-router'
 import { useState } from 'react'
 import { marked } from 'marked'
 import { getNote, togglePinNote } from '~/server/notes'
@@ -7,6 +7,11 @@ import { PdfViewer } from '~/components/PdfViewer'
 import { ImageViewer } from '~/components/ImageViewer'
 import { CodeViewer } from '~/components/CodeViewer'
 import { DiagramViewer } from '~/components/DiagramViewer'
+import { DocxViewer } from '~/components/DocxViewer'
+import { SpreadsheetViewer } from '~/components/SpreadsheetViewer'
+import { OfficeFileCard } from '~/components/OfficeFileCard'
+import { HtmlViewer } from '~/components/HtmlViewer'
+import { NoteEditor } from '~/components/NoteEditor'
 import { useHQStore } from '~/store/hqStore'
 
 export const Route = createFileRoute('/vault/$')({
@@ -25,6 +30,7 @@ export const Route = createFileRoute('/vault/$')({
 function VaultFileView() {
     const { filePath, content } = Route.useLoaderData()
     const { setChatPanelOpen, setChatContext, chatPanelOpen, bumpPinnedVersion } = useHQStore()
+    const router = useRouter()
 
     const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
     const isMd = ext === 'md'
@@ -33,6 +39,7 @@ function VaultFileView() {
     const initialPinned = isMd && /^---[\s\S]*?^pinned:\s*true/m.test(content)
     const [isPinned, setIsPinned] = useState(initialPinned)
     const [pinning, setPinning] = useState(false)
+    const [editing, setEditing] = useState(false)
 
     const handleTogglePin = async () => {
         setPinning(true)
@@ -137,9 +144,27 @@ ${html}
     } else if (/^(png|jpe?g|gif|webp|svg)$/.test(ext)) {
         viewer = <ImageViewer path={filePath} />
     } else if (ext === 'md') {
-        viewer = <MarkdownViewer content={content} activePath={filePath} />
+        if (editing) {
+            viewer = (
+                <NoteEditor
+                    content={content}
+                    filePath={filePath}
+                    onSaved={() => router.invalidate()}
+                />
+            )
+        } else {
+            viewer = <MarkdownViewer content={content} activePath={filePath} />
+        }
     } else if (ext === 'drawit') {
         viewer = <DiagramViewer content={content} />
+    } else if (ext === 'docx') {
+        viewer = <DocxViewer path={filePath} />
+    } else if (ext === 'xlsx' || ext === 'xls') {
+        viewer = <SpreadsheetViewer path={filePath} />
+    } else if (ext === 'pptx') {
+        viewer = <OfficeFileCard path={filePath} />
+    } else if (ext === 'html' || ext === 'htm') {
+        viewer = <HtmlViewer content={content} path={filePath} />
     } else {
         viewer = <CodeViewer content={content} path={filePath} />
     }
@@ -148,62 +173,82 @@ ${html}
 
     return (
         <div className="h-full flex flex-col relative">
-            {/* File Header Bar */}
+            {/* File Header Bar — frosted glass */}
             <div
-                className="flex items-center justify-between px-4 py-2 border-b flex-shrink-0 sticky top-0 z-10"
-                style={{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }}
+                className="flex items-center justify-between px-4 py-2.5 flex-shrink-0 sticky top-0 z-10 glass-light"
+                style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}
             >
                 <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-[10px] font-mono opacity-50 truncate hidden sm:inline">
+                    <span className="text-[10px] font-mono truncate hidden sm:inline" style={{ color: 'var(--text-dim)', opacity: 0.4 }}>
                         {filePath.split('/').slice(0, -1).join('/')}/
                     </span>
                     <span className="text-sm font-mono font-bold truncate" style={{ color: 'var(--text-primary)' }}>
-                        {filename}
+                        {filename?.replace(/\.md$/, '')}
                     </span>
                 </div>
 
-                <div className="flex items-center gap-2 pl-4 flex-shrink-0">
+                <div className="flex items-center gap-1.5 pl-4 flex-shrink-0">
                     <button
                         onClick={() => {
                             navigator.clipboard.writeText(filePath)
                         }}
-                        className="px-2 py-1 rounded text-[10px] font-mono transition-colors hover:bg-white/10"
-                        style={{ color: 'var(--text-dim)' }}
+                        className="px-2 py-1 rounded-lg text-[10px] font-mono transition-all"
+                        style={{ color: 'var(--text-dim)', background: 'rgba(255,255,255,0.04)', border: '1px solid transparent' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.08)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'transparent' }}
                         title="Copy path"
                     >
                         Copy path
                     </button>
                     {isMd && (
                         <button
+                            onClick={() => setEditing(!editing)}
+                            className="px-2 py-1 rounded-lg text-[10px] font-mono transition-all flex items-center gap-1"
+                            style={{
+                                color: editing ? 'var(--accent-green)' : 'var(--text-dim)',
+                                background: editing ? 'rgba(0,255,136,0.08)' : 'rgba(255,255,255,0.04)',
+                                border: editing ? '1px solid rgba(0,255,136,0.15)' : '1px solid transparent',
+                            }}
+                            title={editing ? 'Stop editing' : 'Edit note'}
+                        >
+                            {editing ? 'Viewing' : 'Edit'}
+                        </button>
+                    )}
+                    {isMd && (
+                        <button
                             onClick={handleTogglePin}
                             disabled={pinning}
-                            className="px-2 py-1 rounded text-[10px] font-mono transition-colors hover:bg-white/10 flex items-center gap-1"
-                            style={{ color: isPinned ? 'var(--accent-amber)' : 'var(--text-dim)' }}
+                            className="px-2 py-1 rounded-lg text-[10px] font-mono transition-all flex items-center gap-1"
+                            style={{
+                                color: isPinned ? 'var(--accent-amber)' : 'var(--text-dim)',
+                                background: isPinned ? 'rgba(255,179,0,0.08)' : 'rgba(255,255,255,0.04)',
+                                border: isPinned ? '1px solid rgba(255,179,0,0.15)' : '1px solid transparent',
+                            }}
                             title={isPinned ? 'Unpin note' : 'Pin note'}
                         >
-                            📌 {isPinned ? 'Pinned' : 'Pin'}
+                            {isPinned ? 'Pinned' : 'Pin'}
                         </button>
                     )}
                     {isMd && (
                         <button
                             onClick={handleDownloadPDF}
-                            className="px-2 py-1 rounded text-[10px] font-mono transition-colors hover:bg-white/10 flex items-center gap-1"
-                            style={{ color: 'var(--text-dim)' }}
+                            className="px-2 py-1 rounded-lg text-[10px] font-mono transition-all hidden sm:flex items-center gap-1"
+                            style={{ color: 'var(--text-dim)', background: 'rgba(255,255,255,0.04)' }}
                             title="Download as PDF"
                         >
-                            ↓ PDF
+                            PDF
                         </button>
                     )}
                     <button
                         onClick={handleSendToChat}
-                        className="px-3 py-1.5 rounded-full text-xs font-mono font-bold flex items-center gap-1.5 transition-colors"
+                        className="px-3 py-1.5 rounded-xl text-xs font-mono font-bold flex items-center gap-1.5 transition-all"
                         style={{
-                            background: chatPanelOpen ? 'var(--bg-elevated)' : 'var(--accent-blue)',
-                            color: chatPanelOpen ? 'var(--text-primary)' : '#000',
-                            border: chatPanelOpen ? '1px solid var(--border)' : 'none'
+                            background: chatPanelOpen ? 'rgba(255,255,255,0.05)' : 'rgba(68,136,255,0.12)',
+                            color: chatPanelOpen ? 'var(--text-primary)' : 'var(--accent-blue)',
+                            border: chatPanelOpen ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(68,136,255,0.2)',
                         }}
                     >
-                        <span className="opacity-70">💬</span> Send to Chat
+                        Chat
                     </button>
                 </div>
             </div>
@@ -211,7 +256,6 @@ ${html}
             {/* Content Area */}
             <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden w-full">
                 {ext === 'drawit' ? (
-                    // Diagrams need full canvas space — no max-width or prose padding
                     <div className="w-full h-full p-2">
                         {viewer}
                     </div>

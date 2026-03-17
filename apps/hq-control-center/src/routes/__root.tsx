@@ -197,30 +197,33 @@ function Shell() {
   }
 
   return (
-    <div className="flex flex-col h-full overflow-hidden" style={{ background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
+    <div className="flex flex-col h-full overflow-hidden relative" style={{ background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
+      {/* Ambient background glow */}
+      <div className="hq-ambient-bg" />
+
       {/* Install prompt banner */}
       <InstallPrompt />
 
       {/* Push permission banner */}
       {pushPrompt && (
         <div
-          className="flex items-center justify-between px-4 py-2 text-sm"
-          style={{ background: 'rgba(0,255,136,0.08)', borderBottom: '1px solid rgba(0,255,136,0.2)' }}
+          className="flex items-center justify-between px-4 py-2 text-sm glass-light relative z-10"
+          style={{ borderBottom: '1px solid rgba(0,255,136,0.15)' }}
         >
-          <span style={{ color: 'var(--text-secondary)' }}>
-            🔔 Enable push notifications to receive agent alerts on this device
+          <span style={{ color: 'var(--text-dim)' }}>
+            Enable push notifications to receive agent alerts on this device
           </span>
           <div className="flex items-center gap-2 ml-4 shrink-0">
             <button
               onClick={handleEnablePush}
-              className="px-3 py-1 rounded text-xs font-mono font-bold"
+              className="px-3 py-1 rounded-lg text-xs font-mono font-bold transition-all"
               style={{ background: 'var(--accent-green)', color: '#000' }}
             >
               Enable
             </button>
             <button
               onClick={() => setPushPrompt(false)}
-              className="px-2 py-1 rounded text-xs font-mono"
+              className="px-2 py-1 rounded-lg text-xs font-mono transition-colors"
               style={{ color: 'var(--text-dim)' }}
             >
               Dismiss
@@ -229,76 +232,69 @@ function Shell() {
         </div>
       )}
 
-      {/* Persistent top bar */}
+      {/* Persistent top bar — frosted glass */}
       <header
-        className="h-14 sm:h-16 border-b flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30"
-        style={{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }}
+        className="h-14 sm:h-16 flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30 glass-heavy relative"
+        style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}
       >
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-3">
             <div className="hq-logo-accent w-6 h-6 sm:w-8 sm:h-8" />
-            <h1 className="text-base font-bold tracking-[0.2em] uppercase hidden sm:block">
+            <h1 className="text-base font-bold tracking-[0.2em] uppercase hidden sm:block" style={{ color: 'var(--text-primary)' }}>
               HQ
             </h1>
           </div>
           <nav className="hidden md:flex items-center gap-1">
-            <Link
-              to="/vault"
-              className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
-              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
-              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
-            >
-              Vault
-            </Link>
-            <Link
-              to="/drawit"
-              className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
-              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
-              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
-            >
-              ◈ DrawIt
-            </Link>
-            <Link
-              to="/teams"
-              className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
-              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
-              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
-            >
-              🤖 Teams
-            </Link>
-            <Link
-              to="/plans"
-              className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-colors"
-              activeProps={{ style: { background: 'rgba(255,255,255,0.08)', color: 'var(--text-primary)' } }}
-              inactiveProps={{ style: { color: 'var(--text-dim)' } }}
-            >
-              📋 Plans
-            </Link>
+            {[
+              { to: '/vault' as const, label: 'Vault' },
+              { to: '/drawit' as const, label: 'DrawIt' },
+              { to: '/teams' as const, label: 'Teams' },
+              { to: '/plans' as const, label: 'Plans' },
+            ].map((item) => (
+              <Link
+                key={item.to}
+                to={item.to}
+                className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all"
+                activeProps={{
+                  className: 'px-3 py-1.5 rounded-lg text-xs font-mono font-bold transition-all',
+                  style: {
+                    background: 'rgba(0,255,136,0.08)',
+                    color: 'var(--accent-green)',
+                    border: '1px solid rgba(0,255,136,0.15)',
+                  },
+                }}
+                inactiveProps={{
+                  style: { color: 'var(--text-dim)', border: '1px solid transparent' },
+                }}
+              >
+                {item.label}
+              </Link>
+            ))}
           </nav>
         </div>
         <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }))}
-            className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-mono transition-colors"
-            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text-dim)' }}
+            className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-mono transition-all glass-input"
+            style={{ color: 'var(--text-dim)' }}
           >
-            <span>⌕ Search</span>
-            <kbd className="text-[10px] px-1 rounded" style={{ background: 'var(--bg-base)', border: '1px solid var(--border)' }}>⌘K</kbd>
+            <span>Search</span>
+            <kbd className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>⌘K</kbd>
           </button>
           <button
             onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', metaKey: true, bubbles: true }))}
-            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono transition-colors"
-            style={{ background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.2)', color: 'var(--accent-green)' }}
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-mono transition-all"
+            style={{ background: 'rgba(0,255,136,0.06)', border: '1px solid rgba(0,255,136,0.15)', color: 'var(--accent-green)' }}
           >
             + Note
           </button>
           {/* Desktop chat toggle */}
           <button
             onClick={() => setChatPanelOpen(!chatPanelOpen)}
-            className="hidden md:flex items-center gap-2 px-2 py-1 rounded-lg text-xs font-mono transition-colors"
+            className="hidden md:flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-mono transition-all"
             style={{
-              background: chatPanelOpen ? 'rgba(0,255,136,0.12)' : 'var(--bg-elevated)',
-              border: chatPanelOpen ? '1px solid var(--accent-green)' : '1px solid var(--border)',
+              background: chatPanelOpen ? 'rgba(0,255,136,0.10)' : 'rgba(255,255,255,0.04)',
+              border: chatPanelOpen ? '1px solid rgba(0,255,136,0.25)' : '1px solid rgba(255,255,255,0.08)',
               color: chatPanelOpen ? 'var(--accent-green)' : 'var(--text-dim)',
             }}
           >
@@ -315,15 +311,18 @@ function Shell() {
       </header>
 
       {/* Main Content — extra bottom padding on mobile for BottomNav */}
-      <main className="flex-1 min-h-0 overflow-hidden w-full md:pb-0 pb-[60px]">
+      <main className="flex-1 min-h-0 overflow-hidden w-full md:pb-0 pb-[60px] relative z-10">
         <Outlet />
       </main>
 
-      {/* Global Chat Panel — slides in from right on all routes */}
+      {/* Global Chat Panel — slides in from right, glass panel */}
       {chatPanelOpen && (
         <aside
-          className="fixed inset-y-0 right-0 z-50 w-full md:w-[380px] lg:w-[400px] border-l shadow-2xl"
-          style={{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }}
+          className="fixed inset-y-0 right-0 z-50 w-full md:w-[380px] lg:w-[400px] glass-heavy"
+          style={{
+            borderLeft: '1px solid rgba(255,255,255,0.06)',
+            boxShadow: '-8px 0 40px rgba(0, 0, 0, 0.5)',
+          }}
         >
           <ChatPanel onClose={() => setChatPanelOpen(false)} />
         </aside>

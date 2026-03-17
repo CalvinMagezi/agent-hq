@@ -486,7 +486,7 @@ export class UnifiedAdapterBot {
     let editMsgId: string | null = null;
     let editBuf = "";
     let editTmr: ReturnType<typeof setTimeout> | null = null;
-    const EDIT_MS = 1500;
+    const EDIT_MS = 500;
     const doFlush = () => {
       if (editMsgId && editBuf && this.bridge.editMessage) {
         this.bridge.editMessage(editMsgId, editBuf + " ▍").catch(() => {});
@@ -511,20 +511,21 @@ export class UnifiedAdapterBot {
           console.log(`[${this.label}] Session ${sessionId}: ${message}`);
           this.bridge.sendText(message, { chatId: this.currentChatId || undefined }).catch(console.error);
         },
-        onResult: (_session, result) => {
+        onResult: async (_session, result) => {
           this.stopTyping();
           if (editTmr) { clearTimeout(editTmr); editTmr = null; }
           if (msg) this.bridge.sendReaction(msg.id, "✅", msg.chatId).catch(() => {});
           if (streamingEdit && editMsgId) {
-            // Delete the streaming placeholder and send final text as a reply
-            // to the original message — this triggers a native notification
+            // Delete the streaming placeholder, pause for Telegram client sync,
+            // then send final text as a NEW reply — this triggers a push notification
             if (this.bridge.deleteMessage) {
-              this.bridge.deleteMessage(editMsgId, this.currentChatId || undefined).catch(() => {});
+              await this.bridge.deleteMessage(editMsgId, this.currentChatId || undefined).catch(() => {});
             }
-            this.sendChunked(result, msg?.id).catch(console.error);
+            await new Promise(r => setTimeout(r, 100));
+            await this.sendChunked(result, msg?.id);
           } else if (!streaming) {
             // Non-streaming platforms: send full result as one message
-            this.sendChunked(result).catch(console.error);
+            await this.sendChunked(result);
           }
           // Streaming platforms: tokens were already sent per-token via onToken; nothing to resend.
           this.flushSessionToVault(sessionId, harness, content, result);
@@ -538,16 +539,16 @@ export class UnifiedAdapterBot {
             editTmr = setTimeout(() => { editTmr = null; doFlush(); }, EDIT_MS);
           }
         } : undefined,
-        onFailed: (_session, error) => {
+        onFailed: async (_session, error) => {
           this.stopTyping();
           if (editTmr) { clearTimeout(editTmr); editTmr = null; }
           if (msg) this.bridge.sendReaction(msg.id, "❌", msg.chatId).catch(() => {});
           console.error(`[${this.label}] Session ${sessionId} failed: ${error}`);
           // Update placeholder with error if we were streaming
           if (streamingEdit && editMsgId && this.bridge.editMessage) {
-            this.bridge.editMessage(editMsgId, `_${label} failed: ${error}_`).catch(() => {});
+            await this.bridge.editMessage(editMsgId, `_${label} failed: ${error}_`).catch(() => {});
           } else {
-            this.bridge.sendText(`_${label} failed: ${error}_`, { chatId: this.currentChatId || undefined }).catch(console.error);
+            await this.bridge.sendText(`_${label} failed: ${error}_`, { chatId: this.currentChatId || undefined }).catch(console.error);
           }
         },
       });
@@ -622,7 +623,7 @@ export class UnifiedAdapterBot {
     let editPlaceholderMsgId: string | null = null;
     let editBuffer = "";
     let editTimer: ReturnType<typeof setTimeout> | null = null;
-    const EDIT_THROTTLE_MS = 1500; // Edit every 1.5s to avoid Telegram rate limits
+    const EDIT_THROTTLE_MS = 500; // Edit every 500ms — safe for Telegram editMessageText rate limits
 
     const flushEdit = () => {
       if (editPlaceholderMsgId && editBuffer && this.bridge.editMessage) {
@@ -653,6 +654,8 @@ export class UnifiedAdapterBot {
           if (this.bridge.deleteMessage) {
             await this.bridge.deleteMessage(editPlaceholderMsgId, this.currentChatId || undefined).catch(() => {});
           }
+          // Brief pause so Telegram clients process the delete before the new message
+          await new Promise(r => setTimeout(r, 100));
           await this.sendChunked(text, replyToId);
           return;
         }

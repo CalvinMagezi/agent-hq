@@ -19,7 +19,7 @@ const DEFAULT_MAX_TURNS = 15;
  * Claude to hang when resumed (silent timeout). */
 const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 const DEFAULT_MAX_BUDGET_USD = 2.0;
-const DEFAULT_MODEL = "sonnet";
+const DEFAULT_MODEL = "opus";
 const MAX_CONCURRENT_CALLS = 3;
 const MAX_AUTO_CONTINUES = 3; // Auto-continue up to 3 times (60 total turns)
 

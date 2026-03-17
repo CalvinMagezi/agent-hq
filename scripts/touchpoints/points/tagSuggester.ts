@@ -123,6 +123,7 @@ export const tagSuggester: TouchPoint = {
       observation: `Suggested tags: ${suggestedTags.join(", ")}`,
       actions: [`TAGGED: [${suggestedTags.join(", ")}]`],
       meaningful: false,
+      emit: [{ touchPoint: "connection-weaver", data: { triggeredBy: "tag-suggester" } }],
     };
   },
 };

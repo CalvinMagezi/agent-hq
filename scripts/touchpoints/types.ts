@@ -86,10 +86,15 @@ export const DEFAULT_CONFIG: TouchPointConfig = {
     "folder-organizer": true,
     "conversation-learner": true,
     "stale-thread-detector": true,
+    "connection-weaver": true,
+    "daily-synthesis": true,
+    "vault-health": true,
   },
   chains: {
     "new-note-quality": true,
     "conversation-harvest": true,
     "growth-alert": true,
+    "daily-synthesis": true,
+    "vault-health": true,
   },
 };

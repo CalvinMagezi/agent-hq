@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-03-17
+
+### Added
+- **Model Registry** (`packages/context-engine/src/models/`): Typed `ModelRegistry` with vault-file overrides (`_system/MODEL-REGISTRY.md`), alias resolution, prefix matching, and checkpoint config derivation. Default specs for Claude 4.6, Gemini 3.1/2.5, GPT-5.4/o3, Qwen 3.5 local.
+- **Session Management** (`packages/context-engine/src/session/`): Infinite session system with SQLite-backed persistence, checkpoint creation/resume, multi-surface support (Discord, CLI, REST, WhatsApp, Telegram, Agent), message batching/debouncing, and semantic recall over checkpoints.
+- **Privacy Utilities** (`packages/context-engine/src/utils/privacy.ts`): `stripPrivateTags()` removes `<private>…</private>` blocks from context before assembly.
+- **Office Document Viewers** (HQ Control Center):
+  - `DocxViewer` — Server-side DOCX→HTML conversion via mammoth with glass-morphism UI.
+  - `HtmlViewer` — Dual-mode HTML preview (rendered iframe + source view) with dark-friendly stylesheet injection.
+  - `SpreadsheetViewer` — Multi-sheet XLSX viewer with row counts, column headers, and 500-row truncation.
+  - `NoteEditor` — Edit/preview toggle for markdown notes with Cmd+S save and unsaved-change warnings.
+  - `OfficeFileCard` — Fallback card for unsupported office formats (PPTX, XLS) with download link.
+- **Model Benchmark Tool** (`packages/hq-tools/src/tools/modelBenchmark.ts`): 10 Agent-HQ-specific evaluation tests (tool-use, JSON extraction, code gen, context stress, instruction following, summarization, multi-turn, error recovery, markdown gen, cost routing) with LLM-based judge scoring. Reports saved to vault.
+- **Touch Points — Connection Weaver** (`scripts/touchpoints/points/connectionWeaver.ts`): Semantic "See Also" link suggestions on note create/modify with 24-hour cooldown and backup-before-modify safety.
+- **Touch Points — Daily Synthesis** (`scripts/touchpoints/points/dailySynthesis.ts`): Evening cross-pollination run (20:30–22:00 EAT) that gathers signals across news, vault changes, link health, memory, and AI intelligence to surface unexpected connections. Replaces 5 older insight-generation workers.
+- **Touch Points — Vault Health** (`scripts/touchpoints/points/vaultHealth.ts`): Periodic (6h) structural analysis — dead links, orphans, cluster gaps — with daily archival for SBLU training data.
+- **Vault Cleanup Script** (`scripts/cleanup/vaultCleanup.ts`): One-time migration for removing auto-generated insight files, `.sync-conflict-` duplicates, stale MOCs, and graph-link HTML sections. Dry-run mode included.
+- **Context Engine tests**: Added `ModelRegistry` and session lifecycle tests (`registry.test.ts`, `session.test.ts`).
+
+### Changed
+- **CLAUDE.md**: Condensed from ~390 lines to ~48 lines — essential rules, entry points, dev commands only.
+- **Context Engine model limits**: Refactored from hardcoded map to `ModelRegistry` lookup with vault override support.
+- **Chunk Index scoring**: Enhanced with recency decay and pin weighting for better relevance ranking.
+- **Daemon scheduler**: Integrated new touchpoints (connection-weaver, daily-synthesis, vault-health) with periodic vs event-driven scheduling.
+- **SBLU training pipeline**: Improved extract/convert/train scripts for vault cartographer fine-tuning.
+- **Model tracker workflow**: Enhanced with expanded model spec coverage.
+- **Vault workers**: Refactored away old auto-generation system in favor of touchpoint-driven enrichment.
+
+### Fixed
+- **Model Registry type safety**: `loadVaultOverrides()` now properly merges partial vault specs into existing entries instead of passing `Partial<ModelSpec>` where `ModelSpec` was required. New specs from vault require all fields present.
+
+### Security
+- **XSS — DocxViewer**: Added DOMPurify sanitization on mammoth HTML output before `dangerouslySetInnerHTML` rendering.
+- **XSS — HtmlViewer**: Added DOMPurify sanitization on vault HTML file content before iframe `srcDoc` injection.
+
 ## [0.6.12] - 2026-03-16
 
 ### Added
@@ -321,7 +356,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **WebSocket server**: `ws://127.0.0.1:5678` for web UI integration
 - **Voice message support**: Groq/Whisper transcription for Discord voice messages
 
-[Unreleased]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.13...HEAD
+[0.6.13]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.12...v0.6.13
+[0.6.12]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.10...v0.6.12
+[0.6.10]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.9...v0.6.10
+[0.6.9]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.8...v0.6.9
+[0.6.8]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.7...v0.6.8
+[0.6.7]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.5...v0.6.7
+[0.6.5]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/CalvinMagezi/agent-hq/compare/v0.6.0...v0.6.4
 [0.6.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/CalvinMagezi/agent-hq/compare/v0.4.0...v0.5.0

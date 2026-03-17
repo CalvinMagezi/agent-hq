@@ -124,6 +124,7 @@ function gatherContext() {
 
   const heartbeat  = readVaultFile("_system/HEARTBEAT.md");
   const memory     = readVaultFile("_system/MEMORY.md");
+  const modelIntel = readVaultFile("_system/MODEL-INTELLIGENCE.md");
   const newsPulse  = extractNewsPulse(heartbeat);
   const pinned     = getPinnedNotes();
 
@@ -135,8 +136,9 @@ function gatherContext() {
   if (!newsPulse) console.warn("⚠️  No news pulse found in HEARTBEAT.md");
   console.log(`   News items: ${newsPulse.split("\n").filter(l => l.startsWith("-")).length}`);
   console.log(`   Pinned notes: ${pinned.length}`);
+  console.log(`   Model intel: ${modelIntel ? "yes" : "none"}`);
 
-  return { newsPulse, memory, pinned, today };
+  return { newsPulse, memory, modelIntel, pinned, today };
 }
 
 // ── Step 2: Generate dialogue script via Ollama ───────────────────────────────
@@ -161,6 +163,9 @@ ${ctx.newsPulse || "No news pulse available — cover recent AI, Africa tech, an
 
 ## Calvin's Active Projects
 ${pinnedList || "Agent-HQ (local AI hub), Kolaborate (African talent platform), SiteSeer, Chamuka, YMF"}
+
+## AI Model Intelligence
+${ctx.modelIntel || "No recent model intelligence available."}
 
 ## Calvin's Background (for framing)
 ${ctx.memory.slice(0, 2000)}

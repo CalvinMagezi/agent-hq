@@ -29,7 +29,7 @@ import { driftAwareInterval } from "./lib/scheduler.js";
 import type { DaemonContext } from "./daemon/context.js";
 import { processHeartbeat as _processHeartbeat } from "./daemon/heartbeat.js";
 import { refreshNewsPulse as _refreshNewsPulse } from "./daemon/newsPulse.js";
-import { processNoteLinking as _processNoteLinking, processTopicMOCs as _processTopicMOCs } from "./daemon/noteLinking.js";
+// note-linking + topic-mocs removed — replaced by connection-weaver + daily-synthesis touchpoints
 import {
   expireApprovals as _expireApprovals,
   healthCheck as _healthCheck,
@@ -120,8 +120,6 @@ const consolidateMemory = async () => {
 const cleanupStaleJobs = () => _cleanupStaleJobs(getDaemonCtx());
 const cleanupDelegationArtifacts = () => _cleanupDelegationArtifacts(getDaemonCtx());
 const refreshNewsPulse = () => _refreshNewsPulse(getDaemonCtx());
-const processNoteLinking = () => _processNoteLinking(getDaemonCtx());
-const processTopicMOCs = () => _processTopicMOCs(getDaemonCtx());
 
 // Planning System Wrappers
 const planStatusSync = () => _planStatusSync(getDaemonCtx());
@@ -245,6 +243,7 @@ async function writeCronSchedule(): Promise<void> {
     { interval: "Every 12hr", task: "topic-mocs", description: "Auto-generate Maps of Content per tag cluster" },
     { interval: "Daily 8pm", task: "daily-brief", description: "Send end-of-day summary to Telegram with all task activity" },
     { interval: "Daily 6am", task: "morning-brief-audio", description: "Generate local audio brief via Kokoro TTS (MORNING_BRIEF_ENABLED=true)" },
+    { interval: "Daily 8am + Mon 9am", task: "model-intelligence", description: "AI model catalog diff (daily) + deep analysis with news (weekly Mondays)" },
   ];
 
   // ── Claude Code scheduled tasks — load from SKILL.md files ──
@@ -799,18 +798,7 @@ const tasks: {
       fn: cleanupDelegationArtifacts,
       lastRun: 0,
     },
-    {
-      name: "note-linking",
-      intervalMs: 2 * 60 * 60 * 1000,
-      fn: processNoteLinking,
-      lastRun: 0,
-    },
-    {
-      name: "topic-mocs",
-      intervalMs: 12 * 60 * 60 * 1000,
-      fn: processTopicMOCs,
-      lastRun: 0,
-    },
+    // note-linking + topic-mocs removed — replaced by touchpoints
     {
       name: "daily-brief",
       intervalMs: 60 * 60 * 1000, // checked every hour
@@ -859,6 +847,45 @@ const tasks: {
           console.warn(`[morning-brief] Script exited with code ${result.exitCode}`);
           // Remove flag so it can retry next hour if it failed
           fs.rmSync(flagPath, { force: true });
+        }
+      },
+      lastRun: 0,
+    },
+    {
+      name: "model-intelligence",
+      intervalMs: 60 * 60 * 1000, // checked every hour
+      fn: async () => {
+        const nowHour = new Date().getHours();
+        const dayOfWeek = new Date().getDay(); // 0 = Sunday, 1 = Monday
+
+        // Daily quick check at 8 AM EAT, weekly deep dive Monday 9 AM EAT
+        const isDailyTime = nowHour === 8;
+        const isWeeklyTime = dayOfWeek === 1 && nowHour === 9;
+        if (!isDailyTime && !isWeeklyTime) return;
+
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const runMode = isWeeklyTime ? "weekly" : "daily";
+        const flagPath = path.join(VAULT_PATH, "_embeddings", `.model-intel-${runMode}-${todayKey}`);
+        if (fs.existsSync(flagPath)) return;
+
+        console.log(`[model-intelligence] ${runMode} model tracking...`);
+
+        const scriptPath = path.join(path.dirname(new URL(import.meta.url).pathname), "workflows/model-tracker.ts");
+        const result = Bun.spawnSync(
+          ["bun", "run", scriptPath, `--mode=${runMode}`],
+          {
+            env: { ...process.env },
+            stdout: "inherit",
+            stderr: "inherit",
+          }
+        );
+
+        if (result.exitCode === 0) {
+          fs.writeFileSync(flagPath, new Date().toISOString());
+          logActivity("model-intelligence", `${runMode} model intelligence updated`);
+          console.log(`[model-intelligence] ${runMode} run complete`);
+        } else {
+          console.warn(`[model-intelligence] Script exited with code ${result.exitCode}`);
         }
       },
       lastRun: 0,
@@ -1123,6 +1150,9 @@ async function runScheduler(): Promise<void> {
       const { staleThreadDetector } = await import("./touchpoints/points/staleThreadDetector.js");
       const { newsClusterer } = await import("./touchpoints/points/newsClusterer.js");
       const { newsLinker } = await import("./touchpoints/points/newsLinker.js");
+      const { connectionWeaver } = await import("./touchpoints/points/connectionWeaver.js");
+      const { dailySynthesis } = await import("./touchpoints/points/dailySynthesis.js");
+      const { vaultHealth } = await import("./touchpoints/points/vaultHealth.js");
 
       const channelRouter = new ChannelRouter(VAULT_PATH);
 
@@ -1169,9 +1199,26 @@ async function runScheduler(): Promise<void> {
         .register(conversationLearner)
         .register(staleThreadDetector)
         .register(newsClusterer)
-        .register(newsLinker);
+        .register(newsLinker)
+        .register(connectionWeaver)
+        .register(dailySynthesis)
+        .register(vaultHealth);
 
       tpEngine.start(vault);
+
+      // Register periodic touchpoint tasks
+      tasks.push({
+        name: "daily-synthesis",
+        intervalMs: 60 * 60 * 1000, // check every hour (touchpoint self-gates to 8:30-10pm EAT)
+        fn: () => tpEngine.runPeriodic("daily-synthesis"),
+        lastRun: 0,
+      });
+      tasks.push({
+        name: "vault-health",
+        intervalMs: 6 * 60 * 60 * 1000, // every 6 hours
+        fn: () => tpEngine.runPeriodic("vault-health"),
+        lastRun: 0,
+      });
 
       // Register stale-thread-detector as a periodic daemon task (6hr)
       tasks.push({

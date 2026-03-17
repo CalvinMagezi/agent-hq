@@ -254,7 +254,7 @@ export const getNote = createServerFn({ method: 'GET' })
     if (stat.isDirectory()) return { content: '' }
 
     const ext = path.extname(fullPath).toLowerCase()
-    const isText = ['.md', '.json', '.ts', '.js', '.sh', '.yaml', '.yml', '.env', '.txt', '.csv', '.log'].includes(ext)
+    const isText = ['.md', '.json', '.ts', '.js', '.sh', '.yaml', '.yml', '.env', '.txt', '.csv', '.log', '.html', '.htm'].includes(ext)
 
     if (!isText && stat.size > 1024 * 1024) return { content: '' } // Don't even try reading large non-text as string
 
@@ -326,4 +326,157 @@ export const createNote = createServerFn({ method: 'POST' })
 
     fs.writeFileSync(fullPath, data.content, 'utf-8')
     return { success: true, path: `Notebooks/Inbox/${filename}` }
+  })
+
+// ─── Update Note ──────────────────────────────────────────────────────────────
+
+interface UpdateNoteParams {
+  path: string
+  content: string
+}
+
+export const updateNote = createServerFn({ method: 'POST' })
+  .inputValidator((d: UpdateNoteParams) => d)
+  .handler(async ({ data }): Promise<{ success: boolean }> => {
+    const fullPath = path.resolve(VAULT_PATH, data.path)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if (!fullPath.startsWith(resolvedVault + path.sep)) return { success: false }
+    if (!fs.existsSync(fullPath)) return { success: false }
+
+    // Read existing file to preserve frontmatter
+    const raw = fs.readFileSync(fullPath, 'utf-8')
+    const parsed = matter(raw)
+
+    // Update the modified timestamp
+    parsed.data.modified = new Date().toISOString()
+
+    // Write back with preserved frontmatter + new content
+    const updated = matter.stringify(data.content, parsed.data)
+    fs.writeFileSync(fullPath, updated, 'utf-8')
+    return { success: true }
+  })
+
+// ─── Create Note in Folder ───────────────────────────────────────────────────
+
+interface CreateNoteInFolderParams {
+  folder: string
+  title: string
+  content: string
+}
+
+export const createNoteInFolder = createServerFn({ method: 'POST' })
+  .inputValidator((d: CreateNoteInFolderParams) => d)
+  .handler(async ({ data }): Promise<{ success: boolean; path: string }> => {
+    const targetDir = path.resolve(VAULT_PATH, data.folder)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if (!targetDir.startsWith(resolvedVault + path.sep) && targetDir !== resolvedVault) {
+      return { success: false, path: '' }
+    }
+
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true })
+    }
+
+    const safeTitle = data.title.replace(/[^a-z0-9 _-]/ig, '').trim() || 'Untitled'
+    let filename = `${safeTitle}.md`
+    let fullPath = path.join(targetDir, filename)
+
+    let i = 1
+    while (fs.existsSync(fullPath)) {
+      filename = `${safeTitle} ${i}.md`
+      fullPath = path.join(targetDir, filename)
+      i++
+    }
+
+    fs.writeFileSync(fullPath, data.content, 'utf-8')
+    const relPath = path.relative(VAULT_PATH, fullPath)
+    return { success: true, path: relPath }
+  })
+
+// ─── Get Folder List ─────────────────────────────────────────────────────────
+
+export const getFolderList = createServerFn({ method: 'GET' })
+  .handler(async (): Promise<{ folders: string[] }> => {
+    const folders: string[] = ['Notebooks/Inbox']
+    const notebooksDir = path.join(VAULT_PATH, 'Notebooks')
+    if (!fs.existsSync(notebooksDir)) return { folders }
+
+    const walk = (dir: string) => {
+      let entries: fs.Dirent[]
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+        const fullPath = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          const rel = path.relative(VAULT_PATH, fullPath)
+          if (rel !== 'Notebooks/Inbox') folders.push(rel)
+          walk(fullPath)
+        }
+      }
+    }
+
+    walk(notebooksDir)
+    folders.sort()
+    return { folders }
+  })
+
+// ─── DOCX → HTML ─────────────────────────────────────────────────────────────
+
+export const getDocxAsHtml = createServerFn({ method: 'GET' })
+  .inputValidator((notePath: string) => notePath)
+  .handler(async ({ data: notePath }): Promise<{ html: string; messages: string[] }> => {
+    const fullPath = path.resolve(VAULT_PATH, notePath)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if (!fullPath.startsWith(resolvedVault + path.sep) || !fs.existsSync(fullPath)) {
+      return { html: '<p>File not found</p>', messages: [] }
+    }
+
+    try {
+      const mammoth = await import('mammoth')
+      const buffer = fs.readFileSync(fullPath)
+      const result = await mammoth.convertToHtml({ buffer })
+      return {
+        html: result.value,
+        messages: result.messages.map((m: any) => m.message),
+      }
+    } catch (err: any) {
+      return { html: `<p>Failed to convert document: ${err.message}</p>`, messages: [] }
+    }
+  })
+
+// ─── Spreadsheet Data ─────────────────────────────────────────────────────────
+
+export interface SheetData {
+  name: string
+  data: string[][]
+}
+
+export const getSpreadsheetData = createServerFn({ method: 'GET' })
+  .inputValidator((notePath: string) => notePath)
+  .handler(async ({ data: notePath }): Promise<{ sheets: SheetData[]; truncated: boolean }> => {
+    const fullPath = path.resolve(VAULT_PATH, notePath)
+    const resolvedVault = path.resolve(VAULT_PATH)
+    if (!fullPath.startsWith(resolvedVault + path.sep) || !fs.existsSync(fullPath)) {
+      return { sheets: [], truncated: false }
+    }
+
+    try {
+      const XLSX = await import('xlsx')
+      const workbook = XLSX.read(fs.readFileSync(fullPath))
+      let truncated = false
+
+      const sheets: SheetData[] = workbook.SheetNames.map((name: string) => {
+        const sheet = workbook.Sheets[name]
+        const json: string[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+        if (json.length > 500) {
+          truncated = true
+          return { name, data: json.slice(0, 500) }
+        }
+        return { name, data: json }
+      })
+
+      return { sheets, truncated }
+    } catch (err: any) {
+      return { sheets: [], truncated: false }
+    }
   })

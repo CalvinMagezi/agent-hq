@@ -17,25 +17,18 @@ import { AuditLog } from "./auditLog.js";
 
 // ── Worker Imports ────────────────────────────────────────────────────
 
-import { gapDetector } from "./workers/gapDetector.js";
-import { ideaConnector } from "./workers/ideaConnector.js";
+// Workers removed in vault synaptic flow evolution (2026-03-17):
+// - gapDetector, ideaConnector, orphanRescuer, noteEnricher → replaced by touchpoints
+// - vaultCartographer → replaced by vault-health touchpoint
 import { projectNudger } from "./workers/projectNudger.js";
-import { noteEnricher } from "./workers/noteEnricher.js";
 import { dailyPreparer } from "./workers/dailyPreparer.js";
-import { orphanRescuer } from "./workers/orphanRescuer.js";
-import { vaultCartographer } from "./workers/vaultCartographer.js";
 import { codemapRefresher } from "./workers/codemapRefresher.js";
 
 // ── Worker Registry ───────────────────────────────────────────────────
 
 const WORKERS: VaultWorker[] = [
-    gapDetector,
-    ideaConnector,
     projectNudger,
-    noteEnricher,
     dailyPreparer,
-    orphanRescuer,
-    vaultCartographer,
     codemapRefresher,
 ];
 

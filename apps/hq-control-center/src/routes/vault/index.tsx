@@ -47,7 +47,6 @@ function InlineSearch() {
         navigate({ to: '/vault/$', params: { _splat: hit.notePath } })
     }, [navigate])
 
-    // Keyboard navigation
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
         if (e.key === 'ArrowDown') {
             e.preventDefault()
@@ -65,7 +64,6 @@ function InlineSearch() {
         }
     }, [results, selectedIndex, openResult])
 
-    // Search with debounce
     useEffect(() => {
         const q = query.trim()
         if (!q) { setResults([]); return }
@@ -77,7 +75,6 @@ function InlineSearch() {
         setSelectedIndex(0)
 
         const timer = setTimeout(async () => {
-            // Try FTS via ws-server first
             if (wsConnected) {
                 try {
                     const res = await fetch(
@@ -96,8 +93,6 @@ function InlineSearch() {
                     if (e.name === 'AbortError') return
                 }
             }
-
-            // Fallback would go here but FTS covers most cases
             if (!controller.signal.aborted) {
                 setIsLoading(false)
             }
@@ -109,14 +104,15 @@ function InlineSearch() {
     return (
         <div className="relative w-full">
             <div
-                className="flex items-center gap-3 px-4 py-3 rounded-xl transition-all"
+                className="flex items-center gap-3 px-4 py-3.5 rounded-2xl transition-all glass-card"
                 style={{
-                    background: 'var(--bg-elevated)',
-                    border: '1px solid var(--border)',
-                    boxShadow: query ? '0 0 0 1px var(--accent-green), 0 4px 20px rgba(0,255,136,0.06)' : 'none',
+                    boxShadow: query
+                        ? '0 0 0 1px rgba(0,255,136,0.2), 0 8px 32px rgba(0,0,0,0.3), 0 0 60px rgba(0,255,136,0.03)'
+                        : '0 4px 24px rgba(0,0,0,0.3), inset 0 1px 0 var(--glass-shine)',
+                    borderColor: query ? 'rgba(0,255,136,0.2)' : undefined,
                 }}
             >
-                <span className="text-base flex-shrink-0" style={{ color: 'var(--text-dim)' }}>⌕</span>
+                <span className="text-base flex-shrink-0" style={{ color: 'var(--text-dim)', opacity: 0.6 }}>⌕</span>
                 <input
                     ref={inputRef}
                     type="text"
@@ -128,26 +124,28 @@ function InlineSearch() {
                     style={{ color: 'var(--text-primary)' }}
                 />
                 {isLoading && (
-                    <div className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0" style={{ borderColor: 'var(--accent-amber)', borderTopColor: 'transparent' }} />
+                    <div className="w-4 h-4 rounded-full border-2 border-t-transparent animate-spin flex-shrink-0" style={{ borderColor: 'var(--accent-green)', borderTopColor: 'transparent' }} />
                 )}
-                <kbd className="hidden sm:inline text-[10px] px-1.5 py-0.5 rounded font-mono flex-shrink-0" style={{ background: 'var(--bg-base)', border: '1px solid var(--border)', color: 'var(--text-dim)' }}>
+                <kbd className="hidden sm:inline text-[10px] px-1.5 py-0.5 rounded-md font-mono flex-shrink-0" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: 'var(--text-dim)' }}>
                     ⌘K
                 </kbd>
             </div>
 
-            {/* Inline results dropdown */}
+            {/* Results dropdown — glass */}
             {query && results.length > 0 && (
                 <div
-                    className="absolute z-40 top-full left-0 right-0 mt-2 rounded-xl overflow-hidden shadow-2xl max-h-[50vh] overflow-y-auto"
-                    style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
+                    className="absolute z-40 top-full left-0 right-0 mt-2 rounded-2xl overflow-hidden max-h-[50vh] overflow-y-auto glass-heavy"
+                    style={{
+                        boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)',
+                    }}
                 >
                     {results.map((hit, idx) => (
                         <button
                             key={hit.notePath}
                             onClick={() => openResult(hit)}
-                            className="w-full text-left px-4 py-3 flex flex-col gap-1 border-b transition-colors"
+                            className="w-full text-left px-4 py-3 flex flex-col gap-1 transition-all"
                             style={{
-                                borderColor: 'var(--border)',
+                                borderBottom: '1px solid rgba(255,255,255,0.04)',
                                 background: idx === selectedIndex ? 'rgba(255,255,255,0.05)' : 'transparent',
                                 borderLeft: idx === selectedIndex ? '2px solid var(--accent-amber)' : '2px solid transparent',
                             }}
@@ -168,7 +166,7 @@ function InlineSearch() {
                             {hit.tags.length > 0 && (
                                 <div className="flex gap-1">
                                     {hit.tags.slice(0, 4).map((t) => (
-                                        <span key={t} className="text-[9px] px-1.5 py-0.5 rounded font-mono" style={{ background: 'var(--bg-elevated)', color: 'var(--text-dim)' }}>
+                                        <span key={t} className="text-[9px] px-1.5 py-0.5 rounded-md font-mono glass-tag" style={{ color: 'var(--text-dim)' }}>
                                             #{t}
                                         </span>
                                     ))}
@@ -176,11 +174,11 @@ function InlineSearch() {
                             )}
                         </button>
                     ))}
-                    <div className="px-4 py-2 flex items-center justify-between text-[10px] font-mono" style={{ color: 'var(--text-dim)' }}>
+                    <div className="px-4 py-2 flex items-center justify-between text-[10px] font-mono" style={{ color: 'var(--text-dim)', borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                         <span>{results.length} results</span>
                         <div className="flex items-center gap-3">
-                            <span><kbd className="px-1 rounded" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>↑↓</kbd> navigate</span>
-                            <span><kbd className="px-1 rounded" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>↵</kbd> open</span>
+                            <span><kbd className="px-1 rounded" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>↑↓</kbd> navigate</span>
+                            <span><kbd className="px-1 rounded" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>↵</kbd> open</span>
                         </div>
                     </div>
                 </div>
@@ -188,8 +186,8 @@ function InlineSearch() {
 
             {query && !isLoading && results.length === 0 && (
                 <div
-                    className="absolute z-40 top-full left-0 right-0 mt-2 rounded-xl overflow-hidden shadow-2xl"
-                    style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
+                    className="absolute z-40 top-full left-0 right-0 mt-2 rounded-2xl overflow-hidden glass-heavy"
+                    style={{ boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)' }}
                 >
                     <div className="px-6 py-8 text-center text-sm font-mono" style={{ color: 'var(--text-dim)' }}>
                         No results for "{query}"
@@ -200,22 +198,22 @@ function InlineSearch() {
     )
 }
 
-// ─── Recent file card ───────────────────────────────────────────────────────
+// ─── Recent file card — glass ───────────────────────────────────────────────
 
-function RecentFileCard({ file }: { file: RecentFile }) {
+function RecentFileCard({ file, index }: { file: RecentFile; index: number }) {
     const folder = file.path.split('/').slice(0, -1).join('/')
 
     return (
         <Link
             to="/vault/$"
             params={{ _splat: file.path }}
-            className="block hq-panel p-3.5 transition-all hover:border-amber-500/30 group"
-            style={{ borderColor: 'var(--border)' }}
+            className="block glass-card rounded-xl p-3.5 group stagger-item"
+            style={{ animationDelay: `${index * 60}ms` }}
         >
             <div className="flex items-start justify-between gap-2 mb-1.5">
                 <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-sm flex-shrink-0 opacity-60">{fileIcon(file.path)}</span>
-                    <span className="text-[12px] font-mono font-bold truncate group-hover:text-amber-400 transition-colors" style={{ color: 'var(--text-primary)' }}>
+                    <span className="text-sm flex-shrink-0 opacity-50">{fileIcon(file.path)}</span>
+                    <span className="text-[12px] font-mono font-bold truncate transition-colors" style={{ color: 'var(--text-primary)' }}>
                         {file.title}
                     </span>
                 </div>
@@ -224,7 +222,7 @@ function RecentFileCard({ file }: { file: RecentFile }) {
                 </span>
             </div>
 
-            <div className="text-[9px] font-mono mb-1.5 truncate" style={{ color: 'var(--text-dim)', opacity: 0.6 }}>
+            <div className="text-[9px] font-mono mb-1.5 truncate" style={{ color: 'var(--text-dim)', opacity: 0.5 }}>
                 {folder}
             </div>
 
@@ -237,7 +235,7 @@ function RecentFileCard({ file }: { file: RecentFile }) {
             {file.tags.length > 0 && (
                 <div className="flex flex-wrap gap-1 mt-2">
                     {file.tags.slice(0, 3).map((t) => (
-                        <span key={t} className="text-[8px] px-1.5 py-0.5 rounded font-mono" style={{ background: 'rgba(255,179,0,0.08)', color: 'var(--accent-amber)' }}>
+                        <span key={t} className="text-[8px] px-1.5 py-0.5 rounded-md font-mono glass-tag" style={{ color: 'var(--accent-amber)' }}>
                             #{t}
                         </span>
                     ))}
@@ -260,7 +258,7 @@ function VaultHome() {
                     <h2 className="text-lg font-bold tracking-[0.25em] uppercase mb-1" style={{ color: 'var(--text-primary)' }}>
                         Vault
                     </h2>
-                    <p className="text-xs font-mono" style={{ color: 'var(--text-dim)' }}>
+                    <p className="text-xs font-mono" style={{ color: 'var(--text-dim)', opacity: 0.6 }}>
                         Search, browse, and explore your knowledge base
                     </p>
                 </div>
@@ -275,13 +273,15 @@ function VaultHome() {
                     <section className="mb-10">
                         <div className="flex items-center gap-2 mb-4">
                             <span className="text-[10px] font-mono tracking-widest uppercase font-bold" style={{ color: 'var(--accent-amber)' }}>
-                                📌 Pinned
+                                Pinned
                             </span>
-                            <div className="flex-1 h-px" style={{ background: 'var(--border)' }} />
+                            <div className="flex-1 h-px" style={{ background: 'rgba(255,179,0,0.1)' }} />
                         </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                            {pinnedNotes.map((note) => (
-                                <PinnedCard key={note.path} note={note} isSelected={false} />
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            {pinnedNotes.map((note, i) => (
+                                <div key={note.path} className="stagger-item" style={{ animationDelay: `${i * 60}ms` }}>
+                                    <PinnedCard note={note} isSelected={false} />
+                                </div>
                             ))}
                         </div>
                     </section>
@@ -294,11 +294,11 @@ function VaultHome() {
                             <span className="text-[10px] font-mono tracking-widest uppercase font-bold" style={{ color: 'var(--accent-green)' }}>
                                 Recently Modified
                             </span>
-                            <div className="flex-1 h-px" style={{ background: 'var(--border)' }} />
+                            <div className="flex-1 h-px" style={{ background: 'rgba(0,255,136,0.08)' }} />
                         </div>
                         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                            {recentFiles.map((file) => (
-                                <RecentFileCard key={file.path} file={file} />
+                            {recentFiles.map((file, i) => (
+                                <RecentFileCard key={file.path} file={file} index={i} />
                             ))}
                         </div>
                     </section>
@@ -306,8 +306,8 @@ function VaultHome() {
 
                 {/* Footer hint */}
                 <div className="text-center pt-4 pb-8">
-                    <p className="text-[10px] font-mono" style={{ color: 'var(--text-dim)', opacity: 0.5 }}>
-                        Press <kbd className="px-1.5 py-0.5 rounded mx-0.5" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)' }}>⌘K</kbd> for global search anywhere
+                    <p className="text-[10px] font-mono" style={{ color: 'var(--text-dim)', opacity: 0.4 }}>
+                        Press <kbd className="px-1.5 py-0.5 rounded-md mx-0.5" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>⌘K</kbd> for global search anywhere
                     </p>
                 </div>
             </div>

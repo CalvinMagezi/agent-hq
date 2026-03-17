@@ -5,7 +5,7 @@
  * providing a single API that all relay adapters and harnesses consume.
  *
  * Usage:
- *   const engine = new ContextEngine({ vault, model: "claude-sonnet-4-5" });
+ *   const engine = new ContextEngine({ vault, model: "claude-opus-4-6" });
  *   const frame = await engine.buildFrame({ userMessage: "Hello", threadId });
  *   // frame.system → system prompt
  *   // frame.turns → conversation history (compacted)
@@ -17,6 +17,11 @@ export * from "./types.js";
 export { PROFILES } from "./budget/profiles.js";
 export { getModelLimit, isLargeContextModel } from "./tokenizer/models.js";
 export { countTokensFast, countTokensPrecise } from "./tokenizer/counter.js";
+
+// Models (unified registry)
+export { ModelRegistry, getDefaultRegistry, resetDefaultRegistry } from "./models/registry.js";
+export { DEFAULT_SPECS } from "./models/defaults.js";
+export type { ModelSpec, ModelProvider, ModelTier, ModelRegistryConfig, CheckpointConfig } from "./models/types.js";
 
 // Layers
 export { assembleSystemLayer, buildHarnessInstructions } from "./layers/system.js";
@@ -34,11 +39,36 @@ export { createExtractiveSummarizer } from "./compaction/summarizer.js";
 export { adaptVaultClient, createMockVault } from "./vault/adapter.js";
 export { ChunkIndex, chunkNote, scoreChunks } from "./vault/chunkIndex.js";
 
+// Utils
+export { stripPrivateTags } from "./utils/privacy.js";
+
 // Observability
-export { MetricsCollector, extractMetrics } from "./observability/metrics.js";
+export { MetricsCollector, extractMetrics, formatTokenReport } from "./observability/metrics.js";
 export type { FrameMetrics } from "./observability/metrics.js";
 export { TraceLogger } from "./observability/tracing.js";
 export type { TraceEntry } from "./observability/tracing.js";
+
+// Session (infinite conversation)
+export { SessionStore } from "./session/sessionStore.js";
+export { SessionManager } from "./session/sessionManager.js";
+export type { SessionManagerConfig } from "./session/sessionManager.js";
+export { Checkpointer, getCheckpointConfig } from "./session/checkpointer.js";
+export { RecallEngine } from "./session/recall.js";
+export { MessageQueue } from "./session/messageQueue.js";
+export type {
+  Session,
+  SessionSurface,
+  SessionMessage,
+  Checkpoint,
+  CheckpointFact,
+  RecallResult,
+  SessionResumeContext,
+  BatchedInput,
+  SurfaceType,
+  SessionStatus,
+  MessageBatchConfig,
+  SessionManagerConfig as SessionManagerOpts,
+} from "./session/types.js";
 
 import { randomUUID } from "crypto";
 
@@ -59,6 +89,7 @@ import { createCounter, truncateToTokens } from "./tokenizer/counter.js";
 import { getModelLimit } from "./tokenizer/models.js";
 import { PROFILES, mergeProfile } from "./budget/profiles.js";
 import { computeAllocations, cascadeSurplus, buildBudget } from "./budget/allocator.js";
+import { stripPrivateTags } from "./utils/privacy.js";
 
 export class ContextEngine {
   private config: Required<
@@ -171,7 +202,7 @@ export class ContextEngine {
       }
     }
 
-    let memory = memoryParts.join("\n\n");
+    let memory = stripPrivateTags(memoryParts.join("\n\n"));
     let memoryTokens = this.count(memory);
     let memoryCompacted = false;
 
@@ -339,7 +370,7 @@ export class ContextEngine {
         if (injections.length >= this.config.maxInjections) break;
         if (injectionTokens >= injectionBudget) break;
 
-        const chunk = note.content.slice(0, 1200); // Rough pre-trim
+        const chunk = stripPrivateTags(note.content.slice(0, 1200)); // Rough pre-trim
         let tokens = this.count(chunk);
 
         let content = chunk;
@@ -361,7 +392,8 @@ export class ContextEngine {
       }
     }
 
-    // Semantic search results
+    // Semantic search results — progressive disclosure (tier-1: index only)
+    let injectionTokensSaved = 0;
     try {
       const searchResults = await this.config.vault.searchNotes(input.userMessage, 5);
       chunkIndexHits = searchResults.length;
@@ -373,25 +405,30 @@ export class ContextEngine {
         // Skip if we already have this note as a pinned injection
         if (injections.some(i => i.label === result.title)) continue;
 
-        let content = result.content.slice(0, 800);
-        let tokens = this.count(content);
-
-        if (tokens > this.config.maxChunkTokens) {
-          const truncResult = truncateToTokens(content, this.config.maxChunkTokens, this.count);
-          content = truncResult.text;
-          tokens = this.count(content);
-          injectionCompacted = true;
-        }
-
         const notebook = result.notebook ? ` (${result.notebook})` : "";
+        const fullLabel = `${result.title}${notebook}`;
+
+        // Tier-1: compact index (title + first sentence + tags)
+        const fullContent = stripPrivateTags(result.content.slice(0, 800));
+        const fullTokens = this.count(fullContent);
+        const firstSentence = extractFirstSentence(fullContent);
+        const indexContent = `[${fullLabel}]: ${firstSentence}`;
+        const tags = result.tags?.length ? ` [${result.tags.join(", ")}]` : "";
+        const indexDisplay = indexContent + tags;
+        const indexTokens = this.count(indexDisplay);
+
+        injectionTokensSaved += Math.max(0, fullTokens - indexTokens);
+
         injections.push({
           source: "search_result",
-          label: `${result.title}${notebook}`,
-          content: `[${result.title}${notebook}]: ${content}`,
-          tokens,
-          score: 0.6, // Base score — would be replaced by chunk index scoring
+          label: fullLabel,
+          content: indexDisplay,
+          tokens: indexTokens,
+          score: 0.6,
+          tier: "index",
+          detailRef: result.title,
         });
-        injectionTokens += tokens;
+        injectionTokens += indexTokens;
       }
     } catch {
       // Search may fail — non-critical
@@ -467,6 +504,11 @@ export class ContextEngine {
 
     const assemblyTimeMs = performance.now() - start;
 
+    // Calculate tokens saved by compaction
+    const tokensSaved = compactionEvents.reduce(
+      (sum, e) => sum + Math.max(0, e.tokensBefore - e.tokensAfter), 0
+    );
+
     const meta: FrameMeta = {
       assembledAt: new Date().toISOString(),
       assemblyTimeMs: Math.round(assemblyTimeMs * 100) / 100,
@@ -478,6 +520,8 @@ export class ContextEngine {
       chunkIndexHits,
       compactionEvents,
       harnessHint: input.harnessHint,
+      tokensSaved,
+      injectionTokensSaved,
     };
 
     // ─── Return Frame ────────────────────────────────────────
@@ -541,6 +585,41 @@ export class ContextEngine {
     return [];
   }
 
+  /**
+   * Expand an index-tier injection to full content.
+   * Used for progressive disclosure — agents call this when they need details.
+   */
+  async expandInjection(detailRef: string): Promise<ContextInjection | null> {
+    try {
+      const results = await this.config.vault.searchNotes(detailRef, 1);
+      if (results.length === 0) return null;
+
+      const result = results[0];
+      const content = stripPrivateTags(result.content.slice(0, 1200));
+      let tokens = this.count(content);
+
+      let finalContent = content;
+      if (tokens > this.config.maxChunkTokens) {
+        const truncResult = truncateToTokens(content, this.config.maxChunkTokens, this.count);
+        finalContent = truncResult.text;
+        tokens = this.count(finalContent);
+      }
+
+      const notebook = result.notebook ? ` (${result.notebook})` : "";
+      return {
+        source: "search_result",
+        label: `${result.title}${notebook}`,
+        content: `[${result.title}${notebook}]: ${finalContent}`,
+        tokens,
+        score: 0.6,
+        tier: "full",
+        detailRef,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private buildHarnessInstructions(harnessHint: string): string {
     switch (harnessHint) {
       case "gemini-cli":
@@ -563,4 +642,13 @@ export class ContextEngine {
         return "";
     }
   }
+}
+
+/**
+ * Extract the first sentence from content for progressive disclosure.
+ */
+function extractFirstSentence(text: string): string {
+  const match = text.match(/^[^.!?]*[.!?]/);
+  if (match && match[0].length <= 200) return match[0].trim();
+  return text.length > 80 ? text.slice(0, 80) + "..." : text;
 }

@@ -21,8 +21,8 @@ export interface SynapticChain {
 export const SYNAPTIC_CHAINS: SynapticChain[] = [
   {
     name: "new-note-quality",
-    description: "New note → fix frontmatter → suggest tags → ready for embedding",
-    steps: ["frontmatter-fixer", "tag-suggester"],
+    description: "New note → fix frontmatter → suggest tags → weave connections",
+    steps: ["frontmatter-fixer", "tag-suggester", "connection-weaver"],
   },
   {
     name: "conversation-harvest",
@@ -38,6 +38,16 @@ export const SYNAPTIC_CHAINS: SynapticChain[] = [
     name: "news-digest",
     description: "HEARTBEAT pulse → cluster into topic briefs → link to vault notes",
     steps: ["news-clusterer", "news-linker"],
+  },
+  {
+    name: "daily-synthesis",
+    description: "Periodic cross-pollination of news, vault state, and memories",
+    steps: ["daily-synthesis"],
+  },
+  {
+    name: "vault-health",
+    description: "Periodic structural health check — dead links, orphans, cluster gaps",
+    steps: ["vault-health"],
   },
 ];
 

@@ -1633,7 +1633,7 @@ async function cmdInit(argv: string[]): Promise<void> {
       state.markDone("models");
     } else if (sh("ollama --version 2>/dev/null")) {
       section("Ollama models");
-      await ensureOllamaModels(["qwen3.5:9b", "gemma3:1b"]);
+      await ensureOllamaModels(["qwen3.5:9b", "qwen3.5:2b", "qwen3.5:0.8b"]);
       state.markDone("models");
     } else {
       info("Ollama not installed — skipping local model setup (run 'hq tools ollama' to install)");

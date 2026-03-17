@@ -22,13 +22,15 @@ import { walkVaultFiles } from "@repo/vault-native";
 // ── CLI Args ──────────────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
-const getArg = (flag: string, defaultVal = "") =>
-    args[args.indexOf(flag) + 1] ?? defaultVal;
+const getArg = (flag: string, defaultVal = "") => {
+    const idx = args.indexOf(flag);
+    return idx !== -1 ? (args[idx + 1] ?? defaultVal) : defaultVal;
+};
 
 const SBLU_NAME = getArg("--sblu", "cartographer");
 const VAULT_PATH = getArg("--vault", process.env.VAULT_PATH ?? "");
 const OUT_FILE = getArg("--out", `/tmp/sblu-${SBLU_NAME}-train.jsonl`);
-const MIN_EXAMPLES = parseInt(getArg("--min", "50"), 10);
+const MIN_EXAMPLES = parseInt(getArg("--min", "30"), 10);
 
 if (!VAULT_PATH || !fs.existsSync(VAULT_PATH)) {
     console.error(`Error: --vault path not specified or does not exist: "${VAULT_PATH}"`);
@@ -137,24 +139,46 @@ function extractHistoricalExamples(vaultPath: string): TrainingExample[] {
 
 /**
  * Generate synthetic training examples from the current vault state.
- * Uses path-based heuristics to create realistic gap suggestions.
+ * Uses multiple heuristics: path-proximity, tag overlap, and temporal clustering.
  */
 function generateSyntheticExamples(vaultPath: string, count: number): TrainingExample[] {
     const examples: TrainingExample[] = [];
     const allFiles = collectMarkdownFiles(vaultPath, 2000);
+    const matter = require("gray-matter");
 
-    for (let i = 0; i < count; i++) {
-        // Randomly sample a subset of the vault to simulate different states
+    // Pre-load tag and mtime data for enhanced heuristics
+    const tagIndex = new Map<string, string[]>(); // tag → [files]
+    const mtimeIndex = new Map<string, number>();  // file → mtime ms
+    const notebookFiles = allFiles.filter(f => f.startsWith("Notebooks/"));
+
+    for (const relPath of notebookFiles) {
+        const fullPath = path.join(vaultPath, relPath);
+        try {
+            const stat = fs.statSync(fullPath);
+            mtimeIndex.set(relPath, stat.mtimeMs);
+            const raw = fs.readFileSync(fullPath, "utf-8");
+            const { data } = matter(raw);
+            if (Array.isArray(data.tags)) {
+                for (const tag of data.tags) {
+                    if (typeof tag === "string") {
+                        const existing = tagIndex.get(tag) ?? [];
+                        existing.push(relPath);
+                        tagIndex.set(tag, existing);
+                    }
+                }
+            }
+        } catch { /* skip */ }
+    }
+
+    // ── Strategy 1: Path-proximity (same project, unlinked) ──────────
+    for (let i = 0; i < Math.ceil(count * 0.5); i++) {
         const sampleSize = 50 + Math.floor(Math.random() * 150);
         const shuffled = [...allFiles].sort(() => Math.random() - 0.5);
         const sample = shuffled.slice(0, sampleSize);
+        const sampleNotebooks = sample.filter(f => f.startsWith("Notebooks/"));
 
-        // Build expected output using path-proximity heuristics
-        const notebookFiles = sample.filter(f => f.startsWith("Notebooks/"));
-
-        // Group by project folder
         const projectGroups = new Map<string, string[]>();
-        for (const file of notebookFiles) {
+        for (const file of sampleNotebooks) {
             const parts = file.split("/");
             if (parts.length >= 3) {
                 const project = parts[2]!;
@@ -163,34 +187,85 @@ function generateSyntheticExamples(vaultPath: string, count: number): TrainingEx
             }
         }
 
-        // Create synthetic gap suggestions based on same-project but unlinked notes
-        const gaps: Array<{
-            notes: string[];
-            suggested_link: string;
-            confidence: "high" | "medium" | "low";
-        }> = [];
-
+        const gaps: Array<{ notes: string[]; suggested_link: string; confidence: "high" | "medium" | "low" }> = [];
         for (const [project, files] of projectGroups) {
             if (files.length < 2 || gaps.length >= 5) break;
-            // Take two random files from the same project as a "gap"
             const pair = files.sort(() => Math.random() - 0.5).slice(0, 2);
-            const titleA = path.basename(pair[0]!, ".md");
-            const titleB = path.basename(pair[1]!, ".md");
             gaps.push({
                 notes: pair,
                 suggested_link: `Both notes are part of the ${project} project and likely share context`,
                 confidence: "medium",
             });
-            void titleA; void titleB;
         }
 
-        if (gaps.length === 0) continue;
+        if (gaps.length > 0) {
+            examples.push({
+                prompt: buildCartographerPrompt(sample),
+                completion: JSON.stringify({ cluster_gaps: gaps }),
+                quality_score: 0.7,
+                source: "synthetic",
+            });
+        }
+    }
 
-        const prompt = buildCartographerPrompt(sample);
+    // ── Strategy 2: Tag overlap (notes sharing 2+ tags in different folders) ──
+    const tagPairs = new Set<string>();
+    for (const [tag, files] of tagIndex) {
+        if (files.length < 2) continue;
+        for (let i = 0; i < files.length && tagPairs.size < Math.ceil(count * 0.3); i++) {
+            for (let j = i + 1; j < files.length; j++) {
+                const a = files[i]!, b = files[j]!;
+                const folderA = a.split("/").slice(0, 3).join("/");
+                const folderB = b.split("/").slice(0, 3).join("/");
+                if (folderA === folderB) continue; // same folder = not interesting
+                const pairKey = [a, b].sort().join("|");
+                if (tagPairs.has(pairKey)) continue;
+                tagPairs.add(pairKey);
+
+                const sample = [...allFiles].sort(() => Math.random() - 0.5).slice(0, 100);
+                if (!sample.includes(a)) sample.push(a);
+                if (!sample.includes(b)) sample.push(b);
+
+                examples.push({
+                    prompt: buildCartographerPrompt(sample),
+                    completion: JSON.stringify({ cluster_gaps: [{
+                        notes: [a, b],
+                        suggested_link: `Both notes share the tag "${tag}" but are in different project folders`,
+                        confidence: "high",
+                    }] }),
+                    quality_score: 0.75,
+                    source: "synthetic",
+                });
+                break; // one per tag to diversify
+            }
+        }
+    }
+
+    // ── Strategy 3: Temporal clustering (modified within 2h window, different projects) ──
+    const sortedByMtime = [...mtimeIndex.entries()].sort((a, b) => b[1] - a[1]);
+    const TWO_HOURS = 2 * 60 * 60 * 1000;
+
+    for (let i = 0; i < sortedByMtime.length - 1 && examples.length < count * 1.2; i++) {
+        const [fileA, mtimeA] = sortedByMtime[i]!;
+        const [fileB, mtimeB] = sortedByMtime[i + 1]!;
+        if (Math.abs(mtimeA - mtimeB) > TWO_HOURS) continue;
+
+        const folderA = fileA.split("/").slice(0, 3).join("/");
+        const folderB = fileB.split("/").slice(0, 3).join("/");
+        if (folderA === folderB) continue;
+
+        const sample = [...allFiles].sort(() => Math.random() - 0.5).slice(0, 100);
+        if (!sample.includes(fileA)) sample.push(fileA);
+        if (!sample.includes(fileB)) sample.push(fileB);
+
         examples.push({
-            prompt,
-            completion: JSON.stringify({ cluster_gaps: gaps }),
-            quality_score: 0.7, // Lower quality for synthetic data
+            prompt: buildCartographerPrompt(sample),
+            completion: JSON.stringify({ cluster_gaps: [{
+                notes: [fileA, fileB],
+                suggested_link: `Both notes were modified around the same time, suggesting related work`,
+                confidence: "low",
+            }] }),
+            quality_score: 0.65,
             source: "synthetic",
         });
     }

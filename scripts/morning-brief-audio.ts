@@ -45,6 +45,7 @@ const ENABLED = process.env.MORNING_BRIEF_ENABLED === "true";
 const DRY_RUN  = process.argv.includes("--dry-run");
 const AUTO_PLAY = process.argv.includes("--play");
 const FORCE    = process.argv.includes("--force"); // bypass feature flag for manual runs
+const VOICE_OVERRIDE = process.argv.find(a => a.startsWith("--voice="))?.split("=")[1];
 
 // ── Voice rotation — one voice per day, cycles through the full roster ────────
 const VOICE_ROSTER = [
@@ -52,13 +53,13 @@ const VOICE_ROSTER = [
   "am_michael",  // calm male (American)
   "af_bella",    // expressive female (American)
   "bm_george",   // authoritative male (British)
-  "af_nicole",   // conversational female (American)
   "bf_emma",     // clear female (British)
   "af_sarah",    // bright female (American)
   "am_adam",     // deep male (American)
 ];
 
 function todaysVoice(): string {
+  if (VOICE_OVERRIDE) return VOICE_OVERRIDE;
   const now = new Date();
   const dayOfYear = Math.floor(
     (now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / 86_400_000

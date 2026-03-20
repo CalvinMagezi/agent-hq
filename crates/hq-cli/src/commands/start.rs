@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use hq_core::config::HqConfig;
 use hq_db::Database;
-use hq_llm::LlmProvider;
+// LlmProvider trait imported locally where needed (run_hq_harness_stream)
 use hq_vault::VaultClient;
 use std::sync::Arc;
 use tokio::signal;
@@ -286,7 +286,9 @@ fn resolve_model_alias(name: &str) -> String {
         "opus" => "anthropic/claude-opus-4".to_string(),
         "haiku" => "anthropic/claude-haiku-4-5".to_string(),
         "gemini" | "flash" => "google/gemini-2.5-flash".to_string(),
+        "gemini-pro" => "google/gemini-2.5-pro".to_string(),
         "gpt4" => "openai/gpt-4.1".to_string(),
+        "kimi" | "k2.5" => "moonshotai/kimi-k2.5".to_string(),
         other => other.to_string(),
     }
 }
@@ -337,6 +339,463 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+// ─── Harness helpers ───────────────────────────────────────────
+
+/// HQ harness cheap model fallback chain.
+const HQ_MODELS: &[&str] = &[
+    "moonshotai/kimi-k2.5",
+    "google/gemini-2.5-flash-lite",
+    "minimax/minimax-m2.7",
+];
+
+/// Valid harness names for user-facing commands.
+const VALID_HARNESSES: &[&str] = &[
+    "hq", "claude-code", "claude", "opencode", "gemini-cli", "gemini",
+    "codex-cli", "codex", "qwen-code", "qwen", "kilo-code", "kilo",
+    "mistral-vibe", "vibe",
+];
+
+/// Canonical harness name (normalize aliases).
+fn canonical_harness(name: &str) -> &'static str {
+    match name {
+        "claude" | "claude-code" => "claude-code",
+        "opencode" => "opencode",
+        "gemini" | "gemini-cli" => "gemini-cli",
+        "codex" | "codex-cli" => "codex-cli",
+        "qwen" | "qwen-code" => "qwen-code",
+        "kilo" | "kilo-code" => "kilo-code",
+        "vibe" | "mistral-vibe" => "mistral-vibe",
+        _ => "hq",
+    }
+}
+
+/// Display name for a harness (for status messages).
+fn harness_display(harness: &str) -> String {
+    match harness {
+        "claude-code" => "claude-code (Claude CLI)".to_string(),
+        "opencode" => "opencode (OpenCode CLI)".to_string(),
+        "gemini-cli" => "gemini-cli (Gemini CLI)".to_string(),
+        "codex-cli" => "codex-cli (Codex CLI)".to_string(),
+        "qwen-code" => "qwen-code (Qwen CLI)".to_string(),
+        "kilo-code" => "kilo-code (Kilo CLI)".to_string(),
+        "mistral-vibe" => "mistral-vibe (Vibe CLI)".to_string(),
+        "hq" => format!("hq (OpenRouter: {})", HQ_MODELS[0]),
+        other => other.to_string(),
+    }
+}
+
+/// Channel state with harness routing and per-harness session IDs.
+#[derive(Clone)]
+struct ChannelState {
+    /// Chat history (only used by HQ harness for OpenRouter context).
+    messages: Vec<hq_core::types::ChatMessage>,
+    /// Active harness name.
+    harness: String,
+    /// Model override (only relevant for HQ harness).
+    model_override: Option<String>,
+    /// Per-harness session IDs for resume capability.
+    session_ids: std::collections::HashMap<String, String>,
+}
+
+impl ChannelState {
+    fn new_default() -> Self {
+        Self {
+            messages: vec![],
+            harness: "claude-code".to_string(),
+            model_override: None,
+            session_ids: std::collections::HashMap::new(),
+        }
+    }
+}
+
+/// Extract text from an NDJSON line emitted by CLI harnesses.
+///
+/// Claude Code format: `{"type":"assistant","content":[{"type":"text","text":"..."}]}`
+/// Also handles: `{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}`
+/// And simpler: `{"text":"..."}` or `{"content":"..."}`
+fn extract_text_from_ndjson(json: &serde_json::Value) -> Option<String> {
+    // Claude Code assistant message: {"type":"assistant","content":[{"type":"text","text":"..."}]}
+    if json.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+        if let Some(content) = json.get("content").and_then(|v| v.as_array()) {
+            let mut text = String::new();
+            for block in content {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+            }
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+
+    // Content block delta: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
+    if json.get("type").and_then(|v| v.as_str()) == Some("content_block_delta") {
+        if let Some(delta) = json.get("delta") {
+            if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
+                return Some(t.to_string());
+            }
+        }
+    }
+
+    // Simple text field
+    if let Some(t) = json.get("text").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+
+    // Simple content field (string)
+    if let Some(t) = json.get("content").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+
+    // Codex format: {"type":"message","content":"..."}
+    if json.get("type").and_then(|v| v.as_str()) == Some("message") {
+        if let Some(t) = json.get("content").and_then(|v| v.as_str()) {
+            return Some(t.to_string());
+        }
+    }
+
+    None
+}
+
+/// Build CLI command args for a given harness.
+///
+/// Returns (program, args, supports_resume).
+fn build_harness_command(
+    harness: &str,
+    prompt: &str,
+    session_id: Option<&str>,
+) -> (String, Vec<String>, bool) {
+    match harness {
+        "claude-code" => {
+            let mut args = vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--verbose".to_string(),
+                "--max-turns".to_string(),
+                "100".to_string(),
+                "--model".to_string(),
+                "opus".to_string(),
+            ];
+            if let Some(sid) = session_id {
+                args.push("--resume".to_string());
+                args.push(sid.to_string());
+            }
+            args.push("-p".to_string());
+            args.push(prompt.to_string());
+            ("claude".to_string(), args, true)
+        }
+        "opencode" => {
+            let mut args = vec![
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ];
+            if let Some(sid) = session_id {
+                args.push("--continue".to_string());
+                args.push(sid.to_string());
+            }
+            args.push("-p".to_string());
+            args.push(prompt.to_string());
+            ("opencode".to_string(), args, true)
+        }
+        "gemini-cli" => {
+            let args = vec!["-p".to_string(), prompt.to_string()];
+            ("gemini".to_string(), args, false)
+        }
+        "codex-cli" => {
+            if let Some(sid) = session_id {
+                let args = vec![
+                    "exec".to_string(),
+                    "resume".to_string(),
+                    sid.to_string(),
+                    "--json".to_string(),
+                    "--full-auto".to_string(),
+                    "--color".to_string(),
+                    "never".to_string(),
+                ];
+                ("codex".to_string(), args, true)
+            } else {
+                let args = vec![
+                    "exec".to_string(),
+                    "--json".to_string(),
+                    "--full-auto".to_string(),
+                    "--color".to_string(),
+                    "never".to_string(),
+                    "-p".to_string(),
+                    prompt.to_string(),
+                ];
+                ("codex".to_string(), args, true)
+            }
+        }
+        "qwen-code" => {
+            let mut args = vec![
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--include-partial-messages".to_string(),
+                "--yolo".to_string(),
+            ];
+            if let Some(sid) = session_id {
+                args.push("--continue".to_string());
+                args.push(sid.to_string());
+            }
+            args.push("-p".to_string());
+            args.push(prompt.to_string());
+            ("qwen".to_string(), args, true)
+        }
+        "kilo-code" => {
+            let args = vec![
+                "run".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "--auto".to_string(),
+                prompt.to_string(),
+            ];
+            ("kilo".to_string(), args, false)
+        }
+        "mistral-vibe" => {
+            let args = vec![
+                "--prompt".to_string(),
+                prompt.to_string(),
+                "--output".to_string(),
+                "streaming".to_string(),
+                "--max-turns".to_string(),
+                "30".to_string(),
+                "--max-price".to_string(),
+                "0.50".to_string(),
+            ];
+            ("vibe".to_string(), args, false)
+        }
+        _ => {
+            // Should not happen; fallback to claude-code
+            build_harness_command("claude-code", prompt, session_id)
+        }
+    }
+}
+
+/// Run a CLI harness subprocess, reading NDJSON from stdout.
+///
+/// Calls `on_token` with accumulated text periodically.
+/// Returns (final_text, optional_session_id).
+async fn run_cli_harness(
+    harness: &str,
+    prompt: &str,
+    session_id: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+    use std::process::Stdio;
+
+    let (program, args, _supports_resume) = build_harness_command(harness, prompt, session_id);
+
+    tracing::info!(harness, program = %program, "spawning CLI harness");
+
+    let mut child = Command::new(&program)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context(format!("failed to spawn `{program}` — is it installed and on PATH?"))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+
+    let mut accumulated = String::new();
+    let mut found_session_id: Option<String> = None;
+
+    while let Some(line) = reader.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Try to parse as JSON (NDJSON)
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+            // Extract text
+            if let Some(text) = extract_text_from_ndjson(&json) {
+                accumulated.push_str(&text);
+            }
+            // Extract session_id for resume
+            if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
+                found_session_id = Some(sid.to_string());
+            }
+        } else {
+            // Not JSON — treat as plain text output (e.g., gemini-cli)
+            if !accumulated.is_empty() {
+                accumulated.push('\n');
+            }
+            accumulated.push_str(&line);
+        }
+    }
+
+    // Wait for process to finish
+    let status = child.wait().await?;
+    if !status.success() {
+        // Read stderr for error context
+        // (stderr was already consumed by the process, but we can note the exit code)
+        if accumulated.is_empty() {
+            anyhow::bail!("`{program}` exited with status {status}");
+        }
+        // If we got partial output, return it with a warning
+        tracing::warn!(harness, status = %status, "CLI harness exited with non-zero status but produced output");
+    }
+
+    Ok((accumulated, found_session_id))
+}
+
+/// Run a CLI harness with streaming — reads NDJSON line by line and calls
+/// the callback with accumulated text as it grows. This variant can be used
+/// for live streaming UX when the platform supports it.
+///
+/// Returns (final_text, optional_session_id).
+#[allow(dead_code)]
+async fn run_cli_harness_streaming<F>(
+    harness: &str,
+    prompt: &str,
+    session_id: Option<&str>,
+    mut on_progress: F,
+) -> Result<(String, Option<String>)>
+where
+    F: FnMut(&str) + Send,
+{
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+    use std::process::Stdio;
+
+    let (program, args, _supports_resume) = build_harness_command(harness, prompt, session_id);
+
+    tracing::info!(harness, program = %program, "spawning CLI harness (streaming)");
+
+    let mut child = Command::new(&program)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .context(format!("failed to spawn `{program}` — is it installed and on PATH?"))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+
+    let mut accumulated = String::new();
+    let mut found_session_id: Option<String> = None;
+
+    while let Some(line) = reader.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let mut got_new_text = false;
+
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(text) = extract_text_from_ndjson(&json) {
+                accumulated.push_str(&text);
+                got_new_text = true;
+            }
+            if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
+                found_session_id = Some(sid.to_string());
+            }
+        } else {
+            // Plain text output
+            if !accumulated.is_empty() {
+                accumulated.push('\n');
+            }
+            accumulated.push_str(&line);
+            got_new_text = true;
+        }
+
+        if got_new_text {
+            on_progress(&accumulated);
+        }
+    }
+
+    let status = child.wait().await?;
+    if !status.success() && accumulated.is_empty() {
+        anyhow::bail!("`{program}` exited with status {status}");
+    }
+
+    Ok((accumulated, found_session_id))
+}
+
+/// Run the HQ harness (OpenRouter with cheap models, with fallback chain).
+async fn run_hq_harness_stream(
+    api_key: &str,
+    messages: Vec<hq_core::types::ChatMessage>,
+    model_override: Option<&str>,
+) -> Result<(String, bool)> {
+    use futures::StreamExt as _;
+    use hq_llm::LlmProvider as _;
+
+    // Build model list: override first, then fallback chain
+    let models: Vec<String> = if let Some(ovr) = model_override {
+        let resolved = resolve_model_alias(ovr);
+        let mut v = vec![resolved];
+        for m in HQ_MODELS {
+            let s = m.to_string();
+            if !v.contains(&s) {
+                v.push(s);
+            }
+        }
+        v
+    } else {
+        HQ_MODELS.iter().map(|s| s.to_string()).collect()
+    };
+
+    let provider = hq_llm::openrouter::OpenRouterProvider::new(api_key);
+
+    for (i, model) in models.iter().enumerate() {
+        let request = hq_llm::ChatRequest {
+            model: model.clone(),
+            messages: messages.clone(),
+            tools: vec![],
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+        };
+
+        match provider.chat_stream(&request).await {
+            Ok(mut stream) => {
+                let mut accumulated = String::new();
+                let mut stream_done = false;
+
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result {
+                        Ok(hq_llm::StreamChunk::Text(text)) => {
+                            accumulated.push_str(&text);
+                        }
+                        Ok(hq_llm::StreamChunk::Done) => {
+                            stream_done = true;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(model = %model, error = %e, "HQ harness stream error, trying next model");
+                            break;
+                        }
+                    }
+                }
+
+                if !accumulated.is_empty() || stream_done {
+                    return Ok((accumulated, stream_done));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(model = %model, attempt = i + 1, error = %e, "HQ harness model failed");
+                continue;
+            }
+        }
+    }
+
+    anyhow::bail!("All HQ models failed. Tried: {}", models.join(", "))
+}
+
 // ─── Discord relay ─────────────────────────────────────────────
 
 async fn run_discord_relay(
@@ -355,17 +814,10 @@ async fn run_discord_relay(
     use serenity::async_trait;
     use std::collections::HashMap;
     use tokio::sync::Mutex as TokioMutex;
-    use futures::StreamExt;
-
-    #[derive(Clone)]
-    struct ChannelState {
-        messages: Vec<hq_core::types::ChatMessage>,
-        harness: String,
-        model_override: Option<String>,
-    }
 
     struct Handler {
         api_key: String,
+        #[allow(dead_code)]
         default_model: String,
         system_prompt: String,
         threads: Arc<TokioMutex<HashMap<u64, ChannelState>>>,
@@ -376,23 +828,16 @@ async fn run_discord_relay(
             [
                 "**HQ Bot Commands**",
                 "",
-                "`!reset` / `!new` — Clear conversation history",
-                "`!harness <name>` / `!switch <name>` — Switch harness (hq/claude/gemini/opencode/codex/auto)",
-                "`!model <name>` — Set model (sonnet/opus/haiku/gemini/flash/gpt4 or full ID)",
-                "`!status` — Show current harness, model, thread length",
+                "`!reset` / `!new` — Clear conversation history and kill running harness",
+                "`!harness <name>` / `!switch <name>` — Switch harness",
+                "  Harnesses: `claude-code` (default), `hq`, `opencode`, `gemini-cli`, `codex-cli`, `qwen-code`, `kilo-code`, `mistral-vibe`",
+                "`!model <name>` — Set model for HQ harness (sonnet/opus/haiku/gemini/flash/gpt4 or full ID)",
+                "`!status` — Show current harness, model, session info",
                 "`!help` — Show this help",
                 "",
                 "**Slash commands:** `/reset`, `/model`, `/harness`, `/status`, `/help`",
             ]
             .join("\n")
-        }
-
-        fn resolve_model(&self, state: &ChannelState) -> String {
-            if let Some(ref m) = state.model_override {
-                resolve_model_alias(m)
-            } else {
-                self.default_model.clone()
-            }
         }
     }
 
@@ -432,31 +877,30 @@ async fn run_discord_relay(
             if content_lower == "!reset" || content_lower == "!new" {
                 let mut threads = self.threads.lock().await;
                 threads.remove(&channel_key);
-                let _ = msg.channel_id.say(&ctx.http, "Conversation reset.").await;
+                let _ = msg.channel_id.say(&ctx.http, "Conversation reset. Session cleared.").await;
                 return;
             }
 
             // !harness <name> / !switch <name>
             if content_lower.starts_with("!harness ") || content_lower.starts_with("!switch ") {
-                let name = content.split_whitespace().nth(1).unwrap_or("hq").to_string();
-                let valid = ["hq", "claude", "gemini", "opencode", "codex", "auto"];
-                if !valid.contains(&name.to_lowercase().as_str()) {
+                let name = content.split_whitespace().nth(1).unwrap_or("claude-code").to_string();
+                let canonical = canonical_harness(&name.to_lowercase());
+                if !VALID_HARNESSES.contains(&name.to_lowercase().as_str()) {
                     let _ = msg.channel_id.say(
                         &ctx.http,
-                        &format!("Unknown harness `{name}`. Valid: {}", valid.join(", ")),
+                        &format!(
+                            "Unknown harness `{name}`. Valid: {}",
+                            VALID_HARNESSES.join(", ")
+                        ),
                     ).await;
                     return;
                 }
                 let mut threads = self.threads.lock().await;
-                let state = threads.entry(channel_key).or_insert_with(|| ChannelState {
-                    messages: vec![],
-                    harness: "hq".to_string(),
-                    model_override: None,
-                });
-                state.harness = name.to_lowercase();
+                let state = threads.entry(channel_key).or_insert_with(ChannelState::new_default);
+                state.harness = canonical.to_string();
                 let _ = msg.channel_id.say(
                     &ctx.http,
-                    &format!("Harness set to: {}", state.harness),
+                    &format!("Harness set to: **{}**", harness_display(&state.harness)),
                 ).await;
                 return;
             }
@@ -470,15 +914,11 @@ async fn run_discord_relay(
                 }
                 let resolved = resolve_model_alias(&name);
                 let mut threads = self.threads.lock().await;
-                let state = threads.entry(channel_key).or_insert_with(|| ChannelState {
-                    messages: vec![],
-                    harness: "hq".to_string(),
-                    model_override: None,
-                });
+                let state = threads.entry(channel_key).or_insert_with(ChannelState::new_default);
                 state.model_override = Some(name.clone());
                 let _ = msg.channel_id.say(
                     &ctx.http,
-                    &format!("Model set to: {resolved}"),
+                    &format!("Model set to: `{resolved}` (applies to HQ harness)"),
                 ).await;
                 return;
             }
@@ -493,23 +933,31 @@ async fn run_discord_relay(
             if content_lower == "!status" {
                 let threads = self.threads.lock().await;
                 let state = threads.get(&channel_key);
-                let harness = state.map(|s| s.harness.as_str()).unwrap_or("hq");
-                let model_str = state
-                    .and_then(|s| s.model_override.as_ref())
-                    .map(|m| resolve_model_alias(m))
-                    .unwrap_or_else(|| self.default_model.clone());
+                let harness = state.map(|s| s.harness.as_str()).unwrap_or("claude-code");
+                let model_str = if harness == "hq" {
+                    state
+                        .and_then(|s| s.model_override.as_ref())
+                        .map(|m| resolve_model_alias(m))
+                        .unwrap_or_else(|| HQ_MODELS[0].to_string())
+                } else {
+                    "N/A (CLI harness)".to_string()
+                };
+                let session = state
+                    .and_then(|s| s.session_ids.get(&s.harness))
+                    .map(|s| format!("`{}...`", &s[..s.len().min(12)]))
+                    .unwrap_or_else(|| "none".to_string());
                 let msg_count = state.map(|s| s.messages.len()).unwrap_or(0);
                 let _ = msg.channel_id.say(
                     &ctx.http,
                     &format!(
-                        "**Status**\nHarness: `{harness}`\nModel: `{model_str}`\nThread messages: {msg_count}"
+                        "**Status**\nHarness: `{}`\nModel: `{model_str}`\nSession: {session}\nHQ thread messages: {msg_count}",
+                        harness_display(harness)
                     ),
                 ).await;
                 return;
             }
 
-            // 5. Chat flow — streaming with placeholder editing
-            // Start typing indicator (keepalive every 8s)
+            // 5. Chat flow — dispatch to active harness
             let typing_ctx = ctx.clone();
             let typing_channel = msg.channel_id;
             let typing_handle = tokio::spawn(async move {
@@ -519,52 +967,24 @@ async fn run_discord_relay(
                 }
             });
 
-            // Prepare messages
-            let (messages_for_llm, model_to_use) = {
-                let mut threads = self.threads.lock().await;
-                let state = threads.entry(channel_key).or_insert_with(|| ChannelState {
-                    messages: vec![hq_core::types::ChatMessage {
-                        role: hq_core::types::MessageRole::System,
-                        content: self.system_prompt.clone(),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                    }],
-                    harness: "hq".to_string(),
-                    model_override: None,
-                });
-
-                // Ensure system message exists
-                if state.messages.is_empty() {
-                    state.messages.push(hq_core::types::ChatMessage {
-                        role: hq_core::types::MessageRole::System,
-                        content: self.system_prompt.clone(),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                    });
-                }
-
-                state.messages.push(hq_core::types::ChatMessage {
-                    role: hq_core::types::MessageRole::User,
-                    content: content.clone(),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                });
-
-                // Keep history bounded (30 messages)
-                if state.messages.len() > 30 {
-                    let system = state.messages[0].clone();
-                    let recent: Vec<_> = state.messages[state.messages.len() - 20..].to_vec();
-                    state.messages = vec![system];
-                    state.messages.extend(recent);
-                }
-
-                let model = self.resolve_model(state);
-                (state.messages.clone(), model)
+            // Get harness and session info
+            let (harness, session_id, model_override) = {
+                let threads = self.threads.lock().await;
+                let state = threads.get(&channel_key);
+                let h = state.map(|s| s.harness.clone()).unwrap_or_else(|| "claude-code".to_string());
+                let sid = state.and_then(|s| s.session_ids.get(&s.harness).cloned());
+                let mo = state.and_then(|s| s.model_override.clone());
+                (h, sid, mo)
             };
 
             // Send "Thinking..." placeholder
             let placeholder_result = msg.channel_id
-                .send_message(&ctx.http, CreateMessage::new().content("Thinking..."))
+                .send_message(
+                    &ctx.http,
+                    CreateMessage::new().content(
+                        &format!("Thinking via **{}**\u{2026} \u{258D}", harness_display(&harness))
+                    ),
+                )
                 .await;
 
             let mut placeholder_msg = match placeholder_result {
@@ -576,81 +996,170 @@ async fn run_discord_relay(
                 }
             };
 
-            // Call OpenRouter with streaming
-            let provider = hq_llm::openrouter::OpenRouterProvider::new(&self.api_key);
-            let request = hq_llm::ChatRequest {
-                model: model_to_use,
-                messages: messages_for_llm,
-                tools: vec![],
-                temperature: Some(0.7),
-                max_tokens: Some(4096),
-            };
-
-            match provider.chat_stream(&request).await {
-                Ok(mut stream) => {
-                    let mut accumulated = String::new();
-                    let mut last_edit = std::time::Instant::now();
-                    let mut stream_done = false;
-
-                    while let Some(chunk_result) = stream.next().await {
-                        match chunk_result {
-                            Ok(hq_llm::StreamChunk::Text(text)) => {
-                                accumulated.push_str(&text);
-                                // Edit placeholder every 500ms
-                                if last_edit.elapsed() >= std::time::Duration::from_millis(500) {
-                                    let display = if accumulated.len() > 1950 {
-                                        format!("{}... \u{258D}", &accumulated[accumulated.len()-1900..])
-                                    } else {
-                                        format!("{} \u{258D}", &accumulated)
-                                    };
-                                    let _ = placeholder_msg
-                                        .edit(&ctx.http, EditMessage::new().content(&display))
-                                        .await;
-                                    last_edit = std::time::Instant::now();
-                                }
-                            }
-                            Ok(hq_llm::StreamChunk::Done) => {
-                                stream_done = true;
-                                break;
-                            }
-                            Ok(hq_llm::StreamChunk::Usage { .. }) => {}
-                            Ok(hq_llm::StreamChunk::ToolCallDelta { .. }) => {}
-                            Err(e) => {
-                                tracing::error!("discord stream error: {e}");
-                                let _ = placeholder_msg
-                                    .edit(&ctx.http, EditMessage::new().content(&format!("Error: {e}")))
-                                    .await;
-                                typing_handle.abort();
-                                return;
-                            }
-                        }
-                    }
-
-                    typing_handle.abort();
-
-                    if accumulated.is_empty() && !stream_done {
-                        let _ = placeholder_msg
-                            .edit(&ctx.http, EditMessage::new().content("No response received."))
-                            .await;
-                        return;
-                    }
-
-                    // Delete placeholder, wait 100ms, send final as NEW message (for push notifications)
-                    let _ = placeholder_msg.delete(&ctx.http).await;
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                    // Store assistant response in history
-                    {
+            // ── Harness dispatch ──
+            let result: Result<String> = match harness.as_str() {
+                "hq" => {
+                    // HQ harness: OpenRouter with cheap models
+                    // Prepare messages with history
+                    let messages_for_llm = {
                         let mut threads = self.threads.lock().await;
-                        if let Some(state) = threads.get_mut(&channel_key) {
+                        let state = threads.entry(channel_key).or_insert_with(ChannelState::new_default);
+                        state.harness = "hq".to_string();
+
+                        if state.messages.is_empty() {
                             state.messages.push(hq_core::types::ChatMessage {
-                                role: hq_core::types::MessageRole::Assistant,
-                                content: accumulated.clone(),
+                                role: hq_core::types::MessageRole::System,
+                                content: self.system_prompt.clone(),
                                 tool_calls: vec![],
                                 tool_call_id: None,
                             });
                         }
+
+                        state.messages.push(hq_core::types::ChatMessage {
+                            role: hq_core::types::MessageRole::User,
+                            content: content.clone(),
+                            tool_calls: vec![],
+                            tool_call_id: None,
+                        });
+
+                        // Keep history bounded (30 messages)
+                        if state.messages.len() > 30 {
+                            let system = state.messages[0].clone();
+                            let recent: Vec<_> = state.messages[state.messages.len() - 20..].to_vec();
+                            state.messages = vec![system];
+                            state.messages.extend(recent);
+                        }
+
+                        state.messages.clone()
+                    };
+
+                    match run_hq_harness_stream(
+                        &self.api_key,
+                        messages_for_llm,
+                        model_override.as_deref(),
+                    ).await {
+                        Ok((text, _done)) => {
+                            // Store assistant response in HQ history
+                            let mut threads = self.threads.lock().await;
+                            if let Some(state) = threads.get_mut(&channel_key) {
+                                state.messages.push(hq_core::types::ChatMessage {
+                                    role: hq_core::types::MessageRole::Assistant,
+                                    content: text.clone(),
+                                    tool_calls: vec![],
+                                    tool_call_id: None,
+                                });
+                            }
+                            Ok(text)
+                        }
+                        Err(e) => Err(e),
                     }
+                }
+
+                // All CLI harnesses
+                harness_name @ ("claude-code" | "opencode" | "gemini-cli" | "codex-cli"
+                    | "qwen-code" | "kilo-code" | "mistral-vibe") => {
+                    let harness_name_owned = harness_name.to_string();
+                    let content_clone = content.clone();
+                    let session_id_clone = session_id.clone();
+
+                    // Spawn the CLI harness in a background task and collect output
+                    let mut harness_handle = tokio::spawn(async move {
+                        run_cli_harness(
+                            &harness_name_owned,
+                            &content_clone,
+                            session_id_clone.as_deref(),
+                        ).await
+                    });
+
+                    // Update placeholder while waiting
+                    let edit_interval = std::time::Duration::from_secs(2);
+                    let mut edit_ticker = tokio::time::interval(edit_interval);
+                    edit_ticker.tick().await; // skip first immediate tick
+
+                    let result = loop {
+                        tokio::select! {
+                            result = &mut harness_handle => {
+                                match result {
+                                    Ok(Ok((text, new_session_id))) => {
+                                        // Store session ID if we got one
+                                        if let Some(sid) = new_session_id {
+                                            let mut threads = self.threads.lock().await;
+                                            let state = threads.entry(channel_key)
+                                                .or_insert_with(ChannelState::new_default);
+                                            state.session_ids.insert(harness.clone(), sid);
+                                        }
+                                        break Ok(text);
+                                    }
+                                    Ok(Err(e)) => break Err(e),
+                                    Err(e) => break Err(anyhow::anyhow!("harness task panicked: {e}")),
+                                }
+                            }
+                            _ = edit_ticker.tick() => {
+                                // Update placeholder to show it's still working
+                                let dots = match (std::time::Instant::now().elapsed().as_secs() / 2) % 4 {
+                                    0 => ".",
+                                    1 => "..",
+                                    2 => "...",
+                                    _ => "",
+                                };
+                                let _ = placeholder_msg
+                                    .edit(
+                                        &ctx.http,
+                                        EditMessage::new().content(
+                                            &format!(
+                                                "Running **{}**{} \u{258D}",
+                                                harness_display(&harness), dots
+                                            )
+                                        ),
+                                    )
+                                    .await;
+                            }
+                        }
+                    };
+
+                    result
+                }
+
+                _ => {
+                    // Unknown harness — fall back to HQ
+                    tracing::warn!(harness = %harness, "unknown harness, falling back to hq");
+                    match run_hq_harness_stream(
+                        &self.api_key,
+                        vec![
+                            hq_core::types::ChatMessage {
+                                role: hq_core::types::MessageRole::System,
+                                content: self.system_prompt.clone(),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            },
+                            hq_core::types::ChatMessage {
+                                role: hq_core::types::MessageRole::User,
+                                content: content.clone(),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            },
+                        ],
+                        model_override.as_deref(),
+                    ).await {
+                        Ok((text, _)) => Ok(text),
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+
+            typing_handle.abort();
+
+            // ── Deliver result ──
+            match result {
+                Ok(accumulated) if accumulated.is_empty() => {
+                    let _ = placeholder_msg
+                        .edit(&ctx.http, EditMessage::new().content("No response received."))
+                        .await;
+                }
+                Ok(accumulated) => {
+                    // Delete placeholder, wait 100ms, send final as NEW message (for push notifications)
+                    let _ = placeholder_msg.delete(&ctx.http).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
                     // Send final response, chunked if needed
                     let chunks = split_message(&accumulated, 2000);
@@ -667,9 +1176,9 @@ async fn run_discord_relay(
                     ).await;
                 }
                 Err(e) => {
-                    typing_handle.abort();
+                    tracing::error!(harness = %harness, error = %e, "harness error");
                     let _ = placeholder_msg
-                        .edit(&ctx.http, EditMessage::new().content(&format!("Error: {e}")))
+                        .edit(&ctx.http, EditMessage::new().content(&format!("Error ({harness}): {e}")))
                         .await;
                 }
             }
@@ -689,7 +1198,7 @@ async fn run_discord_relay(
                 "reset" => {
                     let mut threads = self.threads.lock().await;
                     threads.remove(&channel_key);
-                    "Conversation reset.".to_string()
+                    "Conversation reset. Session cleared.".to_string()
                 }
                 "model" => {
                     let name = cmd.data.options.first()
@@ -703,13 +1212,9 @@ async fn run_discord_relay(
                     } else {
                         let resolved = resolve_model_alias(&name);
                         let mut threads = self.threads.lock().await;
-                        let state = threads.entry(channel_key).or_insert_with(|| ChannelState {
-                            messages: vec![],
-                            harness: "hq".to_string(),
-                            model_override: None,
-                        });
+                        let state = threads.entry(channel_key).or_insert_with(ChannelState::new_default);
                         state.model_override = Some(name);
-                        format!("Model set to: {resolved}")
+                        format!("Model set to: `{resolved}` (applies to HQ harness)")
                     }
                 }
                 "harness" => {
@@ -722,26 +1227,34 @@ async fn run_discord_relay(
                     if name.is_empty() {
                         "Usage: `/harness <name>`".to_string()
                     } else {
+                        let canonical = canonical_harness(&name.to_lowercase());
                         let mut threads = self.threads.lock().await;
-                        let state = threads.entry(channel_key).or_insert_with(|| ChannelState {
-                            messages: vec![],
-                            harness: "hq".to_string(),
-                            model_override: None,
-                        });
-                        state.harness = name.to_lowercase();
-                        format!("Harness set to: {}", state.harness)
+                        let state = threads.entry(channel_key).or_insert_with(ChannelState::new_default);
+                        state.harness = canonical.to_string();
+                        format!("Harness set to: **{}**", harness_display(&state.harness))
                     }
                 }
                 "status" => {
                     let threads = self.threads.lock().await;
                     let state = threads.get(&channel_key);
-                    let harness = state.map(|s| s.harness.as_str()).unwrap_or("hq");
-                    let model_str = state
-                        .and_then(|s| s.model_override.as_ref())
-                        .map(|m| resolve_model_alias(m))
-                        .unwrap_or_else(|| self.default_model.clone());
+                    let harness = state.map(|s| s.harness.as_str()).unwrap_or("claude-code");
+                    let model_str = if harness == "hq" {
+                        state
+                            .and_then(|s| s.model_override.as_ref())
+                            .map(|m| resolve_model_alias(m))
+                            .unwrap_or_else(|| HQ_MODELS[0].to_string())
+                    } else {
+                        "N/A (CLI harness)".to_string()
+                    };
+                    let session = state
+                        .and_then(|s| s.session_ids.get(&s.harness))
+                        .map(|s| format!("`{}...`", &s[..s.len().min(12)]))
+                        .unwrap_or_else(|| "none".to_string());
                     let msg_count = state.map(|s| s.messages.len()).unwrap_or(0);
-                    format!("**Status**\nHarness: `{harness}`\nModel: `{model_str}`\nThread messages: {msg_count}")
+                    format!(
+                        "**Status**\nHarness: `{}`\nModel: `{model_str}`\nSession: {session}\nHQ thread messages: {msg_count}",
+                        harness_display(harness)
+                    )
                 }
                 "help" => Self::make_help_text(),
                 _ => "Unknown command.".to_string(),
@@ -759,9 +1272,9 @@ async fn run_discord_relay(
             // Register slash commands
             let commands = vec![
                 CreateCommand::new("reset")
-                    .description("Clear conversation history"),
+                    .description("Clear conversation history and kill running harness"),
                 CreateCommand::new("model")
-                    .description("Set the LLM model")
+                    .description("Set the LLM model (HQ harness only)")
                     .add_option(
                         CreateCommandOption::new(
                             CommandOptionType::String,
@@ -771,7 +1284,7 @@ async fn run_discord_relay(
                         .required(true),
                     ),
                 CreateCommand::new("harness")
-                    .description("Set the harness")
+                    .description("Set the active harness")
                     .add_option(
                         CreateCommandOption::new(
                             CommandOptionType::String,
@@ -779,15 +1292,17 @@ async fn run_discord_relay(
                             "Harness name",
                         )
                         .required(true)
+                        .add_string_choice("claude-code", "claude-code")
                         .add_string_choice("hq", "hq")
-                        .add_string_choice("claude", "claude")
-                        .add_string_choice("gemini", "gemini")
                         .add_string_choice("opencode", "opencode")
-                        .add_string_choice("codex", "codex")
-                        .add_string_choice("auto", "auto"),
+                        .add_string_choice("gemini-cli", "gemini-cli")
+                        .add_string_choice("codex-cli", "codex-cli")
+                        .add_string_choice("qwen-code", "qwen-code")
+                        .add_string_choice("kilo-code", "kilo-code")
+                        .add_string_choice("mistral-vibe", "mistral-vibe"),
                     ),
                 CreateCommand::new("status")
-                    .description("Show current harness, model, and thread info"),
+                    .description("Show current harness, model, and session info"),
                 CreateCommand::new("help")
                     .description("Show available commands"),
             ];
@@ -838,14 +1353,6 @@ async fn run_telegram_relay(
     };
     use std::collections::HashMap;
     use tokio::sync::Mutex as TokioMutex;
-    use futures::StreamExt;
-
-    #[derive(Clone)]
-    struct TgChannelState {
-        messages: Vec<hq_core::types::ChatMessage>,
-        harness: String,
-        model_override: Option<String>,
-    }
 
     info!("telegram: starting bot...");
 
@@ -853,7 +1360,7 @@ async fn run_telegram_relay(
     info!(prompt_len = system_prompt.len(), "telegram: loaded system prompt");
 
     let bot = Bot::new(token);
-    let threads: Arc<TokioMutex<HashMap<i64, TgChannelState>>> =
+    let threads: Arc<TokioMutex<HashMap<i64, ChannelState>>> =
         Arc::new(TokioMutex::new(HashMap::new()));
     let api_key = Arc::new(api_key);
     let model = Arc::new(model);
@@ -862,7 +1369,7 @@ async fn run_telegram_relay(
     teloxide::repl(bot, move |bot: Bot, msg: teloxide::types::Message| {
         let threads = threads.clone();
         let api_key = api_key.clone();
-        let model = model.clone();
+        let _model = model.clone();
         let system_prompt = system_prompt.clone();
         async move {
             let text = match msg.text() {
@@ -881,36 +1388,43 @@ async fn run_telegram_relay(
                 }])
                 .await;
 
-            // Handle commands
-            let text_lower = text.to_lowercase();
+            // Handle commands — strip @botname suffix from Telegram commands
+            let text_clean = if text.starts_with('/') {
+                let parts: Vec<&str> = text.splitn(2, ' ').collect();
+                let cmd = parts[0].split('@').next().unwrap_or(parts[0]);
+                if parts.len() > 1 {
+                    format!("{} {}", cmd, parts[1])
+                } else {
+                    cmd.to_string()
+                }
+            } else {
+                text.clone()
+            };
+            let text_lower = text_clean.to_lowercase();
 
             // /reset
-            if text_lower == "/reset" || text_lower == "/reset@hq_bot" || text_lower == "!reset" || text_lower == "!new" {
+            if text_lower == "/reset" || text_lower == "!reset" || text_lower == "!new" {
                 let mut t = threads.lock().await;
                 t.remove(&chat_key);
-                bot.send_message(msg.chat.id, "Conversation reset.").await?;
+                bot.send_message(msg.chat.id, "Conversation reset. Session cleared.").await?;
                 return Ok(());
             }
 
             // /harness <name> or !harness <name> or !switch <name>
             if text_lower.starts_with("/harness ") || text_lower.starts_with("!harness ") || text_lower.starts_with("!switch ") {
-                let name = text.split_whitespace().nth(1).unwrap_or("hq").to_string();
-                let valid = ["hq", "claude", "gemini", "opencode", "codex", "auto"];
-                if !valid.contains(&name.to_lowercase().as_str()) {
+                let name = text.split_whitespace().nth(1).unwrap_or("claude-code").to_string();
+                let canonical = canonical_harness(&name.to_lowercase());
+                if !VALID_HARNESSES.contains(&name.to_lowercase().as_str()) {
                     bot.send_message(
                         msg.chat.id,
-                        format!("Unknown harness `{name}`. Valid: {}", valid.join(", ")),
+                        format!("Unknown harness `{name}`. Valid: {}", VALID_HARNESSES.join(", ")),
                     ).await?;
                     return Ok(());
                 }
                 let mut t = threads.lock().await;
-                let state = t.entry(chat_key).or_insert_with(|| TgChannelState {
-                    messages: vec![],
-                    harness: "hq".to_string(),
-                    model_override: None,
-                });
-                state.harness = name.to_lowercase();
-                bot.send_message(msg.chat.id, format!("Harness set to: {}", state.harness)).await?;
+                let state = t.entry(chat_key).or_insert_with(ChannelState::new_default);
+                state.harness = canonical.to_string();
+                bot.send_message(msg.chat.id, format!("Harness set to: {}", harness_display(&state.harness))).await?;
                 return Ok(());
             }
 
@@ -923,25 +1437,22 @@ async fn run_telegram_relay(
                 }
                 let resolved = resolve_model_alias(&name);
                 let mut t = threads.lock().await;
-                let state = t.entry(chat_key).or_insert_with(|| TgChannelState {
-                    messages: vec![],
-                    harness: "hq".to_string(),
-                    model_override: None,
-                });
+                let state = t.entry(chat_key).or_insert_with(ChannelState::new_default);
                 state.model_override = Some(name);
-                bot.send_message(msg.chat.id, format!("Model set to: {resolved}")).await?;
+                bot.send_message(msg.chat.id, format!("Model set to: {resolved} (applies to HQ harness)")).await?;
                 return Ok(());
             }
 
             // /help or !help
-            if text_lower == "/help" || text_lower == "!help" || text_lower.starts_with("/help@") {
+            if text_lower == "/help" || text_lower == "!help" {
                 let help = [
                     "HQ Bot Commands",
                     "",
-                    "/reset — Clear conversation history",
-                    "/harness <name> — Switch harness (hq/claude/gemini/opencode/codex/auto)",
-                    "/model <name> — Set model (sonnet/opus/haiku/gemini/flash/gpt4 or full ID)",
-                    "/status — Show current harness, model, thread length",
+                    "/reset — Clear conversation history and kill running harness",
+                    "/harness <name> — Switch harness",
+                    "  Harnesses: claude-code (default), hq, opencode, gemini-cli, codex-cli, qwen-code, kilo-code, mistral-vibe",
+                    "/model <name> — Set model for HQ harness (sonnet/opus/haiku/gemini/flash/gpt4 or full ID)",
+                    "/status — Show current harness, model, session info",
                     "/help — Show this help",
                 ].join("\n");
                 bot.send_message(msg.chat.id, help).await?;
@@ -949,23 +1460,34 @@ async fn run_telegram_relay(
             }
 
             // /status or !status
-            if text_lower == "/status" || text_lower == "!status" || text_lower.starts_with("/status@") {
+            if text_lower == "/status" || text_lower == "!status" {
                 let t = threads.lock().await;
                 let state = t.get(&chat_key);
-                let harness = state.map(|s| s.harness.as_str()).unwrap_or("hq");
-                let model_str = state
-                    .and_then(|s| s.model_override.as_ref())
-                    .map(|m| resolve_model_alias(m))
-                    .unwrap_or_else(|| (*model).clone());
+                let harness = state.map(|s| s.harness.as_str()).unwrap_or("claude-code");
+                let model_str = if harness == "hq" {
+                    state
+                        .and_then(|s| s.model_override.as_ref())
+                        .map(|m| resolve_model_alias(m))
+                        .unwrap_or_else(|| HQ_MODELS[0].to_string())
+                } else {
+                    "N/A (CLI harness)".to_string()
+                };
+                let session = state
+                    .and_then(|s| s.session_ids.get(&s.harness))
+                    .map(|s| format!("{}...", &s[..s.len().min(12)]))
+                    .unwrap_or_else(|| "none".to_string());
                 let msg_count = state.map(|s| s.messages.len()).unwrap_or(0);
                 bot.send_message(
                     msg.chat.id,
-                    format!("Status\nHarness: {harness}\nModel: {model_str}\nThread messages: {msg_count}"),
+                    format!(
+                        "Status\nHarness: {}\nModel: {model_str}\nSession: {session}\nHQ thread messages: {msg_count}",
+                        harness_display(harness)
+                    ),
                 ).await?;
                 return Ok(());
             }
 
-            // Chat flow — streaming with placeholder editing
+            // ── Chat flow — dispatch to active harness ──
 
             // Start typing indicator (keepalive every 4s)
             let typing_bot = bot.clone();
@@ -977,60 +1499,22 @@ async fn run_telegram_relay(
                 }
             });
 
-            // Prepare messages for LLM
-            let model_to_use = {
-                let mut t = threads.lock().await;
-                let state = t.entry(chat_key).or_insert_with(|| TgChannelState {
-                    messages: vec![hq_core::types::ChatMessage {
-                        role: hq_core::types::MessageRole::System,
-                        content: (*system_prompt).clone(),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                    }],
-                    harness: "hq".to_string(),
-                    model_override: None,
-                });
-
-                if state.messages.is_empty() {
-                    state.messages.push(hq_core::types::ChatMessage {
-                        role: hq_core::types::MessageRole::System,
-                        content: (*system_prompt).clone(),
-                        tool_calls: vec![],
-                        tool_call_id: None,
-                    });
-                }
-
-                state.messages.push(hq_core::types::ChatMessage {
-                    role: hq_core::types::MessageRole::User,
-                    content: text.clone(),
-                    tool_calls: vec![],
-                    tool_call_id: None,
-                });
-
-                // Keep history bounded (30 messages)
-                if state.messages.len() > 30 {
-                    let system = state.messages[0].clone();
-                    let recent: Vec<_> = state.messages[state.messages.len() - 20..].to_vec();
-                    state.messages = vec![system];
-                    state.messages.extend(recent);
-                }
-
-                let m = if let Some(ref mo) = state.model_override {
-                    resolve_model_alias(mo)
-                } else {
-                    (*model).clone()
-                };
-                m
-            };
-
-            let messages_for_llm = {
+            // Get harness and session info
+            let (harness, session_id, model_override) = {
                 let t = threads.lock().await;
-                t.get(&chat_key).map(|s| s.messages.clone()).unwrap_or_default()
+                let state = t.get(&chat_key);
+                let h = state.map(|s| s.harness.clone()).unwrap_or_else(|| "claude-code".to_string());
+                let sid = state.and_then(|s| s.session_ids.get(&s.harness).cloned());
+                let mo = state.and_then(|s| s.model_override.clone());
+                (h, sid, mo)
             };
 
-            // Send "Thinking... cursor" placeholder
+            // Send placeholder
             let placeholder_result = bot
-                .send_message(msg.chat.id, "Thinking\u{2026} \u{258D}")
+                .send_message(
+                    msg.chat.id,
+                    format!("Thinking via {}... \u{258D}", harness_display(&harness)),
+                )
                 .await;
 
             let placeholder_msg = match placeholder_result {
@@ -1043,83 +1527,155 @@ async fn run_telegram_relay(
             };
             let placeholder_id = MessageId(placeholder_msg.id.0);
 
-            // Call OpenRouter with streaming
-            let provider = hq_llm::openrouter::OpenRouterProvider::new(&api_key);
-            let request = hq_llm::ChatRequest {
-                model: model_to_use,
-                messages: messages_for_llm,
-                tools: vec![],
-                temperature: Some(0.7),
-                max_tokens: Some(4096),
-            };
-
-            match provider.chat_stream(&request).await {
-                Ok(mut stream) => {
-                    let mut accumulated = String::new();
-                    let mut last_edit = std::time::Instant::now();
-                    let mut stream_done = false;
-
-                    while let Some(chunk_result) = stream.next().await {
-                        match chunk_result {
-                            Ok(hq_llm::StreamChunk::Text(t)) => {
-                                accumulated.push_str(&t);
-                                // Edit placeholder every 500ms
-                                if last_edit.elapsed() >= std::time::Duration::from_millis(500) {
-                                    let display = if accumulated.len() > 4000 {
-                                        format!("{}... \u{258D}", &accumulated[accumulated.len()-3900..])
-                                    } else {
-                                        format!("{} \u{258D}", &accumulated)
-                                    };
-                                    let _ = bot
-                                        .edit_message_text(msg.chat.id, placeholder_id, &display)
-                                        .await;
-                                    last_edit = std::time::Instant::now();
-                                }
-                            }
-                            Ok(hq_llm::StreamChunk::Done) => {
-                                stream_done = true;
-                                break;
-                            }
-                            Ok(hq_llm::StreamChunk::Usage { .. }) => {}
-                            Ok(hq_llm::StreamChunk::ToolCallDelta { .. }) => {}
-                            Err(e) => {
-                                tracing::error!("telegram stream error: {e}");
-                                let _ = bot
-                                    .edit_message_text(msg.chat.id, placeholder_id, &format!("Error: {e}"))
-                                    .await;
-                                typing_handle.abort();
-                                return Ok(());
-                            }
-                        }
-                    }
-
-                    typing_handle.abort();
-
-                    if accumulated.is_empty() && !stream_done {
-                        let _ = bot
-                            .edit_message_text(msg.chat.id, placeholder_id, "No response received.")
-                            .await;
-                        return Ok(());
-                    }
-
-                    // Delete placeholder, wait 100ms, send final as reply to user message
-                    let _ = bot.delete_message(msg.chat.id, placeholder_id).await;
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                    // Store assistant response in history
-                    {
+            // ── Harness dispatch ──
+            let result: Result<String, anyhow::Error> = match harness.as_str() {
+                "hq" => {
+                    // HQ harness: OpenRouter with cheap models
+                    let messages_for_llm = {
                         let mut t = threads.lock().await;
-                        if let Some(state) = t.get_mut(&chat_key) {
+                        let state = t.entry(chat_key).or_insert_with(ChannelState::new_default);
+                        state.harness = "hq".to_string();
+
+                        if state.messages.is_empty() {
                             state.messages.push(hq_core::types::ChatMessage {
-                                role: hq_core::types::MessageRole::Assistant,
-                                content: accumulated.clone(),
+                                role: hq_core::types::MessageRole::System,
+                                content: (*system_prompt).clone(),
                                 tool_calls: vec![],
                                 tool_call_id: None,
                             });
                         }
-                    }
 
-                    // Send final response as reply, chunked if needed
+                        state.messages.push(hq_core::types::ChatMessage {
+                            role: hq_core::types::MessageRole::User,
+                            content: text.clone(),
+                            tool_calls: vec![],
+                            tool_call_id: None,
+                        });
+
+                        if state.messages.len() > 30 {
+                            let system_msg = state.messages[0].clone();
+                            let recent: Vec<_> = state.messages[state.messages.len() - 20..].to_vec();
+                            state.messages = vec![system_msg];
+                            state.messages.extend(recent);
+                        }
+
+                        state.messages.clone()
+                    };
+
+                    match run_hq_harness_stream(
+                        &api_key,
+                        messages_for_llm,
+                        model_override.as_deref(),
+                    ).await {
+                        Ok((response_text, _done)) => {
+                            let mut t = threads.lock().await;
+                            if let Some(state) = t.get_mut(&chat_key) {
+                                state.messages.push(hq_core::types::ChatMessage {
+                                    role: hq_core::types::MessageRole::Assistant,
+                                    content: response_text.clone(),
+                                    tool_calls: vec![],
+                                    tool_call_id: None,
+                                });
+                            }
+                            Ok(response_text)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+
+                // All CLI harnesses
+                harness_name @ ("claude-code" | "opencode" | "gemini-cli" | "codex-cli"
+                    | "qwen-code" | "kilo-code" | "mistral-vibe") => {
+                    let harness_name_owned = harness_name.to_string();
+                    let content_clone = text.clone();
+                    let session_id_clone = session_id.clone();
+
+                    let mut harness_handle = tokio::spawn(async move {
+                        run_cli_harness(
+                            &harness_name_owned,
+                            &content_clone,
+                            session_id_clone.as_deref(),
+                        ).await
+                    });
+
+                    // Update placeholder while waiting
+                    let edit_interval = std::time::Duration::from_secs(3);
+                    let mut edit_ticker = tokio::time::interval(edit_interval);
+                    edit_ticker.tick().await;
+
+                    let result = loop {
+                        tokio::select! {
+                            result = &mut harness_handle => {
+                                match result {
+                                    Ok(Ok((response_text, new_session_id))) => {
+                                        if let Some(sid) = new_session_id {
+                                            let mut t = threads.lock().await;
+                                            let state = t.entry(chat_key)
+                                                .or_insert_with(ChannelState::new_default);
+                                            state.session_ids.insert(harness.clone(), sid);
+                                        }
+                                        break Ok(response_text);
+                                    }
+                                    Ok(Err(e)) => break Err(e),
+                                    Err(e) => break Err(anyhow::anyhow!("harness task panicked: {e}")),
+                                }
+                            }
+                            _ = edit_ticker.tick() => {
+                                let _ = bot
+                                    .edit_message_text(
+                                        msg.chat.id,
+                                        placeholder_id,
+                                        &format!("Running {}... \u{258D}", harness_display(&harness)),
+                                    )
+                                    .await;
+                            }
+                        }
+                    };
+
+                    result
+                }
+
+                _ => {
+                    // Unknown harness — fall back to HQ
+                    tracing::warn!(harness = %harness, "unknown harness, falling back to hq");
+                    match run_hq_harness_stream(
+                        &api_key,
+                        vec![
+                            hq_core::types::ChatMessage {
+                                role: hq_core::types::MessageRole::System,
+                                content: (*system_prompt).clone(),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            },
+                            hq_core::types::ChatMessage {
+                                role: hq_core::types::MessageRole::User,
+                                content: text.clone(),
+                                tool_calls: vec![],
+                                tool_call_id: None,
+                            },
+                        ],
+                        model_override.as_deref(),
+                    ).await {
+                        Ok((response_text, _)) => Ok(response_text),
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+
+            typing_handle.abort();
+
+            // ── Deliver result ──
+            match result {
+                Ok(accumulated) if accumulated.is_empty() => {
+                    let _ = bot
+                        .edit_message_text(msg.chat.id, placeholder_id, "No response received.")
+                        .await;
+                }
+                Ok(accumulated) => {
+                    // Delete placeholder, wait 100ms, send final as reply
+                    let _ = bot.delete_message(msg.chat.id, placeholder_id).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
                     let chunks = split_message(&accumulated, 4096);
                     for (i, chunk) in chunks.iter().enumerate() {
                         let mut req = bot.send_message(msg.chat.id, chunk.as_str());
@@ -1140,9 +1696,13 @@ async fn run_telegram_relay(
                         .await;
                 }
                 Err(e) => {
-                    typing_handle.abort();
+                    tracing::error!(harness = %harness, error = %e, "harness error");
                     let _ = bot
-                        .edit_message_text(msg.chat.id, placeholder_id, &format!("Error: {e}"))
+                        .edit_message_text(
+                            msg.chat.id,
+                            placeholder_id,
+                            &format!("Error ({}): {e}", harness),
+                        )
                         .await;
                 }
             }

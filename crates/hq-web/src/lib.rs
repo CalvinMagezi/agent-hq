@@ -43,6 +43,7 @@ pub fn create_router(state: Arc<WsState>) -> Router {
         .route("/api/vault-status", get(vault_status_handler))
         .route("/api/daemon-status", get(daemon_status_handler))
         .route("/api/news", get(news_handler))
+        .route("/api/wa-message", axum::routing::post(wa_message_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -224,6 +225,85 @@ async fn news_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
     }
 
     axum::Json(serde_json::json!({ "items": items }))
+}
+
+// ─── API: WhatsApp Message (bridge endpoint) ────────────────
+
+async fn wa_message_handler(
+    State(state): State<Arc<WsState>>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    if text.is_empty() {
+        return axum::Json(serde_json::json!({"error": "no text provided"}));
+    }
+
+    // Spawn claude CLI and get response
+    let result = spawn_harness_for_wa(text, &state.vault_path).await;
+
+    match result {
+        Ok(response) => axum::Json(serde_json::json!({"response": response})),
+        Err(e) => axum::Json(serde_json::json!({"error": e.to_string()})),
+    }
+}
+
+async fn spawn_harness_for_wa(prompt: &str, vault_path: &std::path::Path) -> anyhow::Result<String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+
+    let mut child = Command::new("claude")
+        .args([
+            "--dangerously-skip-permissions",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--max-turns", "100",
+            "--model", "opus",
+            "-p", prompt,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .current_dir(vault_path.parent().unwrap_or(vault_path))
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = tokio::io::BufReader::new(stdout).lines();
+    let mut accumulated = String::new();
+
+    while let Some(line) = reader.next_line().await? {
+        if line.trim().is_empty() { continue; }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+            let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            // Skip result if we already have text
+            if msg_type == "result" && !accumulated.is_empty() { continue; }
+            // Extract assistant text
+            if msg_type == "assistant" {
+                if let Some(msg) = json.get("message") {
+                    if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
+                        for block in content {
+                            if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                                    accumulated.push_str(t);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if msg_type == "result" {
+                if let Some(t) = json.get("result").and_then(|v| v.as_str()) {
+                    accumulated.push_str(t);
+                }
+            }
+        }
+    }
+
+    let _ = child.wait().await;
+    if accumulated.is_empty() {
+        anyhow::bail!("No response from harness");
+    }
+    Ok(accumulated)
 }
 
 // ─── WebSocket ──────────────────────────────────────────────

@@ -1559,6 +1559,7 @@ dependencies = [
 name = "hq-web"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
  "futures",
  "rust-embed",

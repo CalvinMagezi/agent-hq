@@ -127,6 +127,41 @@ async fn start_all(
         }
     }
 
+    // Spawn WhatsApp bridge (Baileys via Bun subprocess)
+    {
+        let wa_jid = std::env::var("WHATSAPP_OWNER_JID").ok();
+        let vault_for_wa = config.vault_path.clone();
+        if let Some(jid) = wa_jid {
+            println!("  WhatsApp relay (owner: {})", &jid[..jid.find('@').unwrap_or(jid.len())]);
+            let api_key_wa = config.openrouter_api_key.clone().unwrap_or_default();
+            tokio::spawn(async move {
+                info!(owner = %jid, "whatsapp: starting bridge");
+                let bridge_dir = vault_for_wa.parent().unwrap_or(&vault_for_wa).join("bridges").join("whatsapp");
+                if !bridge_dir.join("index.ts").exists() {
+                    tracing::warn!("whatsapp: bridge not found at {}", bridge_dir.display());
+                    return;
+                }
+                let mut child = tokio::process::Command::new("bun")
+                    .arg("run")
+                    .arg("index.ts")
+                    .current_dir(&bridge_dir)
+                    .env("WHATSAPP_OWNER_JID", &jid)
+                    .env("VAULT_PATH", vault_for_wa.to_string_lossy().as_ref())
+                    .env("HQ_API_URL", "http://localhost:5678")
+                    .env("GROQ_API_KEY", std::env::var("GROQ_API_KEY").unwrap_or_default())
+                    .env("OPENROUTER_API_KEY", &api_key_wa)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("failed to spawn WhatsApp bridge");
+                let _ = child.wait().await;
+                tracing::warn!("whatsapp: bridge process exited");
+            });
+        }
+    }
+
     // Spawn WebSocket + Web UI server
     let ws_port = config.ws_port;
     let vault_for_ws = config.vault_path.clone();
@@ -2436,6 +2471,201 @@ async fn run_discord_relay(
 
 // ─── Telegram relay ────────────────────────────────────────────
 
+/// Download a Telegram file by file_id, save it to `dest`, and return the local path.
+async fn telegram_download_file(
+    bot: &teloxide::prelude::Bot,
+    token: &str,
+    file_id: &str,
+    dest: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    use teloxide::prelude::Requester;
+
+    let tg_file = bot.get_file(file_id).await
+        .map_err(|e| anyhow::anyhow!("telegram get_file: {e}"))?;
+    let file_path = tg_file.path;
+    let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
+    let bytes = reqwest::get(&url).await
+        .map_err(|e| anyhow::anyhow!("download file: {e}"))?
+        .bytes().await
+        .map_err(|e| anyhow::anyhow!("read file bytes: {e}"))?;
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, &bytes)?;
+    Ok(dest.to_path_buf())
+}
+
+/// Transcribe an audio file via Groq Whisper API.
+async fn transcribe_voice_groq(
+    audio_path: &std::path::Path,
+    groq_api_key: &str,
+) -> Result<String> {
+    let file_bytes = tokio::fs::read(audio_path).await?;
+    let file_name = audio_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("audio.ogg")
+        .to_string();
+
+    let part = reqwest::multipart::Part::bytes(file_bytes)
+        .file_name(file_name)
+        .mime_str("audio/ogg")?;
+
+    let form = reqwest::multipart::Form::new()
+        .text("model", "whisper-large-v3")
+        .part("file", part);
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.groq.com/openai/v1/audio/transcriptions")
+        .header("Authorization", format!("Bearer {groq_api_key}"))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("groq whisper request: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!("groq whisper error {status}: {body}"));
+    }
+
+    let json: serde_json::Value = resp.json().await
+        .map_err(|e| anyhow::anyhow!("groq whisper parse: {e}"))?;
+    Ok(json["text"].as_str().unwrap_or("").to_string())
+}
+
+/// Handle media attachments in a Telegram message.
+/// Downloads files to `.vault/_media/{date}/`, transcribes voice notes,
+/// reads text files, and augments the user's text prompt with references.
+async fn handle_telegram_media(
+    bot: &teloxide::prelude::Bot,
+    msg: &teloxide::types::Message,
+    text: String,
+    vault_path: &std::path::Path,
+    token: &str,
+    groq_api_key: &str,
+) -> String {
+    let date_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let media_dir = vault_path.join("_media").join(&date_str);
+    let mut augmented = text;
+
+    // ── Photos ──
+    if let Some(photos) = msg.photo() {
+        // Use the largest photo (last in the array)
+        if let Some(photo) = photos.last() {
+            let ext = "jpg";
+            let filename = format!("photo_{}_{}.{}", msg.id.0, photo.file.unique_id, ext);
+            let dest = media_dir.join(&filename);
+            match telegram_download_file(bot, token, &photo.file.id, &dest).await {
+                Ok(path) => {
+                    let ref_str = format!("\n[Image attached: {}]", path.display());
+                    augmented.push_str(&ref_str);
+                }
+                Err(e) => {
+                    tracing::warn!("telegram: failed to download photo: {e}");
+                }
+            }
+        }
+    }
+
+    // ── Documents ──
+    if let Some(doc) = msg.document() {
+        let filename = doc.file_name.clone()
+            .unwrap_or_else(|| format!("doc_{}", doc.file.unique_id));
+        let dest = media_dir.join(&filename);
+        match telegram_download_file(bot, token, &doc.file.id, &dest).await {
+            Ok(path) => {
+                // Check if it's a text-readable file
+                let ext = path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let text_extensions = ["txt", "csv", "md", "json", "yaml", "yml",
+                    "py", "ts", "js", "rs", "go", "java", "c", "cpp", "h",
+                    "toml", "ini", "cfg", "sh", "bash", "zsh", "html", "css",
+                    "xml", "sql", "rb", "php", "swift", "kt", "scala", "r"];
+                if text_extensions.contains(&ext.as_str()) {
+                    match std::fs::read_to_string(&path) {
+                        Ok(contents) => {
+                            let truncated: String = contents.chars().take(10000).collect();
+                            let ref_str = format!(
+                                "\n[Document: {} (saved to {})]\n```\n{}\n```",
+                                filename, path.display(), truncated
+                            );
+                            augmented.push_str(&ref_str);
+                        }
+                        Err(_) => {
+                            let ref_str = format!("\n[Document attached: {}]", path.display());
+                            augmented.push_str(&ref_str);
+                        }
+                    }
+                } else {
+                    let ref_str = format!("\n[Document attached: {}]", path.display());
+                    augmented.push_str(&ref_str);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("telegram: failed to download document: {e}");
+            }
+        }
+    }
+
+    // ── Voice notes ──
+    if let Some(voice) = msg.voice() {
+        let filename = format!("voice_{}.ogg", msg.id.0);
+        let dest = media_dir.join(&filename);
+        match telegram_download_file(bot, token, &voice.file.id, &dest).await {
+            Ok(path) => {
+                if !groq_api_key.is_empty() {
+                    match transcribe_voice_groq(&path, groq_api_key).await {
+                        Ok(transcript) => {
+                            let ref_str = format!(
+                                "\n[Voice note transcription (saved to {})]: {}",
+                                path.display(), transcript
+                            );
+                            augmented.push_str(&ref_str);
+                        }
+                        Err(e) => {
+                            tracing::warn!("telegram: voice transcription failed: {e}");
+                            let ref_str = format!("\n[Voice note attached: {} (transcription failed)]", path.display());
+                            augmented.push_str(&ref_str);
+                        }
+                    }
+                } else {
+                    let ref_str = format!("\n[Voice note attached: {} (no GROQ_API_KEY for transcription)]", path.display());
+                    augmented.push_str(&ref_str);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("telegram: failed to download voice: {e}");
+            }
+        }
+    }
+
+    // ── Videos ──
+    if let Some(video) = msg.video() {
+        let ext_owned = video.mime_type.as_ref()
+            .map(|m| m.subtype().as_str().to_string())
+            .unwrap_or_else(|| "mp4".to_string());
+        let ext = ext_owned.as_str();
+        let filename = format!("video_{}_{}.{}", msg.id.0, video.file.unique_id, ext);
+        let dest = media_dir.join(&filename);
+        match telegram_download_file(bot, token, &video.file.id, &dest).await {
+            Ok(path) => {
+                let ref_str = format!("\n[Video attached: {}]", path.display());
+                augmented.push_str(&ref_str);
+            }
+            Err(e) => {
+                tracing::warn!("telegram: failed to download video: {e}");
+            }
+        }
+    }
+
+    augmented
+}
+
 async fn run_telegram_relay(
     token: &str,
     vault: Arc<VaultClient>,
@@ -2455,6 +2685,12 @@ async fn run_telegram_relay(
     let system_prompt = load_system_prompt(&vault);
     info!(prompt_len = system_prompt.len(), "telegram: loaded system prompt");
 
+    let vault_path = Arc::new(vault.vault_path().to_path_buf());
+    let bot_token = Arc::new(token.to_string());
+    let groq_key = Arc::new(
+        std::env::var("GROQ_API_KEY").unwrap_or_default()
+    );
+
     let bot = Bot::new(token);
     let threads: Arc<TokioMutex<HashMap<i64, ChannelState>>> =
         Arc::new(TokioMutex::new(HashMap::new()));
@@ -2467,11 +2703,25 @@ async fn run_telegram_relay(
         let api_key = api_key.clone();
         let _model = model.clone();
         let system_prompt = system_prompt.clone();
+        let vault_path = vault_path.clone();
+        let bot_token = bot_token.clone();
+        let groq_key = groq_key.clone();
         async move {
-            let raw_text = match msg.text() {
-                Some(t) => t.to_string(),
-                None => return Ok(()),
+            let raw_text = if let Some(t) = msg.text() {
+                t.to_string()
+            } else {
+                // No text — check for media with caption
+                msg.caption().map(|c| c.to_string()).unwrap_or_default()
             };
+
+            // Handle media attachments
+            let raw_text = handle_telegram_media(
+                &bot, &msg, raw_text, &vault_path, &bot_token, &groq_key,
+            ).await;
+
+            if raw_text.is_empty() {
+                return Ok(());
+            }
 
             // Include reply context if user is replying to a message
             // Include reply-to context so the LLM knows what the user is referencing

@@ -1955,15 +1955,11 @@ async fn run_discord_relay(
                 return;
             }
 
-            // Include reply context if user is replying to another message
+            // Include reply-to context so the LLM knows what the user is referencing
             let content = if let Some(ref referenced) = msg.referenced_message {
-                if !referenced.author.bot {
-                    let reply_text: String = referenced.content.chars().take(500).collect();
-                    format!("[Replying to {}: \"{}\"]\n\n{}",
-                        referenced.author.name, reply_text, raw_content)
-                } else {
-                    raw_content
-                }
+                let who = if referenced.author.bot { "assistant" } else { &referenced.author.name };
+                let reply_text: String = referenced.content.chars().take(500).collect();
+                format!("[Replying to {who}: \"{reply_text}\"]\n\n{raw_content}")
             } else {
                 raw_content
             };
@@ -2478,17 +2474,14 @@ async fn run_telegram_relay(
             };
 
             // Include reply context if user is replying to a message
+            // Include reply-to context so the LLM knows what the user is referencing
             let text = if let Some(reply) = msg.reply_to_message() {
                 if let Some(reply_text) = reply.text() {
-                    // Don't include reply context for bot's own messages being replied to
-                    // (the user is just continuing conversation)
-                    if reply.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
-                        raw_text
-                    } else {
-                        format!("[Replying to: \"{}\"]\n\n{}",
-                            reply_text.chars().take(500).collect::<String>(),
-                            raw_text)
-                    }
+                    let who = reply.from.as_ref()
+                        .map(|u| if u.is_bot { "assistant" } else { &u.first_name })
+                        .unwrap_or("someone");
+                    let quoted: String = reply_text.chars().take(500).collect();
+                    format!("[Replying to {who}: \"{quoted}\"]\n\n{raw_text}")
                 } else {
                     raw_text
                 }

@@ -1,0 +1,33 @@
+{
+	https_port 4749
+	http_port 4750
+}
+
+calvins-macbook-pro.tailebc87e.ts.net:4749 {
+	tls /Users/calvinmagezi/calvins-macbook-pro.tailebc87e.ts.net.crt /Users/calvinmagezi/calvins-macbook-pro.tailebc87e.ts.net.key
+
+	# API + WebSocket → Rust backend (port 5678)
+	@api_ws path /ws /api/* /health
+	handle @api_ws {
+		reverse_proxy localhost:5678
+	}
+
+	# Static assets → serve from dist/client directly (faster, correct MIME types)
+	@static path /assets/* /icons/* /manifest.json /sw.js /registerSW.js /vite.svg /notification.wav /chamuka-drawit.min.js /hq-agent.svg
+	handle @static {
+		root * /Users/calvinmagezi/Documents/GitHub/agent-hq/apps/hq-control-center/dist/client
+		file_server
+	}
+
+	# Public static files
+	@public path /icon-color.png /electron-vite.svg /electron-vite.animate.svg
+	handle @public {
+		root * /Users/calvinmagezi/Documents/GitHub/agent-hq/apps/hq-control-center/public
+		file_server
+	}
+
+	# Everything else → TanStack Start SSR (port 4747)
+	handle {
+		reverse_proxy localhost:4747
+	}
+}

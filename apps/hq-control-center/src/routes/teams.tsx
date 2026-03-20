@@ -59,10 +59,18 @@ const VERTICAL_COLORS: Record<string, string> = {
 
 function LaunchModal({ team, onLaunch, onClose }: {
   team: TeamSummaryItem
-  onLaunch: (teamName: string, instruction: string) => void
+  onLaunch: (teamName: string, instruction: string, modelOverride?: string) => void
   onClose: () => void
 }) {
   const [instruction, setInstruction] = useState('')
+  const [modelOverride, setModelOverride] = useState('')
+
+  const MODEL_PRESETS = [
+    { label: 'Default', value: '' },
+    { label: 'Haiku (fast)', value: 'anthropic/claude-haiku-4-5' },
+    { label: 'Sonnet', value: 'anthropic/claude-sonnet-4-6' },
+    { label: 'Gemini Flash', value: 'google/gemini-2.5-flash-preview' },
+  ]
 
   return (
     <div
@@ -97,9 +105,29 @@ function LaunchModal({ team, onLaunch, onClose }: {
           }}
         />
 
+        <div className="flex flex-col gap-1">
+          <label className="text-[10px] font-mono" style={{ color: 'var(--text-dim)' }}>Model</label>
+          <div className="flex flex-wrap gap-1.5">
+            {MODEL_PRESETS.map(p => (
+              <button
+                key={p.value}
+                onClick={() => setModelOverride(p.value)}
+                className="px-2.5 py-1.5 rounded-lg text-[10px] font-mono transition-colors"
+                style={{
+                  background: modelOverride === p.value ? 'rgba(68,136,255,0.2)' : 'var(--bg-elevated)',
+                  color: modelOverride === p.value ? 'var(--accent-blue)' : 'var(--text-dim)',
+                  border: `1px solid ${modelOverride === p.value ? 'rgba(68,136,255,0.4)' : 'var(--border)'}`,
+                }}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         <div className="flex gap-2">
           <button
-            onClick={() => { onLaunch(team.name, instruction); onClose() }}
+            onClick={() => { onLaunch(team.name, instruction, modelOverride || undefined); onClose() }}
             disabled={!instruction.trim()}
             className="flex-1 py-3 rounded-xl text-xs font-mono font-bold transition-colors"
             style={{
@@ -207,17 +235,18 @@ function TeamsView() {
     ? agents
     : agents.filter((a: AgentSummary) => a.vertical === browseFilter)
 
-  const handleLaunchTeam = useCallback(async (teamOrName: any, instruction: string) => {
+  const handleLaunchTeam = useCallback(async (teamOrName: any, instruction: string, modelOverride?: string) => {
     const teamName = typeof teamOrName === 'string' ? teamOrName : teamOrName.name
-    setLaunchFeedback({ type: 'ok', text: 'Launching workflow…' })
+    setLaunchFeedback({ type: 'ok', text: 'Running workflow…' })
     try {
-      const result = await launchTeamWorkflow({ data: { teamName, instruction } })
-      setLaunchFeedback({ type: 'ok', text: `✅ Workflow queued: ${result.workflowId}` })
+      const result = await launchTeamWorkflow({ data: { teamName, instruction, modelOverride } })
+      const durationSec = result.durationMs ? `${(result.durationMs / 1000).toFixed(1)}s` : ''
+      setLaunchFeedback({ type: 'ok', text: `✅ ${result.status} ${durationSec} — ${result.workflowId}` })
       setActiveTab('monitor')
     } catch (e: any) {
       setLaunchFeedback({ type: 'err', text: `❌ Failed: ${e.message}` })
     }
-    setTimeout(() => setLaunchFeedback(null), 5000)
+    setTimeout(() => setLaunchFeedback(null), 8000)
   }, [])
 
   const handleSaveTeam = useCallback(async (team: any) => {

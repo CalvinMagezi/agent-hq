@@ -1,0 +1,14 @@
+[package]
+name = "hq-web"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rust-embed = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }

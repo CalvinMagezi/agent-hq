@@ -10,7 +10,7 @@ router.get("/", async (c) => {
     const statusFilter = c.req.query("status"); // optional filter
 
     try {
-        const jobsDir = path.join(vaultClient.vaultPath, "_fbmq/jobs");
+        const jobsDir = path.join(vaultClient.vaultPath, "_jobs");
         const jobs = [];
 
         // helper to read a flat dir
@@ -21,15 +21,11 @@ router.get("/", async (c) => {
             for (const f of files) {
                 try {
                     const raw = fs.readFileSync(path.join(d, f), "utf-8");
-                    // The files might be rfc822 headers if it's fbmq raw, or valid frontmatter if legacy.
-                    // Using FbmqCli approach (read headers) or we can just regex for priority, etc. 
-                    // For simplicity, we just return basic fields from it by using gray-matter (works if it's got YAML frontmatter)
-                    // or we just extract basic info. Let's try gray-matter block.
                     const { data } = matter(raw);
                     const nameClean = f.replace(".md", "");
 
                     jobs.push({
-                        jobId: nameClean,
+                        jobId: data?.jobId || nameClean,
                         status: statusText,
                         type: data?.type || "unknown",
                         priority: data?.priority || 50,
@@ -43,41 +39,10 @@ router.get("/", async (c) => {
             }
         };
 
-        // processing, done, failed are flat
-        if (!statusFilter || statusFilter === "processing") readFlatDir("processing", "running");
+        if (!statusFilter || statusFilter === "running") readFlatDir("running", "running");
         if (!statusFilter || statusFilter === "done") readFlatDir("done", "done");
         if (!statusFilter || statusFilter === "failed") readFlatDir("failed", "failed");
-
-        // pending is sharded (00-ff)
-        if (!statusFilter || statusFilter === "pending") {
-            const pendingRoot = path.join(jobsDir, "pending");
-            if (fs.existsSync(pendingRoot)) {
-                const buckets = fs.readdirSync(pendingRoot);
-                for (const bucket of buckets) {
-                    const bucketPath = path.join(pendingRoot, bucket);
-                    if (fs.statSync(bucketPath).isDirectory()) {
-                        const files = fs.readdirSync(bucketPath).filter(f => f.endsWith(".md"));
-                        for (const f of files) {
-                            try {
-                                const raw = fs.readFileSync(path.join(bucketPath, f), "utf-8");
-                                const { data } = matter(raw);
-                                jobs.push({
-                                    jobId: f.replace(".md", ""),
-                                    status: "pending",
-                                    type: data?.type || "unknown",
-                                    priority: data?.priority || 50,
-                                    createdAt: data?.createdAt || "",
-                                    updatedAt: data?.updatedAt || "",
-                                    instruction: data?.instruction || "",
-                                });
-                            } catch (e) {
-                                // ignore
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        if (!statusFilter || statusFilter === "pending") readFlatDir("pending", "pending");
 
         // sort by created at desc
         jobs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

@@ -1,30 +1,77 @@
-# React + TypeScript + Vite
+# HQ Control Center
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+PWA dashboard for Agent-HQ. Built with TanStack Start, React 19, and Vite PWA.
 
-Currently, two official plugins are available:
+## What It Does
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- Real-time streaming of agent responses via WebSocket
+- Vault search and note browsing
+- Daemon status monitoring
+- Harness switching (Claude Code, Gemini CLI, OpenCode, etc.)
+- Document viewers for DOCX, XLSX, and PDF files
+- Push notifications for completed tasks
+- Installable as a PWA on any device
 
-## Expanding the ESLint configuration
+## Architecture
 
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
+The PWA connects to two backends:
 
-- Configure the top-level `parserOptions` property like this:
+- **Rust API/WS** (port 5678) -- WebSocket streaming, REST endpoints for vault status, daemon status, search, and health
+- **TanStack Start SSR** (port 4747) -- server-side rendering for the React app
 
-```js
-export default {
-  // other rules...
-  parserOptions: {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    project: ['./tsconfig.json', './tsconfig.node.json'],
-    tsconfigRootDir: __dirname,
-  },
-}
+For HTTPS access (e.g., over Tailscale), a Caddy reverse proxy config is provided at the repo root (`Caddyfile`).
+
+## Development
+
+```bash
+bun install
+bun run dev          # start dev server on port 4747
 ```
 
-- Replace `plugin:@typescript-eslint/recommended` to `plugin:@typescript-eslint/recommended-type-checked` or `plugin:@typescript-eslint/strict-type-checked`
-- Optionally add `plugin:@typescript-eslint/stylistic-type-checked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and add `plugin:react/recommended` & `plugin:react/jsx-runtime` to the `extends` list
+## Build
+
+```bash
+bun run build        # builds to dist/
+bun run start        # serve the production build
+```
+
+## Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| @tanstack/react-start | SSR framework |
+| @tanstack/react-query | Data fetching |
+| @tanstack/react-router | File-based routing |
+| zustand | State management |
+| framer-motion | Animations |
+| shiki | Code syntax highlighting |
+| recharts | Charts and graphs |
+| marked | Markdown rendering |
+| mammoth | DOCX rendering |
+| xlsx | Spreadsheet rendering |
+| pdfjs-dist | PDF rendering |
+| dompurify | HTML sanitization |
+| vite-plugin-pwa | PWA support (service worker, manifest) |
+| tailwindcss v4 | Styling |
+
+## WebSocket Protocol
+
+The PWA connects to `ws://localhost:5678/ws` (or the Tailscale HTTPS equivalent). Messages are JSON:
+
+```json
+{ "type": "agent_message", "data": { "content": "...", "streaming": true } }
+{ "type": "vault_update", "data": { "path": "..." } }
+{ "type": "daemon_status", "data": { ... } }
+```
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/api/vault-status` | GET | Vault statistics |
+| `/api/daemon-status` | GET | Daemon task status |
+| `/api/news` | GET | News pulse data |
+| `/api/search?q=...` | GET | Vault search |
+| `/api/vault-asset?path=...` | GET | Serve vault files |
+| `/api/wa-message` | POST | WhatsApp bridge message relay |

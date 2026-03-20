@@ -1,92 +1,34 @@
-# dependencies
-**/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-# testing
-/coverage
-
-# turbo
-.turbo
-
-# production
-build/
-dist/
-
-# misc
-.DS_Store
-*.pem
-context.md
-chat.md
-
-# Bun build artifacts
-*.bun-build
-
-# SQLite WAL/SHM files
-*.db-shm
+# Build artifacts
+/target
+*.db
 *.db-wal
+*.db-shm
 
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files
-.env*
-!.env.example
-
-# MCP and Gemini CLI (machine-specific configs with local paths)
-.mcp.json
-.mcp-bridge.*
-**/.gemini/
-
-# typescript
-*.tsbuildinfo
-
-# Runtime state (bot sessions, locks, usage tracking)
-**/.discord-relay*/
-**/.discord-harness-sessions.json
-**/.web-harness-sessions.json
-**/.harness-active-pid
-**/.agent-hq-worker-id
-**/.agent-hq-sessions/
-
-# Screenshot artifacts from playwright/testing
-apps/relay-adapter-telegram/*.png
-apps/relay-adapter-telegram/*.html
-
-# Launchd plist files (machine-specific, use *.plist.example templates)
-*.plist
-!*.plist.example
-
-# Vault (local Obsidian data — not tracked)
+# Vault data (private knowledge base)
 .vault/
 
-# Claude Code project settings (machine-specific, contains personal config)
-.claude/
+# Secrets — NEVER commit these
+.env
+.env.local
+.env.*.local
+.mcp.json
+*.pem
+*.key
+*.crt
 
-# Custom commands (private, local-only Discord relay commands)
-**/custom-commands/
+# OS
+.DS_Store
+Thumbs.db
 
-# WhatsApp Baileys auth session (machine-specific credentials)
-**/auth_info/
+# Node/Bun (PWA + WhatsApp bridge)
+node_modules/
+web/node_modules/
+web/dist/
+bridges/whatsapp/node_modules/
+apps/hq-control-center/node_modules/
+apps/hq-control-center/dist/
+apps/hq-control-center/.tanstack/
 
-# WhatsApp media temp files
-**/.media-temp/
-
-logs
-# Vault sync server — generated secrets and database (contain sensitive keys)
-sync-server.secret
-sync-server.db
-
-# Rust & NAPI build artifacts
-target/
-*.node
-
-.playwright-mcp
+# Logs
+/tmp/
+*.log

@@ -1,465 +1,318 @@
-<!--
-agent-hq:
-  version: "0.6.15"
-  min_bun: "1.1.0"
-  setup_command: "bunx @calvin.magezi/agent-hq init --non-interactive"
-  repo: "https://github.com/CalvinMagezi/agent-hq"
-  platforms: [macos, linux, windows]
-  required_env: [OPENROUTER_API_KEY]
-  optional_env: [GEMINI_API_KEY, ANTHROPIC_API_KEY, DISCORD_BOT_TOKEN, DISCORD_USER_ID, TELEGRAM_BOT_TOKEN, TELEGRAM_USER_ID, GROQ_API_KEY, WHATSAPP_OWNER_JID]
-  health_check: "hq health"
-  docs: "https://deepwiki.com/CalvinMagezi/agent-hq"
--->
-
 # Agent-HQ
 
-<p align="center">
-  <img src="docs/screenshots/hero.jpg" alt="Agent-HQ PWA running on iPhone" width="360" />
-</p>
+> **A local-first AI agent hub. Single Rust binary. Your machine, your data, your agents.**
 
-> **Full docs and deep-dives:**
-> [DeepWiki](https://deepwiki.com/CalvinMagezi/agent-hq) · [NotebookLM](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f) · [Video Overview](https://notebooklm.google.com/notebook/d57fefa2-82f9-4810-82d1-a652a47ffc5f?artifactId=fae2ad27-8c60-4051-b204-1abf3d529afa) · [Changelog](CHANGELOG.md)
+Agent-HQ connects AI coding agents (Claude Code, Gemini CLI, OpenCode, Codex CLI) to every communication channel you use -- Discord, Telegram, WhatsApp, a Tailscale-secured PWA -- while keeping all your data in a markdown vault on your filesystem.
 
----
-
-**A local-first AI orchestration hub that runs on your machine.** Agent-HQ connects Claude Code, Gemini CLI, OpenCode, and Codex CLI to every communication channel you use — Discord, Telegram, WhatsApp, Google Chat, a Tailscale-secured PWA — while keeping all your data in an [Obsidian](https://obsidian.md) vault on your filesystem.
-
-No cloud backend. No vendor lock-in. Your machine, your data, your agents.
-
----
-
-## See It Running
-
-<p align="center">
-  <img src="docs/screenshots/pwa-harness-picker.png" width="28%" alt="PWA — HQ Agent explaining its harness model" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/pwa-vault-access.png" width="28%" alt="PWA — OpenCode + Gemini CLI with full vault access" />
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/pwa-daily-digest.png" width="28%" alt="PWA — Gemini CLI reading the daily digest" />
-</p>
-
-*The HQ Control Center PWA on iPhone via Tailscale — switching between HQ Agent, OpenCode, and Gemini CLI mid-conversation. All agents share the same vault as their memory.*
+No cloud backend. No vendor lock-in. One 6 MB binary.
 
 ---
 
 ## How It Works
 
 ```
-You (PWA / Discord / Telegram / WhatsApp / Google Chat / Terminal)
-     │
-     ├── HQ Control Center PWA  ──► Tailscale-secured, installable on any device
-     ├── Discord Relay          ──► Claude Code / Gemini CLI / OpenCode
-     ├── Telegram Relay         ──► Voice, photos, documents, inline harness picker
-     ├── WhatsApp Relay         ──► Voice, images, docs, polls, stickers
-     ├── Google Chat Relay      ──► OAuth JWT auth, workspace integration
-     └── Terminal Chat          ──► Streaming REPL
-              │
-              ▼
-       Relay Server (WS + REST, port 18900)
-              │
-              ▼
-       .vault/  ◄──────────────────────────────────────────┐
-         │                                                  │
-         ├── _system/   SOUL · MEMORY · CRON-SCHEDULE      │
-         ├── _jobs/     atomic job queue (pending→done)     │
-         ├── _delegation/  multi-agent task routing         │
-         ├── _threads/  cross-platform conversation history │
-         ├── _logs/     daily-briefs · scheduled-tasks      │
-         └── Notebooks/ your notes · memories · projects   │
-              │                                             │
-              ▼                                             │
-       HQ Agent (Pi SDK)  ──► Shell · Filesystem · MCP ───►│
-       Daemon             ──► Embeddings · Memory · Crons ─►│
-       Touch Points       ──► Event-driven vault enrichment►│
-       Claude Code Tasks  ──► Vault micro-tasks ───────────►│
-                                                             │
-       External MCP Agents (Claude Code / Cursor / etc.)    │
-         └── hq_discover + hq_call ──► Full tool registry ─►│
+You (PWA / Discord / Telegram / WhatsApp / Terminal)
+     |
+     +-- HQ Control Center PWA  --> Tailscale-secured, installable on any device
+     +-- Discord Relay          --> Claude Code / Gemini CLI / OpenCode
+     +-- Telegram Relay         --> Voice, photos, documents, harness picker
+     +-- WhatsApp Bridge        --> Voice, images, docs (Baileys via Node)
+     +-- Terminal Chat          --> Streaming REPL
+              |
+              v
+       hq-web (Axum WS + REST, port 5678)
+              |
+              v
+       .vault/  <-- single source of truth
+         |
+         +-- _system/   SOUL - MEMORY - CRON-SCHEDULE
+         +-- _jobs/     atomic job queue (pending -> running -> done)
+         +-- _threads/  cross-platform conversation history
+         +-- _logs/     daily briefs, scheduled task output
+         +-- _data/     vault.db (SQLite, WAL mode)
+         +-- Notebooks/ your notes, memories, projects
 ```
 
-The vault is the center. Every agent reads from it and writes back to it. They share the same memory, job queue, and context — so switching harnesses or platforms mid-conversation doesn't lose context.
+The vault is the center. Every agent reads from it and writes back to it. Switching harnesses or platforms mid-conversation does not lose context.
 
 ---
 
-## What You Get
+## Quick Start
 
-### Core
-- **Multi-harness chat** — HQ Agent, Claude (Claude Code), ChatGPT (Codex CLI), Gemini, All Models (OpenCode) — switchable per conversation
-- **5 relay channels** — Discord, Telegram, WhatsApp, Google Chat, and a Tailscale-secured PWA
-- **Cross-platform threads** — `!continue <threadId>` and `!fork` let you pick up any conversation on any platform
-- **Persistent, living memory** — `vault-memory` package ingests every conversation, consolidates cross-harness insights every 30 min, queryable by all agents
-- **Background job queue** — Queue tasks from any channel, get results back wherever you are
-- **Multi-agent orchestration** — HQ delegates tasks to specialist agents with full trace logging
-- **Cross-agent planning** — SQLite-backed plan tracking with knowledge extraction from completed plans
-- **Google Workspace** — Calendar, Gmail, Drive, Sheets, Docs accessible from every agent via `gws` CLI
+### Prerequisites
 
-### Always-On Intelligence
-- **Touch Points** — 11 event-driven vault enrichment agents: connection weaver, daily synthesis, vault health, conversation learner, tag suggester, folder organizer, news clusterer, and more
-- **Morning brief** — Daily audio digest via Kokoro TTS or NotebookLM deep-dive, auto-pushed to Telegram
-- **Daily 8 PM brief** — Summary of all daemon + micro-task activity sent to Telegram
-- **Claude Code scheduled tasks** — 6 background micro-tasks that scan, prune, and report on vault health
-- **Proactive notifications** — Telegram-first push when work completes (daily brief, digest ready, memory insights)
+- **Rust** 1.83+ (2024 edition) -- `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+- **At least one LLM API key** -- OpenRouter, Anthropic, or Google AI
 
-### Rich Media
-- **Voice notes** — Send voice, get transcribed responses (Groq Whisper + OpenAI TTS)
-- **AI vision** — Send images, get descriptions and analysis (Gemini, Anthropic, OpenRouter)
-- **Image generation** — Generate via OpenRouter, auto-sent as attachments
-- **DrawIT diagrams** — Flowcharts, architecture maps, dependency graphs → PNG
-- **Document processing** — PDFs, DOCX, PPTX, XLSX via agent skills
-- **Office viewers** — DOCX, HTML, XLSX rendered in the PWA with DOMPurify sanitization
+### Install from Source
 
-### Context & Intelligence
-- **Context Engine** — Token-budgeted context assembly with model registry and checkpoint config
-- **Model Registry** — Typed registry with vault-file overrides for Claude 4.6, Gemini 3.1/2.5, GPT-5.4/o3, Qwen 3.5
-- **Infinite sessions** — SQLite-backed session persistence with checkpoint creation/resume and semantic recall
-- **Progressive codemap** — Automated codebase understanding with confidence decay over time
-- **Provider abstraction** — Multi-provider LLM support: Gemini → Anthropic → OpenRouter → Ollama
+```bash
+git clone https://github.com/CalvinMagezi/agent-hq.git
+cd agent-hq
+cargo build --release -p hq-cli    # produces a ~6 MB binary
+cp target/release/hq ~/bin/hq      # or wherever you keep binaries
+```
+
+### First Run
+
+```bash
+hq init                # scaffold vault, create config
+hq doctor              # verify setup
+hq chat                # start an interactive LLM session
+```
+
+### Configuration
+
+All configuration lives in `~/.hq/config.yaml`:
+
+```yaml
+vault_path: /path/to/your/.vault
+openrouter_api_key: "your-api-key-here"
+default_model: "anthropic/claude-sonnet-4"
+ws_port: 5678
+
+relay:
+  discord_token: "your-discord-bot-token-here"
+  telegram_token: "your-telegram-bot-token-here"
+  discord_enabled: true
+  telegram_enabled: true
+
+agent:
+  name: "hq-agent"
+  max_concurrent_jobs: 4
+  heartbeat_interval_secs: 30
+
+daemon:
+  embedding_batch_size: 10
+  embedding_interval_secs: 600
+```
+
+API keys can also be set via environment variables: `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_AI_API_KEY`.
+
+---
+
+## CLI Commands
+
+Agent-HQ ships 39 commands in a single binary. Run `hq help` for full usage.
+
+### Getting Started
+
+| Command | Description |
+|---------|-------------|
+| `hq init` | Full setup wizard (vault + config + services) |
+| `hq setup` | First-run scaffold (vault only) |
+| `hq health` | System health check |
+| `hq doctor` | Diagnose common issues |
+| `hq env` | Set up API keys interactively |
+| `hq version` | Show version and build info |
+
+### Chat and Agents
+
+| Command | Description |
+|---------|-------------|
+| `hq chat` | Interactive terminal chat (default command) |
+| `hq agent [harness]` | Spawn agent session (hq, claude, gemini, opencode, codex) |
+| `hq orchestrate <task>` | Intelligent delegation with discovery + tracing |
+
+### Services
+
+| Command | Description |
+|---------|-------------|
+| `hq status` | Show vault status and system info |
+| `hq start [component]` | Start components (all, agent, daemon, relay, telegram, whatsapp) |
+| `hq stop [component]` | Stop components |
+| `hq restart [component]` | Restart components |
+
+### Monitoring
+
+| Command | Description |
+|---------|-------------|
+| `hq logs [target] -l N` | View last N log lines |
+| `hq errors [target] -l N` | Show error log lines and failed jobs |
+| `hq follow [target]` | Live-tail log files |
+| `hq ps` | Show all managed processes |
+
+### Vault Operations
+
+| Command | Description |
+|---------|-------------|
+| `hq vault [sub]` | Vault operations (list, tree, read, write, stats, context) |
+| `hq search <query>` | Search vault notes (FTS5 full-text search) |
+| `hq memory [sub]` | Show/manage memory and system context |
+
+### Jobs, Tasks, and Plans
+
+| Command | Description |
+|---------|-------------|
+| `hq jobs [sub]` | List/create/cancel/show jobs |
+| `hq tasks [sub]` | List/create/show tasks |
+| `hq plans [sub]` | Browse cross-agent plans |
+
+### Teams and Agents
+
+| Command | Description |
+|---------|-------------|
+| `hq teams [sub]` | List teams and run team workflows |
+| `hq agents [sub]` | List/inspect agent definitions |
+
+### Configuration
+
+| Command | Description |
+|---------|-------------|
+| `hq config [key] [value]` | Show or edit configuration |
+| `hq mcp [sub]` | Install/manage MCP server for Claude Desktop or editors |
+
+### Daemon
+
+| Command | Description |
+|---------|-------------|
+| `hq daemon [sub]` | Daemon management (start, stop, status, logs) |
+
+### Advanced
+
+| Command | Description |
+|---------|-------------|
+| `hq kill` | Force-kill all managed processes |
+| `hq clean` | Remove stale locks and orphaned files |
+| `hq install [target]` | Install as system service (launchd on macOS, systemd on Linux) |
+| `hq uninstall [target]` | Remove system service |
+| `hq update` | Check for and apply updates |
+
+### Tools and Diagrams
+
+| Command | Description |
+|---------|-------------|
+| `hq tools` | Check/install CLI tools (Claude, Gemini, OpenCode) |
+| `hq diagram [sub]` | Generate diagrams via DrawIt (flow, map, deps, routes) |
+| `hq benchmark` | Run model benchmark suite |
+
+### Usage, Sync, and Web
+
+| Command | Description |
+|---------|-------------|
+| `hq usage [sub]` | Show usage statistics |
+| `hq sync [sub]` | Vault sync status |
+| `hq pwa` | Open HQ web dashboard (port 4747) |
 
 ---
 
 ## Architecture
 
-```
-apps/
-├── agent/                   # Local worker (Pi SDK) — job execution engine
-├── discord-relay/           # Multi-bot Discord relay
-├── relay-adapter-telegram/  # Telegram bot (grammY)
-├── relay-adapter-whatsapp/  # WhatsApp (Baileys)
-├── relay-adapter-discord/   # Discord adapter for relay server
-├── relay-adapter-googlechat/# Google Chat relay (OAuth JWT)
-├── hq-control-center/       # PWA (TanStack Start + Vite PWA + WebSocket)
-├── website/                 # Landing page
-└── vscode-extension/        # VS Code extension
+### Crate Structure
 
-packages/
-├── vault-client/            # Shared vault data access (@repo/vault-client)
-├── vault-sync/              # Event-driven file watcher + change log
-├── vault-memory/            # Always-on memory: ingest → consolidate → query
-├── vault-sync-protocol/     # E2E AES-256-GCM encryption for cross-device sync
-├── vault-sync-server/       # WebSocket relay for multi-device sync
-├── vault-types/             # Shared TypeScript types
-├── agent-relay-protocol/    # Types + RelayClient SDK
-├── agent-relay-server/      # Bun WS+REST gateway (port 18900)
-├── relay-adapter-core/      # Shared relay logic (voice, harness, orchestrator, media)
-├── discord-core/            # Shared DiscordBotBase + utilities
-├── hq-tools/                # 2-tool MCP gateway + planning + codemap + benchmarks
-├── context-engine/          # Token-budgeted context assembly + model registry + sessions
-├── env-loader/              # Centralized env var loading across all apps
-├── hq-browser/              # Managed headless browser automation
-├── hq-cli/                  # NPM package (@calvin.magezi/agent-hq)
-└── queue-transport/         # Job queue transport layer
+Agent-HQ is a Cargo workspace of 16 crates:
 
-plugins/
-└── obsidian-vault-sync/     # Obsidian plugin for cross-device sync
+| Crate | Purpose |
+|-------|---------|
+| `hq-core` | Types, config loading (figment), error types |
+| `hq-vault` | Vault I/O -- notes, jobs, tasks, query builder, frontmatter |
+| `hq-db` | SQLite connection pool, FTS5 full-text search, embeddings, graph links |
+| `hq-llm` | LLM provider trait + OpenRouter integration (via async-openai) |
+| `hq-agent` | Session loop, coding tools, governance rules, background worker |
+| `hq-context` | 5-layer token-budgeted context engine with profile system |
+| `hq-tools` | 47 tool implementations (vault, skills, agents, diagrams, GWS, etc.) |
+| `hq-mcp` | MCP stdio server -- 2-tool gateway (hq_discover + hq_call) |
+| `hq-daemon` | Background scheduler, health checks, cleanup, embedding processor |
+| `hq-sync` | File watcher (notify), sync protocol, E2E encryption (AES-256-GCM) |
+| `hq-memory` | Memory consolidator, ingester, querier, forgetter |
+| `hq-relay` | Platform bridge trait, unified bot, harness spawning, command dispatch |
+| `hq-relay-discord` | Discord adapter (serenity + poise) |
+| `hq-relay-telegram` | Telegram adapter (teloxide) |
+| `hq-web` | Axum WebSocket server, REST API, embedded static web UI |
+| `hq-cli` | 39 CLI commands, clap-derived argument parsing |
 
-scripts/
-├── hq.ts                    # Unified CLI entry point
-├── agent-hq-daemon.ts       # Background workflow daemon
-├── notificationService.ts   # Telegram-first push notifications
-├── morning-brief-audio.ts   # Kokoro TTS daily digest
-├── morning-brief-notebooklm.ts # NotebookLM deep-dive audio
-├── touchpoints/             # 11 event-driven vault enrichment agents
-└── workflows/               # Daily/weekly scheduled scripts
+### Key Dependencies
 
-~/.claude/scheduled-tasks/   # Claude Code background micro-tasks
-├── vault-dead-links/        # Every 6h — scan for broken [[wikilinks]]
-├── vault-orphan-notes/      # Daily 2am — find notes with no incoming links
-├── vault-stale-jobs/        # Every 2h — summarize stuck jobs → HEARTBEAT.md
-├── vault-memory-digest/     # Daily 6am — prune + archive MEMORY.md (Sonnet)
-├── vault-soul-check/        # Mon 9am — identity drift analysis (Sonnet)
-└── project-status-pulse/    # Daily 7am — per-project status summary
-```
-
-### The Vault (`_system/` files every agent reads)
-
-| File | Purpose |
-|---|---|
-| `SOUL.md` | Agent identity and principles |
-| `MEMORY.md` | Persistent facts and goals |
-| `PREFERENCES.md` | User workflow preferences |
-| `VISION.md` | Architectural vision and design philosophy |
-| `CRON-SCHEDULE.md` | Full cron schedule — any agent can answer "what runs when?" |
-| `HEARTBEAT.md` | Actionable items + news pulse (updated hourly) |
-| `PROJECT-PULSE.md` | Daily per-project status snapshot |
-| `MODEL-REGISTRY.md` | LLM model specs and overrides |
-| `PLATFORM-CONFIG.md` | Per-platform timeout and notification config |
-| `LINK-HEALTH.md` | Broken wikilink report |
-| `ORPHAN-NOTES.md` | Notes with no incoming links |
-| `SOUL-HEALTH.md` | Weekly identity drift analysis |
+| Purpose | Crate |
+|---------|-------|
+| Async runtime | tokio |
+| CLI parsing | clap (derive) |
+| LLM client | async-openai (base URL swapped to OpenRouter) |
+| MCP protocol | rmcp |
+| Database | rusqlite (bundled, WAL mode) |
+| Serialization | serde, serde_json, serde_yaml |
+| Markdown | pulldown-cmark, gray_matter |
+| Web server | axum + tower-http |
+| Discord | serenity + poise |
+| Telegram | teloxide |
+| File watching | notify |
+| Config | figment (YAML + env) |
+| HTTP | reqwest |
+| Encryption | aes-gcm, pbkdf2 |
 
 ---
 
-## Install
+## Relay Adapters
 
-### Zero-install (recommended)
-```bash
-# Works even without Bun — installs it automatically
-npx @calvin.magezi/agent-hq
+### Discord
 
-# Or with Bun (faster):
-bunx @calvin.magezi/agent-hq
-```
-
-This auto-clones the repo, installs dependencies, scaffolds the vault, and walks you through setup.
-
-### From source
-```bash
-git clone https://github.com/CalvinMagezi/agent-hq.git
-cd agent-hq && bun install
-hq init            # interactive setup
-hq quickstart      # guided first-run walkthrough
-```
-
-### After install
-```bash
-hq env             # set up API keys interactively
-hq doctor          # verify everything works (12 diagnostic checks)
-hq                 # start chatting
-```
-
-### VPS / Headless Server
-
-Agent-HQ runs on any Linux VPS. Only one API key is required to get started.
+Built-in via the `hq-relay-discord` crate (serenity + poise). Supports multi-harness switching, streaming responses, slash commands, reactions, and thread management.
 
 ```bash
-# 1. Install Bun
-curl -fsSL https://bun.sh/install | bash
-source ~/.bashrc
-
-# 2. Clone and install
-git clone https://github.com/CalvinMagezi/agent-hq.git ~/agent-hq
-cd ~/agent-hq && bun install
-
-# 3. Run headless setup (skips Ollama, CLI tools, browser, OAuth)
-OPENROUTER_API_KEY=sk-or-... \
-  hq init --profile vps
-
-# 4. Set your bot token for whichever channel you want
-echo "TELEGRAM_BOT_TOKEN=..." >> apps/relay-adapter-telegram/.env.local
-echo "TELEGRAM_USER_ID=..."   >> apps/relay-adapter-telegram/.env.local
-
-# 5. Verify
-hq doctor
-
-# 6. Install as persistent background services (systemd)
-hq install agent telegram
-
-# 7. Check everything is running
-hq health
+hq start relay       # start Discord relay
 ```
 
-**`--profile vps`** is equivalent to `--non-interactive --skip-ollama --skip-tools`. It:
-- Skips Ollama (no local LLM — all inference goes through OpenRouter)
-- Skips Claude Code / Gemini CLI / OpenCode installation
-- Skips Google Workspace OAuth
-- Uses file-based PID tracking and systemd units (no launchd)
+### Telegram
 
-**Keeping it up to date:**
-```bash
-hq update          # pulls latest, reinstalls deps, refreshes systemd units
-hq update --check  # non-destructive version check only
-```
-
-**Running in foreground** (useful for first-time debugging):
-```bash
-hq fg agent        # foreground agent (Ctrl+C to stop)
-hq tg              # foreground Telegram relay
-```
-
-**Logs:**
-```bash
-hq logs agent 50        # last 50 lines
-hq follow               # live-tail all logs
-journalctl --user -u agent-hq-agent.service -f   # systemd journal
-```
-
-> **Windows**: The CLI degrades gracefully on Windows (no crashes) but background service management (`hq install`, `hq start`) is not yet implemented. Use `hq fg agent` to run in the foreground, or use WSL.
-
----
-
-## Prerequisites
-
-- **[Bun](https://bun.sh)** v1.1.0+ — `curl -fsSL https://bun.sh/install | bash`
-- **At least one LLM provider** — set `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, or `ANTHROPIC_API_KEY`
-- **Optionally, an AI CLI** — `hq tools` installs and authenticates:
-  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — requires Anthropic subscription
-  - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — free with Google account
-  - [OpenCode](https://github.com/opencode-ai/opencode) — multi-model
-  - [Codex CLI](https://github.com/openai/codex) — requires OpenAI key
-- **A bot token** for whichever relay you want (Discord / Telegram / WhatsApp / Google Chat)
-
----
-
-## Quick Start (for AI agents)
-
-> **Give this section to your AI agent.** It will handle everything.
+Built-in via the `hq-relay-telegram` crate (teloxide). Supports voice notes, photos, documents, inline harness picker, and reply context.
 
 ```bash
-# 1. Install and set up (auto-installs Bun if needed, clones repo, scaffolds vault)
-npx @calvin.magezi/agent-hq init --non-interactive
-
-# 2. Set required API key (choose one)
-echo "OPENROUTER_API_KEY=sk-or-..." >> ~/agent-hq/apps/agent/.env.local
-# OR: echo "GEMINI_API_KEY=AIza..." >> ~/agent-hq/apps/agent/.env.local
-# OR: echo "ANTHROPIC_API_KEY=sk-ant-..." >> ~/agent-hq/apps/agent/.env.local
-
-# 3. (Optional) Set Discord token for relay
-echo "DISCORD_BOT_TOKEN=MT..." >> ~/agent-hq/apps/discord-relay/.env.local
-echo "DISCORD_USER_ID=123456789" >> ~/agent-hq/apps/discord-relay/.env.local
-
-# 4. Verify setup
-cd ~/agent-hq && hq doctor
-
-# 5. Start everything
-hq start all
-
-# 6. Verify services
-hq health
+hq start telegram    # start Telegram relay
 ```
 
-The `hq init` command is **idempotent** — safe to re-run. It skips steps already completed.
-Pass API keys as environment variables for fully unattended setup:
+### WhatsApp
+
+Node.js bridge using Baileys (multidevice). Lives in `bridges/whatsapp/`. Connects to the Rust backend via the `/api/wa-message` endpoint.
 
 ```bash
-OPENROUTER_API_KEY=sk-or-... DISCORD_BOT_TOKEN=MT... DISCORD_USER_ID=123 \
-  npx @calvin.magezi/agent-hq init --non-interactive
-```
-
-Run `hq help --agent` for the full agent command reference.
-
-## Quick Start (manual)
-
-```bash
-git clone https://github.com/CalvinMagezi/agent-hq.git
-cd agent-hq && bun install
-hq init
-```
-
-Fill in `apps/discord-relay/.env.local` (or Telegram/WhatsApp equivalent), then:
-
-```bash
-hq start relay        # Discord
-hq tg                 # Telegram (relay-server starts automatically)
-hq wa                 # WhatsApp (scan QR on first run)
-```
-
-Open the PWA at `http://localhost:4747` — or connect via Tailscale from any device.
-
----
-
-## Environment Variables
-
-> Can also be passed to `hq init --non-interactive` as shell env vars for unattended setup.
-
-| Variable | File | Required | Description |
-|----------|------|----------|-------------|
-| `OPENROUTER_API_KEY` | `apps/agent/.env.local` | **Yes** (or Gemini/Anthropic) | LLM provider — get key at openrouter.ai |
-| `GEMINI_API_KEY` | `apps/agent/.env.local` | **Yes** (or OR/Anthropic) | Google Gemini direct access |
-| `ANTHROPIC_API_KEY` | `apps/agent/.env.local` | **Yes** (or OR/Gemini) | Anthropic Claude direct access |
-| `DEFAULT_MODEL` | `apps/agent/.env.local` | No | Default model ID (default: `gemini-2.5-flash`) |
-| `DISCORD_BOT_TOKEN` | `apps/discord-relay/.env.local` | For Discord relay | Bot token from Discord Developer Portal |
-| `DISCORD_USER_ID` | `apps/discord-relay/.env.local` | For Discord relay | Your Discord user ID (18-digit number) |
-| `DISCORD_BOT_TOKEN_OPENCODE` | `apps/discord-relay/.env.local` | No | Second bot for OpenCode harness |
-| `DISCORD_BOT_TOKEN_GEMINI` | `apps/discord-relay/.env.local` | No | Third bot for Gemini CLI harness |
-| `TELEGRAM_BOT_TOKEN` | `apps/relay-adapter-telegram/.env.local` | For Telegram | Token from @BotFather |
-| `TELEGRAM_USER_ID` | `apps/relay-adapter-telegram/.env.local` | For Telegram | Your Telegram numeric user ID |
-| `GROQ_API_KEY` | Telegram / WhatsApp `.env.local` | No | Voice transcription via Groq Whisper |
-| `WHATSAPP_OWNER_JID` | `apps/relay-adapter-whatsapp/.env.local` | For WhatsApp | Your WhatsApp JID (`+256700000000@s.whatsapp.net`) |
-| `VAULT_PATH` | All `.env.local` files | No | Custom vault path (default: `<repo>/.vault`) |
-
----
-
-## The `hq` CLI
-
-```
-GETTING STARTED
-  hq init                       Full setup (vault + tools + services)
-  hq quickstart                 Guided first-run walkthrough
-  hq doctor                     Diagnose common issues (12 checks)
-  hq env                        Set up API keys interactively
-
-CHAT
-  hq                            Start chatting (default)
-  hq agent [harness]            Spawn agent session (hq, claude, gemini, opencode)
-
-SERVICES
-  hq status                     Check what's running
-  hq start [target]             Start services (agent, relay, all, ...)
-  hq stop  [target]             Stop services
-  hq restart                    Restart everything
-  hq install [target]           Install as system service (launchd/systemd)
-  hq update                     Pull latest, reinstall deps, restart
-  hq update --check             Non-destructive version check
-
-MONITORING
-  hq health                     Full health check
-  hq logs [target] [N]          View logs
-  hq follow                     Live-tail all logs
-  hq pwa                        Open the web dashboard (port 4747)
-  hq vault open                 Open vault in Obsidian
-
-PLANNING
-  hq plans                      List/view/manage cross-agent plans
-
-RELAYS
-  hq tg                         Foreground Telegram relay
-  hq wa                         Foreground WhatsApp relay (QR on first run)
-
-Run 'hq help --all' for all commands
-Run 'hq help --agent' for AI agent quick reference
+cd bridges/whatsapp && bun install && bun run index.ts
 ```
 
 ---
 
-## MCP Integration (Connect Any Agent to the Vault)
+## Daemon
 
-Agent-HQ exposes its **full tool registry** via [MCP (Model Context Protocol)](https://modelcontextprotocol.io) — so any MCP-compatible agent (Claude Code, Cursor, Windsurf, etc.) can search, read, and write to your vault through just 2 tools.
+The daemon runs 27 interval-based background tasks via `DaemonScheduler`. It ticks every 30 seconds and fires tasks when their interval elapses. Task categories include:
 
-### How It Works
+- **Health checks** -- detect stuck jobs and offline workers
+- **Embedding processing** -- batch-embed new vault notes
+- **Memory consolidation** -- cross-harness insight merging
+- **Cleanup** -- expire stale jobs, remove orphaned files
+- **Plan sync** -- track cross-agent plan status
+- **News pulse** -- aggregated information updates
 
-The MCP server wraps **all HQ tools** (vault search, image gen, Google Workspace, DrawIT, planning, browser, team workflows, etc.) into a 2-tool gateway:
+Status is written to `.vault/DAEMON-STATUS.md` after every tick.
+
+```bash
+hq daemon start      # start the background daemon
+hq daemon status     # check daemon status
+hq daemon logs       # view daemon logs
+```
+
+---
+
+## MCP Server
+
+Agent-HQ exposes its full tool registry via MCP (Model Context Protocol) through a 2-tool gateway:
 
 | Tool | Purpose |
 |------|---------|
-| `hq_discover` | Search the registry by keyword — returns matching tools + descriptions |
+| `hq_discover` | Search the registry by keyword -- returns matching tools + descriptions |
 | `hq_call` | Execute any tool by name with JSON input |
-
-This keeps the token footprint fixed (~1K tokens) regardless of how many tools are in the registry.
 
 ### Configure for Claude Code
 
-Add to your project's `.mcp.json` or `~/.claude.json`:
-
-```json
-{
-  "mcpServers": {
-    "vault": {
-      "command": "bun",
-      "args": ["run", "<path-to-agent-hq>/packages/hq-tools/src/mcp.ts"],
-      "env": {
-        "VAULT_PATH": "<path-to-agent-hq>/.vault",
-        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}",
-        "SECURITY_PROFILE": "standard"
-      }
-    }
-  }
-}
-```
-
-### Configure for Claude Desktop / Other MCP Clients
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+Add to your project `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "agent-hq": {
-      "command": "bun",
-      "args": ["run", "<path-to-agent-hq>/packages/hq-tools/src/mcp.ts"],
+      "command": "/path/to/hq",
+      "args": ["mcp", "serve"],
       "env": {
-        "VAULT_PATH": "<path-to-agent-hq>/.vault",
-        "OPENROUTER_API_KEY": "sk-or-...",
-        "SECURITY_PROFILE": "standard"
+        "VAULT_PATH": "/path/to/your/.vault",
+        "OPENROUTER_API_KEY": "your-api-key-here"
       }
     }
   }
@@ -468,96 +321,135 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Available Tool Categories
 
-Once connected, `hq_discover ""` returns all available tools:
+| Category | Examples |
+|----------|---------|
+| Vault | vault_search, vault_read, vault_list, vault_write_note, vault_context |
+| Planning | create_plan, update_plan, search_plans |
+| Image | generate_image |
+| Diagrams | drawit_render, drawit_flow, drawit_map, create_diagram |
+| Google Workspace | google_workspace_schema, google_workspace_read, google_workspace_write |
+| Browser | browser_open, browser_click, browser_screenshot |
+| Voice | speak (TTS) |
+| Teams | list_agents, load_agent, list_teams, run_team_workflow |
+| Benchmarks | model_benchmark |
+| Skills | list_skills, load_skill |
 
-| Category | Tools | Description |
-|----------|-------|-------------|
-| **Vault** | `vault_search`, `vault_read`, `vault_list`, `vault_batch_read`, `vault_context`, `vault_write_note`, `vault_create_job` | FTS5 search, read/write notes, system context |
-| **Planning** | `create_plan`, `update_plan`, `search_plans` | Cross-agent plan management with knowledge extraction |
-| **Image** | `generate_image` | AI image generation via OpenRouter |
-| **Diagrams** | `drawit_render`, `drawit_export`, `drawit_map`, `drawit_flow`, `drawit_analyze`, `create_diagram` | Architecture diagrams, flowcharts, dependency graphs |
-| **Google Workspace** | `google_workspace_schema`, `google_workspace_read`, `google_workspace_write` | Gmail, Calendar, Drive, Sheets, Docs |
-| **Browser** | `browser_open`, `browser_type`, `browser_click`, `browser_screenshot` | Headless browser automation |
-| **Voice** | `speak` | Text-to-speech via Kokoro / OpenAI TTS |
-| **Teams** | `list_agents`, `load_agent`, `list_teams`, `run_team_workflow` | Multi-agent team orchestration |
-| **Benchmarks** | `model_benchmark` | 10-test LLM evaluation suite |
-| **Skills** | `list_skills`, `load_skill` | Runtime skill loading |
+---
 
-### Example Usage
+## PWA Dashboard
+
+The HQ Control Center is a React PWA (TanStack Start + Vite) that connects to the Rust backend via WebSocket. It provides:
+
+- Real-time agent streaming
+- Vault search and browsing
+- Daemon status monitoring
+- Harness switching
+- Document viewers (DOCX, XLSX, PDF)
+- Push notifications
+
+The PWA lives in `apps/hq-control-center/` and can be served via Caddy for HTTPS (e.g., over Tailscale).
+
+```bash
+hq pwa               # start the web dashboard on port 4747
+```
+
+For HTTPS via Tailscale, a `Caddyfile` is provided at the repo root that reverse-proxies the TanStack SSR server (port 4747) and Rust API/WS backend (port 5678).
+
+---
+
+## The Vault
+
+The vault (`.vault/`) is the single source of truth. All agents read from it and write back to it.
+
+### System Files
+
+| File | Purpose |
+|------|---------|
+| `SOUL.md` | Agent identity and principles |
+| `MEMORY.md` | Persistent facts and goals |
+| `PREFERENCES.md` | User workflow preferences |
+| `VISION.md` | Architectural vision |
+| `CRON-SCHEDULE.md` | Full cron schedule |
+| `HEARTBEAT.md` | Actionable items + news pulse |
+| `DAEMON-STATUS.md` | Last run status of all daemon tasks |
+
+### Directory Structure
 
 ```
-# From any MCP client:
-hq_discover "vault search"
-→ vault_search: Search the local Obsidian vault using SQLite FTS5...
-
-hq_call vault_search {"query": "project status", "mode": "keyword", "limit": 5}
-→ [ranked results with snippets, tags, relevance scores]
-
-hq_call vault_context {}
-→ {SOUL: {...}, MEMORY: {...}, PREFERENCES: {...}, HEARTBEAT: {...}}
+.vault/
+  _system/      system markdown files
+  _jobs/        atomic job queue (pending/ -> running/ -> done/)
+  _threads/     conversation history
+  _logs/        daily briefs, task logs
+  _data/        vault.db (SQLite)
+  Notebooks/    user notes, projects, knowledge
 ```
 
 ---
 
-## Daemon Tasks
+## Context Engine
 
-| Interval | Task | Notes |
-|---|---|---|
-| 30s | Watchdog | fs-only, zero tokens |
-| 1 min | Expire stale approvals | fs-only |
-| 2 min | Heartbeat + news pulse | Ollama local |
-| 5 min | Health check | fs-only |
-| 30 min | Memory consolidation | local LLM |
-| 30 min | Embedding processor | local/remote embedding model |
-| 1 hr | Stale job cleanup | fs-only |
-| 2 hr | Note linking | embedding cosine similarity |
-| 6 hr | Vault health touchpoint | structural analysis |
-| Event | Connection weaver | "See Also" suggestions (24h cooldown) |
-| Event | Conversation learner | extract insights from threads |
-| 20:30 EAT | Daily synthesis | cross-pollination across all signals |
-| 8 PM EAT | Daily brief → Telegram | summary of all tasks |
+The context engine (`hq-context`) assembles token-budgeted context frames with 5 layers:
+
+1. **System** -- SOUL + harness instructions
+2. **UserMessage** -- the current user turn
+3. **Memory** -- long-term facts (private tags stripped)
+4. **Thread** -- recent messages, older ones compacted
+5. **Injections** -- pinned notes + search results
+
+Surplus tokens cascade between layers (thread 50%, injections 35%, memory 15%).
+
+---
+
+## Development
+
+```bash
+cargo check                        # type-check all 16 crates
+cargo test                         # run all tests
+cargo build --release -p hq-cli    # release build (~6 MB)
+cargo clippy                       # lint
+```
+
+### Project Layout
+
+```
+crates/          16 Rust crates (the core of Agent-HQ)
+apps/
+  hq-control-center/   PWA dashboard (React + TanStack Start)
+bridges/
+  whatsapp/             WhatsApp bridge (Node.js + Baileys)
+web/
+  dist/                 Embedded static web assets
+Cargo.toml              Workspace root
+Caddyfile               HTTPS reverse proxy config
+```
 
 ---
 
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
-| Runtime | Bun |
-| Data | Obsidian vault (markdown + YAML frontmatter) |
-| Search | SQLite FTS5 + embedding vectors |
-| Context | Token-budgeted context engine with model registry |
-| LLM | OpenRouter, Gemini API, Anthropic API, Groq, Ollama |
-| Agent | Pi SDK |
-| PWA | TanStack Start + Vite PWA + Web Push + SSE streaming |
-| Discord | discord.js v14 |
-| WhatsApp | Baileys (multidevice) |
-| Telegram | grammY |
-| Google Chat | OAuth JWT + Google Chat API |
-| Voice | Groq Whisper (STT) + OpenAI TTS + Kokoro TTS |
-| Vision | Gemini + Anthropic + OpenRouter |
-| Image Gen | OpenRouter (`google/gemini-2.5-flash-image`) |
-| Diagrams | @chamuka-labs/drawit-cli + resvg-js |
-| Browser | Managed headless Chromium (hq-browser) |
-| Sync | Custom E2E encrypted WebSocket (AES-256-GCM) |
-| Build | Turborepo + Bun workspaces |
+|-------|-----------|
+| Language | Rust (2024 edition) |
+| Runtime | Tokio |
+| Data | Markdown vault + YAML frontmatter |
+| Database | SQLite (rusqlite, bundled, WAL mode) |
+| Search | FTS5 full-text + embedding vectors |
+| LLM | OpenRouter via async-openai |
+| CLI | clap (derive mode) |
+| MCP | rmcp |
+| Web server | Axum + tower-http |
+| Discord | serenity + poise |
+| Telegram | teloxide |
+| WhatsApp | Baileys (Node.js bridge) |
+| File watching | notify |
+| Config | figment (YAML + env vars) |
+| Encryption | AES-256-GCM (aes-gcm + pbkdf2) |
+| PWA | TanStack Start + Vite PWA + React 19 |
+| Build | Cargo workspace, LTO + strip in release |
 
 ---
-
-## Acknowledgements
-
-- **[Pi SDK](https://github.com/mariozechner/pi)** by [@mariozechner](https://github.com/mariozechner) — the agent execution engine
-- **[claude-telegram-relay](https://github.com/godagoo/claude-telegram-relay)** by [@godagoo](https://github.com/godagoo) — inspired the CLI-harness relay pattern
-- **[OpenCode](https://github.com/opencode-ai/opencode)** — inspired the multi-harness design
-- **[Obsidian](https://obsidian.md)** — the vault format that is our entire database
-- **[Always-On Memory Agent](https://github.com/GoogleCloudPlatform/generative-ai/tree/main/gemini/agents/always-on-memory-agent)** by Google Cloud — inspired the `vault-memory` active consolidation design
-
----
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT -- see [LICENSE](LICENSE).

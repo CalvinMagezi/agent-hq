@@ -1,0 +1,22 @@
+[package]
+name = "hq-sync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hq-core = { workspace = true }
+hq-db = { workspace = true }
+notify = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+hostname = { workspace = true }
+aes-gcm = { workspace = true }
+pbkdf2 = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -17,7 +17,7 @@ export interface Job {
 export const getJobs = createServerFn({ method: 'GET' }).handler(
   async (): Promise<{ jobs: Job[] }> => {
     const jobs: Job[] = []
-    const jobsDir = path.join(VAULT_PATH, '_fbmq/jobs')
+    const jobsDir = path.join(VAULT_PATH, '_jobs')
 
     const readFlatDir = (sub: string, statusText: Job['status']) => {
       const d = path.join(jobsDir, sub)
@@ -28,7 +28,7 @@ export const getJobs = createServerFn({ method: 'GET' }).handler(
           const raw = fs.readFileSync(path.join(d, f), 'utf-8')
           const { data } = matter(raw)
           jobs.push({
-            jobId: f.replace('.md', ''),
+            jobId: data?.jobId ?? f.replace('.md', ''),
             status: statusText,
             type: data?.type ?? 'unknown',
             priority: data?.priority ?? 50,
@@ -42,67 +42,10 @@ export const getJobs = createServerFn({ method: 'GET' }).handler(
       }
     }
 
-    readFlatDir('processing', 'running')
+    readFlatDir('pending', 'pending')
+    readFlatDir('running', 'running')
     readFlatDir('done', 'done')
     readFlatDir('failed', 'failed')
-
-    // Also check standard _jobs paths
-    const stdJobsDir = path.join(VAULT_PATH, '_jobs')
-    if (fs.existsSync(stdJobsDir)) {
-      for (const [sub, statusText] of [
-        ['running', 'running'] as const,
-        ['done', 'done'] as const,
-        ['failed', 'failed'] as const,
-      ]) {
-        const d = path.join(stdJobsDir, sub)
-        if (!fs.existsSync(d)) continue
-        const files = fs.readdirSync(d).filter((f) => f.endsWith('.md'))
-        for (const f of files) {
-          try {
-            const raw = fs.readFileSync(path.join(d, f), 'utf-8')
-            const { data } = matter(raw)
-            jobs.push({
-              jobId: f.replace('.md', ''),
-              status: statusText,
-              type: data?.type ?? 'unknown',
-              priority: data?.priority ?? 50,
-              createdAt: data?.createdAt ?? '',
-              updatedAt: data?.updatedAt ?? '',
-              instruction: data?.instruction ?? '',
-            })
-          } catch {
-            // skip
-          }
-        }
-      }
-    }
-
-    // Pending is sharded (00-ff) in _fbmq/jobs/pending
-    const pendingRoot = path.join(jobsDir, 'pending')
-    if (fs.existsSync(pendingRoot)) {
-      for (const bucket of fs.readdirSync(pendingRoot)) {
-        const bucketPath = path.join(pendingRoot, bucket)
-        if (fs.statSync(bucketPath).isDirectory()) {
-          for (const f of fs.readdirSync(bucketPath).filter((f) => f.endsWith('.md'))) {
-            try {
-              const raw = fs.readFileSync(path.join(bucketPath, f), 'utf-8')
-              const { data } = matter(raw)
-              jobs.push({
-                jobId: f.replace('.md', ''),
-                status: 'pending',
-                type: data?.type ?? 'unknown',
-                priority: data?.priority ?? 50,
-                createdAt: data?.createdAt ?? '',
-                updatedAt: data?.updatedAt ?? '',
-                instruction: data?.instruction ?? '',
-              })
-            } catch {
-              // skip
-            }
-          }
-        }
-      }
-    }
 
     jobs.sort((a, b) => (b.createdAt > a.createdAt ? 1 : -1))
     return { jobs }
@@ -140,31 +83,27 @@ export const createJob = createServerFn({ method: 'POST' })
   .inputValidator((d: CreateJobParams) => d)
   .handler(async ({ data }): Promise<{ success: boolean; jobId: string }> => {
     const timestamp = Date.now()
-    // format like job-1700000000000-xyz
     const randomSuffix = Math.random().toString(36).substring(2, 8)
     const jobId = `job-${timestamp}-${randomSuffix}`
 
-    // sharding logic: normally jobs go to pending/00 .. pending/ff based on hash
-    // simplified: just dump it into pending/00 or create one based on first hex char
-    const bucket = require('crypto').createHash('md5').update(jobId).digest('hex').substring(0, 2)
-    const pendingDir = path.join(VAULT_PATH, `_fbmq/jobs/pending/${bucket}`)
-
+    const pendingDir = path.join(VAULT_PATH, '_jobs/pending')
     if (!fs.existsSync(pendingDir)) {
       fs.mkdirSync(pendingDir, { recursive: true })
     }
 
     const nowIso = new Date().toISOString()
     const content = `---
-type: ${data.type || 'custom'}
+jobId: ${jobId}
+type: ${data.type || 'background'}
 priority: ${data.priority || 50}
 status: pending
 createdAt: ${nowIso}
 updatedAt: ${nowIso}
-instruction: |
-  ${data.instruction.split('\\n').join('\\n  ')}
 ---
 
-# Output
+# Instruction
+
+${data.instruction}
 `
     fs.writeFileSync(path.join(pendingDir, `${jobId}.md`), content, 'utf-8')
     return { success: true, jobId }

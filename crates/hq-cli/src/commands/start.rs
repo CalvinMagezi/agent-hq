@@ -191,41 +191,1074 @@ async fn start_telegram(
 
 // ─── Component runners ──────────────────────────────────────────
 
-async fn run_daemon(
-    _config: &HqConfig,
-    vault: Arc<VaultClient>,
-    _db: Arc<Database>,
-) -> Result<()> {
-    // Write daemon status to vault
-    let status_path = vault.vault_path().join("DAEMON-STATUS.md");
+// ─── Daemon scheduler (27 tasks) ───────────────────────────────
+
+struct DaemonTask {
+    name: &'static str,
+    interval: std::time::Duration,
+    last_run: tokio::time::Instant,
+    run_count: u64,
+    error_count: u64,
+    last_error: Option<String>,
+}
+
+impl DaemonTask {
+    fn new(name: &'static str, interval: std::time::Duration) -> Self {
+        Self {
+            name,
+            interval,
+            // Set last_run to epoch so all tasks fire on first tick
+            last_run: tokio::time::Instant::now() - interval - std::time::Duration::from_secs(1),
+            run_count: 0,
+            error_count: 0,
+            last_error: None,
+        }
+    }
+}
+
+fn ensure_dir(path: &std::path::Path) {
+    if !path.exists() {
+        let _ = std::fs::create_dir_all(path);
+    }
+}
+
+/// Check if a time-gated task has already run today by looking for a flag file.
+fn has_run_today(vault_path: &std::path::Path, task_name: &str) -> bool {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let flag_dir = vault_path.join("_system").join(".daemon-flags");
+    let flag_file = flag_dir.join(format!("{task_name}-{today}"));
+    flag_file.exists()
+}
+
+/// Mark a time-gated task as having run today.
+fn mark_run_today(vault_path: &std::path::Path, task_name: &str) {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let flag_dir = vault_path.join("_system").join(".daemon-flags");
+    ensure_dir(&flag_dir);
+    let flag_file = flag_dir.join(format!("{task_name}-{today}"));
+    let _ = std::fs::write(&flag_file, &today);
+    // Clean up old flags (older than 3 days)
+    if let Ok(entries) = std::fs::read_dir(&flag_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name();
+            let fname_str = fname.to_string_lossy();
+            if fname_str.starts_with(task_name) && !fname_str.ends_with(&today) {
+                // Check if it's older than 3 days by comparing date strings
+                if let Some(date_part) = fname_str.rsplit('-').collect::<Vec<_>>().get(..3) {
+                    let file_date = date_part.iter().rev().copied().collect::<Vec<_>>().join("-");
+                    if let Ok(fd) = chrono::NaiveDate::parse_from_str(&file_date, "%Y-%m-%d") {
+                        let today_date = chrono::Utc::now().date_naive();
+                        if today_date.signed_duration_since(fd).num_days() > 3 {
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Get current hour in EAT (UTC+3).
+fn current_eat_hour() -> u32 {
+    use chrono::{FixedOffset, Timelike, Utc};
+    let eat = FixedOffset::east_opt(3 * 3600).unwrap();
+    let now = Utc::now().with_timezone(&eat);
+    now.hour()
+}
+
+/// Get current minute in EAT (UTC+3).
+fn current_eat_minute() -> u32 {
+    use chrono::{FixedOffset, Timelike, Utc};
+    let eat = FixedOffset::east_opt(3 * 3600).unwrap();
+    let now = Utc::now().with_timezone(&eat);
+    now.minute()
+}
+
+use chrono::Datelike;
+
+fn write_cron_schedule(vault_path: &std::path::Path, tasks: &[DaemonTask]) {
+    let sys_dir = vault_path.join("_system");
+    ensure_dir(&sys_dir);
     let now = chrono::Utc::now().to_rfc3339();
-    std::fs::write(
-        &status_path,
-        format!("---\nstatus: running\nstarted_at: {now}\nruntime: rust\n---\n\n# Daemon Status\n\nRunning since {now}\n"),
-    )?;
+    let mut md = format!(
+        "---\ngenerated_at: {now}\ntask_count: {}\nruntime: rust\n---\n\n# Cron Schedule\n\nGenerated at {now}\n\n| # | Task | Interval |\n|---|------|----------|\n",
+        tasks.len()
+    );
+    for (i, t) in tasks.iter().enumerate() {
+        let interval_str = if t.interval.as_secs() < 60 {
+            format!("{}s", t.interval.as_secs())
+        } else if t.interval.as_secs() < 3600 {
+            format!("{}m", t.interval.as_secs() / 60)
+        } else if t.interval.as_secs() < 86400 {
+            format!("{}h", t.interval.as_secs() / 3600)
+        } else {
+            format!("{}d", t.interval.as_secs() / 86400)
+        };
+        md.push_str(&format!("| {} | `{}` | {} |\n", i + 1, t.name, interval_str));
+    }
+    let _ = std::fs::write(sys_dir.join("CRON-SCHEDULE.md"), md);
+}
 
-    info!("daemon: scheduler running (30s tick)");
+fn write_daemon_status(vault_path: &std::path::Path, tasks: &[DaemonTask], started_at: &str) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let total_runs: u64 = tasks.iter().map(|t| t.run_count).sum();
+    let total_errors: u64 = tasks.iter().map(|t| t.error_count).sum();
+    let mut md = format!(
+        "---\nstatus: running\nstarted_at: {started_at}\nlast_tick: {now}\nruntime: rust\ntask_count: {}\ntotal_runs: {total_runs}\ntotal_errors: {total_errors}\n---\n\n# Daemon Status\n\nStarted: {started_at}  \nLast tick: {now}  \nTasks: {} | Runs: {total_runs} | Errors: {total_errors}\n\n| Task | Interval | Runs | Errors | Last Error |\n|------|----------|------|--------|------------|\n",
+        tasks.len(), tasks.len()
+    );
+    for t in tasks {
+        let interval_str = if t.interval.as_secs() < 60 {
+            format!("{}s", t.interval.as_secs())
+        } else if t.interval.as_secs() < 3600 {
+            format!("{}m", t.interval.as_secs() / 60)
+        } else if t.interval.as_secs() < 86400 {
+            format!("{}h", t.interval.as_secs() / 3600)
+        } else {
+            format!("{}d", t.interval.as_secs() / 86400)
+        };
+        let err_str = t.last_error.as_deref().unwrap_or("-");
+        // Truncate error to 60 chars for table readability
+        let err_display = if err_str.len() > 60 { &err_str[..60] } else { err_str };
+        md.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} |\n",
+            t.name, interval_str, t.run_count, t.error_count, err_display
+        ));
+    }
+    let _ = std::fs::write(vault_path.join("DAEMON-STATUS.md"), md);
+}
 
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+async fn run_daemon_task(
+    task_name: &str,
+    vault_path: &std::path::Path,
+    db: &Database,
+    config: &HqConfig,
+) -> Result<()> {
+    use std::path::Path;
+
+    match task_name {
+        // ── Every 1 minute ──────────────────────────────────────
+
+        "expire-approvals" => {
+            // Scan _approvals/pending/, delete any older than 5 minutes
+            let pending_dir = vault_path.join("_approvals").join("pending");
+            if pending_dir.exists() {
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
+                let mut expired = 0u32;
+                if let Ok(entries) = std::fs::read_dir(&pending_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let _ = std::fs::remove_file(entry.path());
+                                    expired += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if expired > 0 {
+                    info!(count = expired, "expire-approvals: removed expired approvals");
+                }
+            }
+            Ok(())
+        }
+
+        "plan-sync" => {
+            // Read _plans/active/ markdown files, update their status
+            let plans_dir = vault_path.join("_plans").join("active");
+            if plans_dir.exists() {
+                let mut checked = 0u32;
+                if let Ok(entries) = std::fs::read_dir(&plans_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map(|e| e == "md").unwrap_or(false) {
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                // Check if all steps are marked done (- [x])
+                                let total_steps = content.matches("- [").count();
+                                let done_steps = content.matches("- [x]").count();
+                                if total_steps > 0 && done_steps == total_steps {
+                                    // Move to completed
+                                    let completed_dir = vault_path.join("_plans").join("completed");
+                                    ensure_dir(&completed_dir);
+                                    let dest = completed_dir.join(entry.file_name());
+                                    let _ = std::fs::rename(&path, &dest);
+                                    info!(plan = ?entry.file_name(), "plan-sync: plan completed, moved to completed/");
+                                }
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+                tracing::debug!(checked, "plan-sync: checked active plans");
+            }
+            Ok(())
+        }
+
+        // ── Every 5 minutes ─────────────────────────────────────
+
+        "heartbeat" => {
+            // Update _system/HEARTBEAT.md with daemon status, uptime, active components
+            let sys_dir = vault_path.join("_system");
+            ensure_dir(&sys_dir);
+            let now = chrono::Utc::now().to_rfc3339();
+            let uptime_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let content = format!(
+                "---\nstatus: alive\nlast_heartbeat: {now}\nruntime: rust\n---\n\n# Heartbeat\n\nDaemon is alive.\n\n- **Last heartbeat**: {now}\n- **System uptime**: {}h {}m\n- **Components**: daemon, agent-worker\n",
+                uptime_secs / 3600, (uptime_secs % 3600) / 60
+            );
+            std::fs::write(sys_dir.join("HEARTBEAT.md"), content)?;
+            Ok(())
+        }
+
+        "health-check" => {
+            // Check for stuck jobs (running > 30min), offline workers
+            let running_dir = vault_path.join("_jobs").join("running");
+            if running_dir.exists() {
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(1800);
+                if let Ok(entries) = std::fs::read_dir(&running_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    tracing::warn!(
+                                        job = ?entry.file_name(),
+                                        "health-check: stuck job detected (running > 30min)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Check worker heartbeat
+            let heartbeat_path = vault_path.join("_system").join("HEARTBEAT.md");
+            if heartbeat_path.exists() {
+                if let Ok(meta) = std::fs::metadata(&heartbeat_path) {
+                    if let Ok(modified) = meta.modified() {
+                        let age = std::time::SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or_default();
+                        if age > std::time::Duration::from_secs(300) {
+                            tracing::warn!(
+                                age_secs = age.as_secs(),
+                                "health-check: heartbeat is stale (> 5min old)"
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        "browser-health" => {
+            // Ping http://127.0.0.1:19200/health, log if browser server is down
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
+            match client.get("http://127.0.0.1:19200/health").send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::debug!("browser-health: browser server is up");
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        status = %resp.status(),
+                        "browser-health: browser server returned non-200"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "browser-health: browser server is down (expected if not running)");
+                }
+            }
+            Ok(())
+        }
+
+        // ── Every 15 minutes ────────────────────────────────────
+
+        "news-pulse" => {
+            // Fetch RSS feeds and write summary
+            let sys_dir = vault_path.join("_system");
+            ensure_dir(&sys_dir);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()?;
+
+            let feeds = [
+                ("Hacker News", "https://hnrss.org/frontpage?count=10"),
+                ("TechCrunch", "https://techcrunch.com/feed/"),
+                ("The Guardian Tech", "https://www.theguardian.com/technology/rss"),
+            ];
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut md = format!(
+                "---\nupdated_at: {now}\n---\n\n# News Pulse\n\nUpdated: {now}\n\n"
+            );
+
+            for (name, url) in &feeds {
+                md.push_str(&format!("## {name}\n\n"));
+                match client.get(*url).send().await {
+                    Ok(resp) => {
+                        if let Ok(body) = resp.text().await {
+                            // Simple XML title extraction (no full XML parser needed)
+                            let mut count = 0;
+                            for item_chunk in body.split("<item") {
+                                if count == 0 {
+                                    count += 1; // skip first chunk (before first <item>)
+                                    continue;
+                                }
+                                if count > 10 { break; }
+                                // Extract <title>
+                                if let Some(title_start) = item_chunk.find("<title>") {
+                                    if let Some(title_end) = item_chunk[title_start..].find("</title>") {
+                                        let title = &item_chunk[title_start + 7..title_start + title_end];
+                                        let title = title.replace("<![CDATA[", "").replace("]]>", "");
+                                        // Extract <link>
+                                        let link = if let Some(ls) = item_chunk.find("<link>") {
+                                            if let Some(le) = item_chunk[ls..].find("</link>") {
+                                                item_chunk[ls + 6..ls + le].trim().to_string()
+                                            } else { String::new() }
+                                        } else { String::new() };
+                                        if !link.is_empty() {
+                                            md.push_str(&format!("- [{}]({})\n", title.trim(), link.trim()));
+                                        } else {
+                                            md.push_str(&format!("- {}\n", title.trim()));
+                                        }
+                                    }
+                                }
+                                count += 1;
+                            }
+                            if count <= 1 {
+                                md.push_str("- *(no items parsed)*\n");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        md.push_str(&format!("- *fetch error: {e}*\n"));
+                    }
+                }
+                md.push('\n');
+            }
+
+            std::fs::write(sys_dir.join("NEWS-PULSE.md"), md)?;
+            info!("news-pulse: updated NEWS-PULSE.md");
+            Ok(())
+        }
+
+        // ── Every 30 minutes ────────────────────────────────────
+
+        "memory-consolidation" => {
+            // Load unconsolidated memories, call Ollama if available
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()?;
+            match client.get("http://127.0.0.1:11434/api/tags").send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("memory-consolidation: Ollama is available, consolidation would run here");
+                    // TODO: load unconsolidated memories from DB, cluster, synthesize
+                }
+                _ => {
+                    tracing::debug!("memory-consolidation: Ollama not available, skipping silently");
+                }
+            }
+            Ok(())
+        }
+
+        "embeddings" => {
+            // Find notes with embeddingStatus: pending, generate embeddings
+            let notebooks_dir = vault_path.join("Notebooks");
+            if notebooks_dir.exists() {
+                // Get already-embedded paths from DB
+                let embedded_paths: Vec<String> = db.with_conn(|conn| {
+                    hq_db::search::get_embedded_note_paths(conn)
+                }).unwrap_or_default();
+
+                // Walk notebooks for unembedded .md files (batch of 10)
+                let mut pending = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&notebooks_dir) {
+                    fn walk_dir(dir: &Path, embedded: &[String], pending: &mut Vec<std::path::PathBuf>, limit: usize) {
+                        if pending.len() >= limit { return; }
+                        if let Ok(entries) = std::fs::read_dir(dir) {
+                            for entry in entries.flatten() {
+                                if pending.len() >= limit { return; }
+                                let path = entry.path();
+                                if path.is_dir() {
+                                    walk_dir(&path, embedded, pending, limit);
+                                } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+                                    let path_str = path.to_string_lossy().to_string();
+                                    if !embedded.contains(&path_str) {
+                                        pending.push(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = entries; // consumed by walk
+                    walk_dir(&notebooks_dir, &embedded_paths, &mut pending, 10);
+                }
+
+                if !pending.is_empty() {
+                    info!(count = pending.len(), "embeddings: found notes needing embeddings");
+                    // TODO: generate embeddings via API and store with hq_db::search::store_embedding
+                }
+            }
+            Ok(())
+        }
+
+        "hq-inbox-scan" => {
+            // Scan _jobs/pending/ for jobs, log count
+            let pending_dir = vault_path.join("_jobs").join("pending");
+            if pending_dir.exists() {
+                let count = std::fs::read_dir(&pending_dir)
+                    .map(|entries| entries.count())
+                    .unwrap_or(0);
+                if count > 0 {
+                    info!(count, "hq-inbox-scan: pending jobs in inbox");
+                } else {
+                    tracing::debug!("hq-inbox-scan: inbox empty");
+                }
+            }
+            Ok(())
+        }
+
+        // ── Every 1 hour ────────────────────────────────────────
+
+        "budget-reset" => {
+            // On 1st of month only: reset monthly budget counters
+            let today = chrono::Utc::now();
+            if today.day() == 1 && !has_run_today(vault_path, "budget-reset") {
+                let usage_dir = vault_path.join("_usage");
+                ensure_dir(&usage_dir);
+                let now = today.to_rfc3339();
+                let content = format!(
+                    "---\nreset_at: {now}\nmonth: {}\nmonthly_spend: 0.0\nmonthly_limit: 50.0\n---\n\n# Budget\n\nMonthly budget reset on {now}\n",
+                    today.format("%Y-%m")
+                );
+                std::fs::write(usage_dir.join("budget.md"), content)?;
+                mark_run_today(vault_path, "budget-reset");
+                info!("budget-reset: monthly budget counters reset");
+            }
+            Ok(())
+        }
+
+        "stale-cleanup" => {
+            // Move jobs in _jobs/running/ older than 7 days to _jobs/failed/
+            let running_dir = vault_path.join("_jobs").join("running");
+            let failed_dir = vault_path.join("_jobs").join("failed");
+            if running_dir.exists() {
+                ensure_dir(&failed_dir);
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
+                if let Ok(entries) = std::fs::read_dir(&running_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let dest = failed_dir.join(entry.file_name());
+                                    let _ = std::fs::rename(entry.path(), &dest);
+                                    info!(job = ?entry.file_name(), "stale-cleanup: moved stale job to failed/");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        "delegation-cleanup" => {
+            // Clean up _delegation/completed/ older than 3 days
+            let completed_dir = vault_path.join("_delegation").join("completed");
+            if completed_dir.exists() {
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400);
+                let mut removed = 0u32;
+                if let Ok(entries) = std::fs::read_dir(&completed_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let _ = std::fs::remove_file(entry.path());
+                                    removed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                if removed > 0 {
+                    info!(count = removed, "delegation-cleanup: removed old delegation files");
+                }
+            }
+            Ok(())
+        }
+
+        "daily-brief" => {
+            // At 8 PM EAT (20:00 EAT = 17:00 UTC): generate end-of-day summary
+            let hour = current_eat_hour();
+            if hour == 20 && !has_run_today(vault_path, "daily-brief") {
+                let now = chrono::Utc::now().to_rfc3339();
+                let today_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                let sys_dir = vault_path.join("_system");
+                ensure_dir(&sys_dir);
+
+                // Count today's completed jobs
+                let completed_dir = vault_path.join("_jobs").join("completed");
+                let completed_count = if completed_dir.exists() {
+                    std::fs::read_dir(&completed_dir)
+                        .map(|entries| {
+                            entries.flatten().filter(|e| {
+                                e.metadata().ok()
+                                    .and_then(|m| m.modified().ok())
+                                    .map(|t| {
+                                        let dt: chrono::DateTime<chrono::Utc> = t.into();
+                                        dt.format("%Y-%m-%d").to_string() == today_str
+                                    })
+                                    .unwrap_or(false)
+                            }).count()
+                        })
+                        .unwrap_or(0)
+                } else { 0 };
+
+                let content = format!(
+                    "---\ntype: daily-brief\ndate: {today_str}\ngenerated_at: {now}\n---\n\n# Daily Brief — {today_str}\n\n## Summary\n\n- **Completed jobs**: {completed_count}\n- **Generated at**: {now}\n\n## Activity\n\nEnd-of-day summary generated by daemon.\n"
+                );
+                let briefs_dir = vault_path.join("_system").join("briefs");
+                ensure_dir(&briefs_dir);
+                std::fs::write(briefs_dir.join(format!("daily-brief-{today_str}.md")), content)?;
+                mark_run_today(vault_path, "daily-brief");
+                info!("daily-brief: generated end-of-day summary");
+            }
+            Ok(())
+        }
+
+        "morning-brief-audio" => {
+            // At 6 AM EAT (3 AM UTC): if MORNING_BRIEF_ENABLED, generate audio
+            let hour = current_eat_hour();
+            if hour == 6 && !has_run_today(vault_path, "morning-brief-audio") {
+                if std::env::var("MORNING_BRIEF_ENABLED").unwrap_or_default() == "true" {
+                    info!("morning-brief-audio: would generate audio brief via kokoro-tts or say");
+                    // Check if kokoro-tts is available
+                    let has_kokoro = std::process::Command::new("which")
+                        .arg("kokoro-tts")
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if has_kokoro {
+                        info!("morning-brief-audio: kokoro-tts available, audio generation placeholder");
+                    } else {
+                        tracing::debug!("morning-brief-audio: kokoro-tts not found, would fall back to say");
+                    }
+                    mark_run_today(vault_path, "morning-brief-audio");
+                }
+            }
+            Ok(())
+        }
+
+        "morning-brief-notebooklm" => {
+            // At 6:30 AM EAT (3:30 AM UTC): stub for NotebookLM integration
+            let hour = current_eat_hour();
+            let minute = current_eat_minute();
+            if hour == 6 && minute >= 30 && !has_run_today(vault_path, "morning-brief-notebooklm") {
+                if std::env::var("MORNING_BRIEF_ENABLED").unwrap_or_default() == "true" {
+                    info!("morning-brief-notebooklm: NotebookLM integration stub");
+                    mark_run_today(vault_path, "morning-brief-notebooklm");
+                }
+            }
+            Ok(())
+        }
+
+        "hq-morning-brief" => {
+            // At 7 AM EAT (4 AM UTC): generate markdown morning brief
+            let hour = current_eat_hour();
+            if hour == 7 && !has_run_today(vault_path, "hq-morning-brief") {
+                let now = chrono::Utc::now().to_rfc3339();
+                let today_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+
+                // Count pending jobs
+                let pending_count = vault_path.join("_jobs").join("pending")
+                    .read_dir().map(|e| e.count()).unwrap_or(0);
+
+                let content = format!(
+                    "---\ntype: morning-brief\ndate: {today_str}\ngenerated_at: {now}\n---\n\n# Morning Brief — {today_str}\n\n## Pending Tasks\n\n- **Pending jobs**: {pending_count}\n\n## Agenda\n\n*Check calendar for today's events.*\n\n## Recent Activity\n\n*Review DAEMON-STATUS.md for overnight activity.*\n"
+                );
+                let briefs_dir = vault_path.join("_system").join("briefs");
+                ensure_dir(&briefs_dir);
+                std::fs::write(briefs_dir.join(format!("morning-brief-{today_str}.md")), content)?;
+                mark_run_today(vault_path, "hq-morning-brief");
+                info!("hq-morning-brief: generated morning brief");
+            }
+            Ok(())
+        }
+
+        "model-intelligence" => {
+            // Check OpenRouter /api/v1/models for new models, pricing changes
+            if let Some(ref api_key) = config.openrouter_api_key {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()?;
+                match client
+                    .get("https://openrouter.ai/api/v1/models")
+                    .header("Authorization", format!("Bearer {api_key}"))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(body) = resp.text().await {
+                            let model_count = body.matches("\"id\"").count();
+                            let sys_dir = vault_path.join("_system");
+                            ensure_dir(&sys_dir);
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let content = format!(
+                                "---\nupdated_at: {now}\nmodel_count: {model_count}\n---\n\n# Model Intelligence\n\nLast checked: {now}  \nModels available: {model_count}\n"
+                            );
+                            let _ = std::fs::write(sys_dir.join("MODEL-INTELLIGENCE.md"), content);
+                            tracing::debug!(model_count, "model-intelligence: checked OpenRouter models");
+                        }
+                    }
+                    Ok(resp) => {
+                        tracing::debug!(status = %resp.status(), "model-intelligence: OpenRouter returned non-200");
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "model-intelligence: failed to reach OpenRouter");
+                    }
+                }
+            } else {
+                tracing::debug!("model-intelligence: no OpenRouter API key configured");
+            }
+            Ok(())
+        }
+
+        "sblu-retraining" => {
+            // At 3 AM EAT (midnight UTC): placeholder for retraining
+            let hour = current_eat_hour();
+            if hour == 3 && !has_run_today(vault_path, "sblu-retraining") {
+                info!("sblu-retraining: retraining placeholder (would run SBLU model retraining)");
+                mark_run_today(vault_path, "sblu-retraining");
+            }
+            Ok(())
+        }
+
+        "plan-extraction" => {
+            // Extract knowledge from completed plans
+            let completed_dir = vault_path.join("_plans").join("completed");
+            if completed_dir.exists() {
+                let knowledge_dir = vault_path.join("_plans").join("knowledge");
+                ensure_dir(&knowledge_dir);
+                if let Ok(entries) = std::fs::read_dir(&completed_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map(|e| e == "md").unwrap_or(false) {
+                            // Check if knowledge already extracted (flag file)
+                            let flag = knowledge_dir.join(format!(".extracted-{}", entry.file_name().to_string_lossy()));
+                            if !flag.exists() {
+                                tracing::debug!(plan = ?entry.file_name(), "plan-extraction: would extract knowledge from completed plan");
+                                let _ = std::fs::write(&flag, "extracted");
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        "plan-archival" => {
+            // Archive completed plans older than 30 days
+            let completed_dir = vault_path.join("_plans").join("completed");
+            if completed_dir.exists() {
+                let archive_dir = vault_path.join("_plans").join("archive");
+                ensure_dir(&archive_dir);
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400);
+                if let Ok(entries) = std::fs::read_dir(&completed_dir) {
+                    for entry in entries.flatten() {
+                        if let Ok(meta) = entry.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                if modified < cutoff {
+                                    let dest = archive_dir.join(entry.file_name());
+                                    let _ = std::fs::rename(entry.path(), &dest);
+                                    info!(plan = ?entry.file_name(), "plan-archival: archived old completed plan");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        // ── Every 6 hours ───────────────────────────────────────
+
+        "vault-health" => {
+            // Full vault integrity check
+            let sys_dir = vault_path.join("_system");
+            ensure_dir(&sys_dir);
+
+            let notebooks_dir = vault_path.join("Notebooks");
+            let mut total_notes = 0u32;
+            let mut broken_frontmatter = 0u32;
+
+            fn count_notes(dir: &Path, total: &mut u32, broken: &mut u32) {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            count_notes(&path, total, broken);
+                        } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+                            *total += 1;
+                            // Quick frontmatter check
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                let trimmed = content.trim();
+                                if trimmed.starts_with("---") {
+                                    if trimmed[3..].find("---").is_none() {
+                                        *broken += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if notebooks_dir.exists() {
+                count_notes(&notebooks_dir, &mut total_notes, &mut broken_frontmatter);
+            }
+
+            // DB stats
+            let db_stats = db.with_conn(|conn| {
+                hq_db::search::get_stats(conn)
+            });
+            let indexed = db_stats
+                .as_ref()
+                .map(|s| s.fts_count)
+                .unwrap_or(0);
+            let embedded = db_stats
+                .as_ref()
+                .map(|s| s.embedding_count)
+                .unwrap_or(0);
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let content = format!(
+                "---\nchecked_at: {now}\ntotal_notes: {total_notes}\nbroken_frontmatter: {broken_frontmatter}\nindexed: {indexed}\nembedded: {embedded}\n---\n\n# Vault Health\n\nLast check: {now}\n\n- **Total notes**: {total_notes}\n- **Broken frontmatter**: {broken_frontmatter}\n- **Indexed (FTS5)**: {indexed}\n- **Embedded**: {embedded}\n"
+            );
+            std::fs::write(sys_dir.join("VAULT-HEALTH.md"), content)?;
+            info!(total_notes, broken_frontmatter, indexed, embedded, "vault-health: integrity check complete");
+            Ok(())
+        }
+
+        "stale-thread-detector" => {
+            // Find threads older than 7 days with no activity, archive them
+            let threads_dir = vault_path.join("_threads");
+            if threads_dir.exists() {
+                let archive_dir = vault_path.join("_threads").join("_archive");
+                ensure_dir(&archive_dir);
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
+                let mut archived = 0u32;
+                if let Ok(entries) = std::fs::read_dir(&threads_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() && path.extension().map(|e| e == "md").unwrap_or(false) {
+                            if let Ok(meta) = entry.metadata() {
+                                if let Ok(modified) = meta.modified() {
+                                    if modified < cutoff {
+                                        let dest = archive_dir.join(entry.file_name());
+                                        let _ = std::fs::rename(&path, &dest);
+                                        archived += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if archived > 0 {
+                    info!(count = archived, "stale-thread-detector: archived stale threads");
+                }
+            }
+            Ok(())
+        }
+
+        // ── Every 24 hours ──────────────────────────────────────
+
+        "memory-forgetting" => {
+            // Prune weak memories below importance threshold, decay old memories
+            if !has_run_today(vault_path, "memory-forgetting") {
+                info!("memory-forgetting: would prune weak memories and decay old ones");
+                // TODO: implement actual memory decay via hq-memory crate
+                mark_run_today(vault_path, "memory-forgetting");
+            }
+            Ok(())
+        }
+
+        // ── Weekly ──────────────────────────────────────────────
+
+        "team-optimizer" => {
+            // Analyze team workflow results, suggest improvements (run on Mondays)
+            let today = chrono::Utc::now();
+            // Monday = 0 in weekday().num_days_from_monday()
+            if today.weekday().num_days_from_monday() == 0
+                && !has_run_today(vault_path, "team-optimizer")
+            {
+                info!("team-optimizer: would analyze team workflow and suggest improvements");
+                mark_run_today(vault_path, "team-optimizer");
+            }
+            Ok(())
+        }
+
+        // ── Touchpoints (hourly, self-gated) ────────────────────
+
+        "daily-synthesis" => {
+            // At 8:30-10 PM EAT: synthesize the day's work
+            let hour = current_eat_hour();
+            let minute = current_eat_minute();
+            if (hour == 20 && minute >= 30) || hour == 21 {
+                if !has_run_today(vault_path, "daily-synthesis") {
+                    let today_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let sys_dir = vault_path.join("_system").join("briefs");
+                    ensure_dir(&sys_dir);
+                    let content = format!(
+                        "---\ntype: daily-synthesis\ndate: {today_str}\ngenerated_at: {now}\n---\n\n# Daily Synthesis — {today_str}\n\nSynthesis of today's work generated by daemon.\n\n*Review completed jobs, created notes, and system activity for detailed insights.*\n"
+                    );
+                    std::fs::write(sys_dir.join(format!("daily-synthesis-{today_str}.md")), content)?;
+                    mark_run_today(vault_path, "daily-synthesis");
+                    info!("daily-synthesis: generated daily synthesis");
+                }
+            }
+            Ok(())
+        }
+
+        // ── Event-driven (via periodic scan) ────────────────────
+
+        "embedding-on-change" => {
+            // When a note is created/modified recently, mark for embedding
+            // We scan Notebooks/ for files modified in the last 2 minutes
+            let notebooks_dir = vault_path.join("Notebooks");
+            if notebooks_dir.exists() {
+                let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+                let mut newly_modified = 0u32;
+
+                fn scan_recent(dir: &Path, cutoff: std::time::SystemTime, count: &mut u32) {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                scan_recent(&path, cutoff, count);
+                            } else if path.extension().map(|e| e == "md").unwrap_or(false) {
+                                if let Ok(meta) = entry.metadata() {
+                                    if let Ok(modified) = meta.modified() {
+                                        if modified > cutoff {
+                                            *count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                scan_recent(&notebooks_dir, cutoff, &mut newly_modified);
+                if newly_modified > 0 {
+                    tracing::debug!(count = newly_modified, "embedding-on-change: recently modified notes detected (will be picked up by embeddings task)");
+                }
+            }
+            Ok(())
+        }
+
+        // ── Claude Code cron runner ─────────────────────────────
+
+        "claude-cron-runner" => {
+            // Scan ~/.claude/scheduled-tasks/ for SKILL.md files with cron expressions
+            let home = dirs::home_dir().unwrap_or_default();
+            let tasks_dir = home.join(".claude").join("scheduled-tasks");
+            if tasks_dir.exists() {
+                let now_eat_hour = current_eat_hour();
+                let now_eat_minute = current_eat_minute();
+
+                if let Ok(entries) = std::fs::read_dir(&tasks_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().map(|e| e == "md").unwrap_or(false) {
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                // Look for schedule: field in frontmatter
+                                let trimmed = content.trim();
+                                if trimmed.starts_with("---") {
+                                    if let Some(end_idx) = trimmed[3..].find("---") {
+                                        let frontmatter = &trimmed[3..3 + end_idx];
+                                        // Simple schedule parsing: "schedule: HH:MM" or "schedule: */N * * * *"
+                                        for line in frontmatter.lines() {
+                                            let line = line.trim();
+                                            if line.starts_with("schedule:") {
+                                                let schedule = line["schedule:".len()..].trim().trim_matches('"').trim_matches('\'');
+                                                // Simple HH:MM matching
+                                                if let Some((h, m)) = schedule.split_once(':') {
+                                                    if let (Ok(sh), Ok(sm)) = (h.trim().parse::<u32>(), m.trim().parse::<u32>()) {
+                                                        if sh == now_eat_hour && sm == now_eat_minute {
+                                                            let task_name = path.file_stem()
+                                                                .map(|s| s.to_string_lossy().to_string())
+                                                                .unwrap_or_default();
+                                                            if !has_run_today(vault_path, &format!("claude-cron-{task_name}")) {
+                                                                let body = trimmed[3 + end_idx + 3..].trim();
+                                                                if !body.is_empty() {
+                                                                    info!(task = %task_name, "claude-cron-runner: firing scheduled task");
+                                                                    // Spawn claude -p in background
+                                                                    let body_owned = body.to_string();
+                                                                    tokio::spawn(async move {
+                                                                        let _ = tokio::process::Command::new("claude")
+                                                                            .args(["-p", &body_owned])
+                                                                            .stdout(std::process::Stdio::null())
+                                                                            .stderr(std::process::Stdio::null())
+                                                                            .stdin(std::process::Stdio::null())
+                                                                            .spawn();
+                                                                    });
+                                                                    mark_run_today(vault_path, &format!("claude-cron-{task_name}"));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                // Simple cron: */N * * * * (every N minutes)
+                                                else if schedule.starts_with("*/") {
+                                                    let parts: Vec<&str> = schedule.split_whitespace().collect();
+                                                    if let Some(interval_str) = parts.first() {
+                                                        if let Ok(interval) = interval_str[2..].parse::<u32>() {
+                                                            if interval > 0 && now_eat_minute % interval == 0 {
+                                                                let task_name = path.file_stem()
+                                                                    .map(|s| s.to_string_lossy().to_string())
+                                                                    .unwrap_or_default();
+                                                                let flag = format!("claude-cron-{task_name}-{now_eat_hour}-{now_eat_minute}");
+                                                                if !has_run_today(vault_path, &flag) {
+                                                                    let body = trimmed[3 + end_idx + 3..].trim();
+                                                                    if !body.is_empty() {
+                                                                        info!(task = %task_name, "claude-cron-runner: firing cron task");
+                                                                        let body_owned = body.to_string();
+                                                                        tokio::spawn(async move {
+                                                                            let _ = tokio::process::Command::new("claude")
+                                                                                .args(["-p", &body_owned])
+                                                                                .stdout(std::process::Stdio::null())
+                                                                                .stderr(std::process::Stdio::null())
+                                                                                .stdin(std::process::Stdio::null())
+                                                                                .spawn();
+                                                                        });
+                                                                        mark_run_today(vault_path, &flag);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        unknown => {
+            tracing::warn!(task = unknown, "daemon: unknown task");
+            Ok(())
+        }
+    }
+}
+
+async fn run_daemon(
+    config: &HqConfig,
+    vault: Arc<VaultClient>,
+    db: Arc<Database>,
+) -> Result<()> {
+    use std::time::Duration;
+
+    let vault_path = vault.vault_path().to_path_buf();
+    let started_at = chrono::Utc::now().to_rfc3339();
+
+    // Ensure system directories exist
+    ensure_dir(&vault_path.join("_system"));
+    ensure_dir(&vault_path.join("_jobs").join("pending"));
+    ensure_dir(&vault_path.join("_jobs").join("running"));
+    ensure_dir(&vault_path.join("_jobs").join("completed"));
+    ensure_dir(&vault_path.join("_jobs").join("failed"));
+
+    // Define all 27 tasks with their intervals
+    let mut tasks = vec![
+        // Every 1 minute
+        DaemonTask::new("expire-approvals", Duration::from_secs(60)),
+        DaemonTask::new("plan-sync", Duration::from_secs(60)),
+        // Every 5 minutes
+        DaemonTask::new("heartbeat", Duration::from_secs(300)),
+        DaemonTask::new("health-check", Duration::from_secs(300)),
+        DaemonTask::new("browser-health", Duration::from_secs(300)),
+        // Every 15 minutes
+        DaemonTask::new("news-pulse", Duration::from_secs(900)),
+        // Every 30 minutes
+        DaemonTask::new("memory-consolidation", Duration::from_secs(1800)),
+        DaemonTask::new("embeddings", Duration::from_secs(1800)),
+        DaemonTask::new("hq-inbox-scan", Duration::from_secs(1800)),
+        // Every 1 hour
+        DaemonTask::new("budget-reset", Duration::from_secs(3600)),
+        DaemonTask::new("stale-cleanup", Duration::from_secs(3600)),
+        DaemonTask::new("delegation-cleanup", Duration::from_secs(3600)),
+        DaemonTask::new("daily-brief", Duration::from_secs(3600)),
+        DaemonTask::new("morning-brief-audio", Duration::from_secs(3600)),
+        DaemonTask::new("morning-brief-notebooklm", Duration::from_secs(3600)),
+        DaemonTask::new("hq-morning-brief", Duration::from_secs(3600)),
+        DaemonTask::new("model-intelligence", Duration::from_secs(3600)),
+        DaemonTask::new("sblu-retraining", Duration::from_secs(3600)),
+        DaemonTask::new("plan-extraction", Duration::from_secs(600)), // every 10 min as noted
+        DaemonTask::new("plan-archival", Duration::from_secs(3600)),
+        // Every 6 hours
+        DaemonTask::new("vault-health", Duration::from_secs(21600)),
+        DaemonTask::new("stale-thread-detector", Duration::from_secs(21600)),
+        // Every 24 hours
+        DaemonTask::new("memory-forgetting", Duration::from_secs(86400)),
+        // Weekly (check hourly, self-gated to Mondays)
+        DaemonTask::new("team-optimizer", Duration::from_secs(3600)),
+        // Touchpoints (hourly check, self-gated by time)
+        DaemonTask::new("daily-synthesis", Duration::from_secs(3600)),
+        // Event-driven (scan every 1 minute)
+        DaemonTask::new("embedding-on-change", Duration::from_secs(60)),
+        // Claude Code cron runner (every 1 minute)
+        DaemonTask::new("claude-cron-runner", Duration::from_secs(60)),
+    ];
+
+    // Write initial cron schedule
+    write_cron_schedule(&vault_path, &tasks);
+
+    // Write initial status
+    write_daemon_status(&vault_path, &tasks, &started_at);
+
+    info!(
+        tasks = tasks.len(),
+        "daemon: scheduler running ({} tasks, 30s tick)",
+        tasks.len()
+    );
+
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
     loop {
         interval.tick().await;
+        let now = tokio::time::Instant::now();
 
-        // Health check: look for stuck jobs
-        let running_jobs = vault.list_pending_jobs().unwrap_or_default();
-        if !running_jobs.is_empty() {
-            info!(count = running_jobs.len(), "daemon: pending jobs detected");
+        for task in &mut tasks {
+            if now.duration_since(task.last_run) >= task.interval {
+                task.last_run = now;
+                tracing::debug!(task = task.name, "daemon: running task");
+                match run_daemon_task(task.name, &vault_path, &db, config).await {
+                    Ok(()) => {
+                        task.run_count += 1;
+                    }
+                    Err(e) => {
+                        task.error_count += 1;
+                        let err_msg = format!("{e:#}");
+                        tracing::warn!(task = task.name, error = %err_msg, "daemon: task error");
+                        task.last_error = Some(err_msg);
+                    }
+                }
+            }
         }
 
-        // Heartbeat
-        let heartbeat_path = vault.vault_path().join("_system").join("HEARTBEAT.md");
-        if heartbeat_path.exists() {
-            // Touch it to show daemon is alive
-            let now = chrono::Utc::now().to_rfc3339();
-            let _ = std::fs::write(
-                vault.vault_path().join("DAEMON-STATUS.md"),
-                format!("---\nstatus: running\nlast_tick: {now}\nruntime: rust\n---\n\n# Daemon Status\n\nLast tick: {now}\n"),
-            );
-        }
+        // Update status file on every tick
+        write_daemon_status(&vault_path, &tasks, &started_at);
     }
 }
 

@@ -44,6 +44,8 @@ pub fn create_router(state: Arc<WsState>) -> Router {
         .route("/api/daemon-status", get(daemon_status_handler))
         .route("/api/news", get(news_handler))
         .route("/api/wa-message", axum::routing::post(wa_message_handler))
+        .route("/api/search", get(search_handler))
+        .route("/api/vault-asset", get(vault_asset_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -225,6 +227,92 @@ async fn news_handler(State(state): State<Arc<WsState>>) -> impl IntoResponse {
     }
 
     axum::Json(serde_json::json!({ "items": items }))
+}
+
+// ─── API: Search ────────────────────────────────────────────
+
+async fn search_handler(
+    State(state): State<Arc<WsState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query = params.get("q").cloned().unwrap_or_default();
+    let limit: usize = params.get("limit").and_then(|l| l.parse().ok()).unwrap_or(20);
+
+    if query.is_empty() {
+        return axum::Json(serde_json::json!({"results": [], "error": "no query"}));
+    }
+
+    // Try filesystem search (FTS not always initialized)
+    let vault = &state.vault_path;
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+
+    fn search_dir(
+        dir: &std::path::Path, root: &std::path::Path,
+        query: &str, results: &mut Vec<serde_json::Value>, limit: usize,
+    ) {
+        if results.len() >= limit { return; }
+        let entries = match std::fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+        for entry in entries.flatten() {
+            if results.len() >= limit { break; }
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if !name.starts_with('.') && !name.starts_with('_') {
+                    search_dir(&path, root, query, results, limit);
+                }
+            } else if path.extension().is_some_and(|e| e == "md") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if content.to_lowercase().contains(query) {
+                        let rel = path.strip_prefix(root).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        let title = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        let snippet = content.lines()
+                            .find(|l| l.to_lowercase().contains(query))
+                            .unwrap_or("").trim().chars().take(150).collect::<String>();
+                        results.push(serde_json::json!({
+                            "note_path": rel, "title": title, "snippet": snippet, "relevance": 1.0
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    search_dir(&vault.join("Notebooks"), vault, &query_lower, &mut results, limit);
+    axum::Json(serde_json::json!({"results": results}))
+}
+
+// ─── API: Vault Asset ───────────────────────────────────────
+
+async fn vault_asset_handler(
+    State(state): State<Arc<WsState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let path_param = params.get("path").cloned().unwrap_or_default();
+    if path_param.is_empty() || path_param.contains("..") {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [("content-type", "text/plain")],
+            "bad path".to_string(),
+        );
+    }
+
+    let full_path = state.vault_path.join(&path_param);
+    match std::fs::read(&full_path) {
+        Ok(data) => {
+            let mime = match full_path.extension().and_then(|e| e.to_str()) {
+                Some("png") => "image/png",
+                Some("jpg" | "jpeg") => "image/jpeg",
+                Some("gif") => "image/gif",
+                Some("svg") => "image/svg+xml",
+                Some("pdf") => "application/pdf",
+                Some("md") => "text/markdown",
+                _ => "application/octet-stream",
+            };
+            (axum::http::StatusCode::OK, [("content-type", mime)], unsafe { String::from_utf8_unchecked(data) })
+        }
+        Err(_) => (axum::http::StatusCode::NOT_FOUND, [("content-type", "text/plain")], "not found".to_string()),
+    }
 }
 
 // ─── API: WhatsApp Message (bridge endpoint) ────────────────

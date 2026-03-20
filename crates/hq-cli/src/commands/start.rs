@@ -1684,6 +1684,17 @@ async fn run_cli_harness(
 
         // Try to parse as JSON (NDJSON)
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+            let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Skip "result" if we already have text from "assistant" — avoids duplicates
+            if msg_type == "result" && !accumulated.is_empty() {
+                // Still extract session_id from result
+                if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
+                    found_session_id = Some(sid.to_string());
+                }
+                continue;
+            }
+
             // Extract text
             if let Some(text) = extract_text_from_ndjson(&json) {
                 accumulated.push_str(&text);
@@ -1762,6 +1773,16 @@ where
         let mut got_new_text = false;
 
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+            let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Skip "result" if we already have text from "assistant"
+            if msg_type == "result" && !accumulated.is_empty() {
+                if let Some(sid) = json.get("session_id").and_then(|v| v.as_str()) {
+                    found_session_id = Some(sid.to_string());
+                }
+                continue;
+            }
+
             if let Some(text) = extract_text_from_ndjson(&json) {
                 accumulated.push_str(&text);
                 got_new_text = true;
@@ -2048,7 +2069,7 @@ async fn run_discord_relay(
                 .send_message(
                     &ctx.http,
                     CreateMessage::new().content(
-                        &format!("Thinking via **{}**\u{2026} \u{258D}", harness_display(&harness))
+                        "Thinking\u{2026} \u{258D}"
                     ),
                 )
                 .await;
@@ -2173,8 +2194,8 @@ async fn run_discord_relay(
                                         &ctx.http,
                                         EditMessage::new().content(
                                             &format!(
-                                                "Running **{}**{} \u{258D}",
-                                                harness_display(&harness), dots
+                                                "Thinking\u{2026}{} \u{258D}",
+                                                dots
                                             )
                                         ),
                                     )
@@ -2579,7 +2600,7 @@ async fn run_telegram_relay(
             let placeholder_result = bot
                 .send_message(
                     msg.chat.id,
-                    format!("Thinking via {}... \u{258D}", harness_display(&harness)),
+                    "Thinking\u{2026} \u{258D}".to_string(),
                 )
                 .await;
 
@@ -2691,7 +2712,7 @@ async fn run_telegram_relay(
                                     .edit_message_text(
                                         msg.chat.id,
                                         placeholder_id,
-                                        &format!("Running {}... \u{258D}", harness_display(&harness)),
+                                        "Thinking\u{2026} \u{258D}",
                                     )
                                     .await;
                             }

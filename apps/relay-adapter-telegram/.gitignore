@@ -1,5 +1,0 @@
-.telegram-state.json
-.telegram-harness-sessions.json
-.media-temp/
-.env.local
-node_modules/

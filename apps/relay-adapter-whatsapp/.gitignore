@@ -1,8 +1,0 @@
-# WhatsApp runtime state — contains session IDs and harness routing state.
-# These are generated at runtime and must NOT be committed.
-.whatsapp-state.json
-.whatsapp-harness-sessions.json
-
-# Baileys auth credentials — contains cryptographic keys for WhatsApp login.
-auth_info/
-auth_info_baileys/

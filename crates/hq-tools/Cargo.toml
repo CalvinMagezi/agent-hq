@@ -1,0 +1,29 @@
+[package]
+name = "hq-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hq-core = { workspace = true }
+hq-vault = { workspace = true }
+hq-db = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+gray_matter = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+dirs = { workspace = true }
+futures = { workspace = true }
+base64 = "0.22"
+regex-lite = "0.1"
+urlencoding = "2"
+rusqlite = { workspace = true }

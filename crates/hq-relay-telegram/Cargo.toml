@@ -1,0 +1,16 @@
+[package]
+name = "hq-relay-telegram"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hq-core = { workspace = true }
+hq-relay = { workspace = true }
+teloxide = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }

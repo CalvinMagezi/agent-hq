@@ -1,0 +1,24 @@
+{
+  "context": {
+    "fileName": ["GEMINI.md", "CLAUDE.md"]
+  },
+  "tools": {
+    "summarizeToolOutput": {
+      "run_shell_command": { "tokenBudget": 2000 },
+      "read_file": { "tokenBudget": 4000 }
+    }
+  },
+  "maxSessionTurns": 30,
+  "shell": {
+    "inactivityTimeout": 600
+  },
+  "compressionThreshold": 0.3,
+  "mcpServers": {
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "@mauricio.wolff/mcp-obsidian", "/Users/calvinmagezi/Documents/GitHub/agent-hq/.vault"],
+      "description": "Obsidian vault access (notes, jobs, delegation, memories)",
+      "trust": true
+    }
+  }
+}

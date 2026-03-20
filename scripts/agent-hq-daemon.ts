@@ -964,6 +964,57 @@ const tasks: {
       fn: planArchival,
       lastRun: 0,
     },
+    {
+      name: "hq-morning-brief",
+      intervalMs: 60 * 60 * 1000, // checked every hour
+      fn: async () => {
+        // Fire at 7 AM EAT
+        const nowHour = new Date().getHours();
+        if (nowHour !== 7) return;
+
+        const todayKey = new Date().toISOString().slice(0, 10);
+        const flagPath = path.join(VAULT_PATH, "_embeddings", `.hq-morning-brief-${todayKey}`);
+        if (fs.existsSync(flagPath)) return;
+
+        console.log("[hq-morning-brief] 7 AM — generating vault morning brief...");
+        fs.writeFileSync(flagPath, new Date().toISOString());
+
+        try {
+          const { generateMorningBrief } = await import("../apps/agent/lib/morningBrief.js");
+          const briefPath = await generateMorningBrief({
+            vaultPath: VAULT_PATH,
+            geminiApiKey: process.env.GEMINI_API_KEY,
+            anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+            openrouterApiKey: process.env.OPENROUTER_API_KEY,
+            ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
+          });
+          console.log(`[hq-morning-brief] Brief written to ${briefPath}`);
+          logActivity("hq-morning-brief", `Morning brief generated: ${briefPath}`);
+        } catch (err) {
+          console.error("[hq-morning-brief] Failed:", err);
+          fs.rmSync(flagPath, { force: true });
+        }
+      },
+      lastRun: 0,
+    },
+    {
+      name: "hq-inbox-scan",
+      intervalMs: 30 * 60 * 1000, // every 30 minutes
+      fn: async () => {
+        try {
+          const { scanInbox } = await import("../apps/agent/lib/inbox.js");
+          const items = scanInbox(VAULT_PATH);
+          const urgent = items.filter(i => i.urgency === "now");
+          if (urgent.length > 0) {
+            console.log(`[hq-inbox] ${urgent.length} urgent item(s) found`);
+            logActivity("hq-inbox-scan", `${items.length} items (${urgent.length} urgent)`);
+          }
+        } catch (err) {
+          console.warn("[hq-inbox] Scan failed:", err instanceof Error ? err.message : err);
+        }
+      },
+      lastRun: 0,
+    },
   ];
 
 

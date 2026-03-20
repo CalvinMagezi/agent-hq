@@ -15,7 +15,7 @@ import { execSync } from "child_process";
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from "fs";
 import { dirname, join } from "path";
 
-export type LocalHarnessType = "claude-code" | "opencode" | "gemini-cli" | "codex-cli";
+export type LocalHarnessType = "claude-code" | "opencode" | "gemini-cli" | "codex-cli" | "qwen-code" | "mistral-vibe" | "kilo-code" | "hq";
 
 /** Resolve a CLI command to its full path for use in launchd/cron contexts where PATH is limited. */
 function resolveCommand(name: string): string {
@@ -82,6 +82,10 @@ export class LocalHarness {
     "opencode": { ...BLANK_SESSION },
     "gemini-cli": { ...BLANK_SESSION },
     "codex-cli": { ...BLANK_SESSION },
+    "qwen-code": { ...BLANK_SESSION },
+    "mistral-vibe": { ...BLANK_SESSION },
+    "kilo-code": { ...BLANK_SESSION },
+    "hq": { ...BLANK_SESSION },
   };
   private stateFile: string;
   private pidFile: string; // tracks active child PID for orphan reaping
@@ -224,6 +228,10 @@ export class LocalHarness {
         case "opencode": result = await this.runOpenCode(prompt, onToken); break;
         case "gemini-cli": result = await this.runGemini(prompt, onToken); break;
         case "codex-cli": result = await this.runCodex(prompt, onToken); break;
+        case "qwen-code": result = await this.runQwen(prompt, onToken); break;
+        case "mistral-vibe": result = await this.runVibe(prompt, onToken); break;
+        case "kilo-code": result = await this.runKilo(prompt, onToken); break;
+        case "hq": result = await this.runHQ(prompt, onToken); break;
       }
       // Mark idle on success
       this.sessions[harness] = {
@@ -512,6 +520,407 @@ export class LocalHarness {
     }
 
     return text.trim() || "No response from Codex.";
+  }
+
+  private async runQwen(prompt: string, onToken?: (token: string) => void): Promise<string> {
+    const session = this.sessions["qwen-code"];
+    const age = session.lastActivity
+      ? Date.now() - new Date(session.lastActivity).getTime()
+      : Infinity;
+    const hasLiveSession = session.sessionId && age < SESSION_TTL_MS;
+
+    const cmd = [
+      resolveCommand("qwen"),
+      "--output-format", "stream-json",
+      "--include-partial-messages",
+      "--yolo",
+    ];
+    if (hasLiveSession && session.sessionId) {
+      cmd.push("--continue", session.sessionId);
+    }
+    cmd.push("-p", prompt);
+
+    const proc = spawn({
+      cmd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
+    });
+    this.writePidFile(proc.pid, "qwen-code");
+    this.activePids.set("qwen-code", proc.pid);
+    this.activeKills.set("qwen-code", () => killProcessTree(proc.pid));
+
+    let text = "";
+    let newSessionId: string | null = null;
+    const stderrPromise = new Response(proc.stderr).text();
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed) as Record<string, any>;
+            // Qwen uses session_id in NDJSON just like Claude
+            if (typeof msg.session_id === "string") newSessionId = msg.session_id;
+
+            if (msg.type === "assistant") {
+              const content = msg.message?.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === "text" && block.text) {
+                    text += block.text;
+                    onToken?.(block.text);
+                  }
+                }
+              }
+            } else if (msg.type === "result") {
+              if (typeof msg.result === "string" && msg.result && !text) {
+                text = msg.result;
+                onToken?.(text);
+              }
+            }
+          } catch { /* non-JSON */ }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const exitCode = await proc.exited;
+    const stderrText = await stderrPromise;
+
+    if (stderrText.trim()) {
+      console.warn(`[local-harness] Qwen stderr: ${stderrText.trim().substring(0, 500)}`);
+    }
+    if (exitCode !== 0 && !text) {
+      console.error(`[local-harness] Qwen exited with code ${exitCode}`);
+    }
+
+    if (newSessionId) {
+      this.sessions["qwen-code"] = {
+        sessionId: newSessionId,
+        lastActivity: new Date().toISOString(),
+      };
+      this.save();
+    }
+
+    return text.trim() || "No response from Qwen.";
+  }
+
+  private async runVibe(prompt: string, onToken?: (token: string) => void): Promise<string> {
+    const session = this.sessions["mistral-vibe"];
+    const age = session.lastActivity
+      ? Date.now() - new Date(session.lastActivity).getTime()
+      : Infinity;
+    const hasLiveSession = session.sessionId && age < SESSION_TTL_MS;
+
+    const cmd = [
+      resolveCommand("vibe"),
+      "--prompt", prompt,
+      "--output", "streaming",
+      "--max-turns", "30",
+      "--max-price", "0.50",
+    ];
+    if (hasLiveSession && session.sessionId) {
+      cmd.push("--resume", session.sessionId);
+    }
+
+    const proc = spawn({
+      cmd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HQ_BROWSER_PORT: process.env.HQ_BROWSER_PORT ?? "19200" },
+    });
+    this.writePidFile(proc.pid, "mistral-vibe");
+    this.activePids.set("mistral-vibe", proc.pid);
+    this.activeKills.set("mistral-vibe", () => killProcessTree(proc.pid));
+
+    let text = "";
+    let newSessionId: string | null = null;
+    const stderrPromise = new Response(proc.stderr).text();
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed) as Record<string, any>;
+            // Capture session ID for resume
+            if (typeof msg.session_id === "string") newSessionId = msg.session_id;
+
+            if (msg.type === "assistant" || msg.type === "message") {
+              const content = msg.message?.content ?? msg.content;
+              if (typeof content === "string") {
+                text += content;
+                onToken?.(content);
+              } else if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === "text" && block.text) {
+                    text += block.text;
+                    onToken?.(block.text);
+                  }
+                }
+              }
+            } else if (msg.type === "result") {
+              if (typeof msg.result === "string" && msg.result && !text) {
+                text = msg.result;
+                onToken?.(text);
+              }
+            }
+          } catch { /* non-JSON */ }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const exitCode = await proc.exited;
+    const stderrText = await stderrPromise;
+
+    if (stderrText.trim()) {
+      console.warn(`[local-harness] Vibe stderr: ${stderrText.trim().substring(0, 500)}`);
+    }
+    if (exitCode !== 0 && !text) {
+      console.error(`[local-harness] Vibe exited with code ${exitCode}`);
+    }
+
+    if (newSessionId) {
+      this.sessions["mistral-vibe"] = {
+        sessionId: newSessionId,
+        lastActivity: new Date().toISOString(),
+      };
+      this.save();
+    }
+
+    return text.trim() || "No response from Vibe.";
+  }
+
+  /**
+   * Kilo Code CLI — multi-model AI coding agent.
+   * Uses `kilo run` with --format json for NDJSON output, --auto for auto-approve.
+   * Supports session resume via --session <id>.
+   */
+  private async runKilo(prompt: string, onToken?: (token: string) => void): Promise<string> {
+    const session = this.sessions["kilo-code"];
+    const age = session.lastActivity
+      ? Date.now() - new Date(session.lastActivity).getTime()
+      : Infinity;
+    const hasLiveSession = session.sessionId && age < SESSION_TTL_MS;
+
+    const cmd = [
+      resolveCommand("kilo"),
+      "run",
+      "--format", "json",
+      "--auto",
+    ];
+    if (hasLiveSession && session.sessionId) {
+      cmd.push("--session", session.sessionId);
+    }
+    cmd.push(prompt);
+
+    const proc = spawn({
+      cmd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    this.writePidFile(proc.pid, "kilo-code");
+    this.activePids.set("kilo-code", proc.pid);
+    this.activeKills.set("kilo-code", () => killProcessTree(proc.pid));
+
+    let text = "";
+    let newSessionId: string | null = null;
+    const stderrPromise = new Response(proc.stderr).text();
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed) as Record<string, any>;
+            // Capture session ID for resume
+            if (typeof msg.session_id === "string") newSessionId = msg.session_id;
+            if (typeof msg.sessionId === "string") newSessionId = msg.sessionId;
+
+            if (msg.type === "assistant" || msg.type === "message") {
+              const content = msg.message?.content ?? msg.content;
+              if (typeof content === "string") {
+                text += content;
+                onToken?.(content);
+              } else if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === "text" && block.text) {
+                    text += block.text;
+                    onToken?.(block.text);
+                  }
+                }
+              }
+            } else if (msg.type === "result") {
+              if (typeof msg.result === "string" && msg.result && !text) {
+                text = msg.result;
+                onToken?.(text);
+              }
+            }
+          } catch { /* non-JSON line */ }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const exitCode = await proc.exited;
+    const stderrText = await stderrPromise;
+
+    if (stderrText.trim()) {
+      console.warn(`[local-harness] Kilo stderr: ${stderrText.trim().substring(0, 500)}`);
+    }
+    if (exitCode !== 0 && !text) {
+      console.error(`[local-harness] Kilo exited with code ${exitCode}`);
+    }
+
+    if (newSessionId) {
+      this.sessions["kilo-code"] = {
+        sessionId: newSessionId,
+        lastActivity: new Date().toISOString(),
+      };
+      this.save();
+    }
+
+    return text.trim() || "No response from Kilo.";
+  }
+
+  /**
+   * HQ Agent — Agent-HQ's own CLI harness.
+   * Outputs NDJSON matching Claude Code format, supports session resume.
+   */
+  private async runHQ(prompt: string, onToken?: (token: string) => void): Promise<string> {
+    const session = this.sessions["hq"];
+    const age = session?.lastActivity
+      ? Date.now() - new Date(session.lastActivity).getTime()
+      : Infinity;
+    const hasLiveSession = session?.sessionId && age < SESSION_TTL_MS;
+
+    // Resolve hq-run.ts path relative to monorepo root
+    const monorepoRoot = join(dirname(new URL(import.meta.url).pathname), "..", "..", "..");
+    const hqRunPath = join(monorepoRoot, "scripts", "hq-run.ts");
+
+    const cmd = [
+      resolveCommand("bun"), "run", hqRunPath,
+      "--prompt", prompt,
+      "--output-format", "stream-json",
+    ];
+    if (hasLiveSession && session.sessionId) {
+      cmd.push("--resume", session.sessionId);
+    }
+
+    const proc = spawn({
+      cmd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    this.writePidFile(proc.pid, "hq");
+    this.activePids.set("hq", proc.pid);
+    this.activeKills.set("hq", () => killProcessTree(proc.pid));
+
+    let text = "";
+    let newSessionId: string | null = null;
+    const stderrPromise = new Response(proc.stderr).text();
+    const reader = proc.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const msg = JSON.parse(trimmed) as Record<string, any>;
+            // Capture session ID for resume
+            if (typeof msg.session_id === "string") newSessionId = msg.session_id;
+
+            if (msg.type === "assistant") {
+              const content = msg.message?.content;
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block.type === "text" && block.text) {
+                    text += block.text;
+                    onToken?.(block.text);
+                  }
+                }
+              }
+            }
+          } catch { /* non-JSON */ }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const exitCode = await proc.exited;
+    const stderrText = await stderrPromise;
+
+    if (stderrText.trim()) {
+      console.warn(`[local-harness] HQ stderr: ${stderrText.trim().substring(0, 500)}`);
+    }
+    if (exitCode !== 0 && !text) {
+      console.error(`[local-harness] HQ exited with code ${exitCode}`);
+    }
+
+    if (newSessionId) {
+      this.sessions["hq"] = {
+        sessionId: newSessionId,
+        lastActivity: new Date().toISOString(),
+      };
+      this.save();
+    }
+
+    return text.trim() || "No response from HQ.";
   }
 
   private exec(cmd: string[], harnessType?: LocalHarnessType): Promise<{ stdout: string; stderr: string }> {

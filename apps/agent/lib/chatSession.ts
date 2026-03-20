@@ -5,12 +5,12 @@
  */
 
 import {
-    createAgentSession,
+    createCompatSession,
     createBashTool,
-    SettingsManager,
-    type AgentSessionEvent,
-} from "@mariozechner/pi-coding-agent";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+    resolveProvider,
+    type CompatSessionEvent as AgentSessionEvent,
+    type HQAgentTool as AgentTool,
+} from "@repo/agent-core";
 import { Type } from "@sinclair/typebox";
 import * as fs from "fs";
 import { createDispatchJobTool, createCheckJobStatusTool, type OnJobDispatched } from "./chatTools.js";
@@ -339,7 +339,7 @@ export class ChatSessionManager {
             `### Code Mode (Graph-RAG superpowers)`,
             `7. **get_blast_radius** — Before touching any file, find every file that imports it (blast radius)`,
             `8. **get_dependency_context** — See what a file imports + what those files export`,
-            `9. **map_repository** — Parse a TypeScript repo with ts-morph → generate Obsidian dependency graph`,
+            `9. **map_repository** — Parse a TypeScript repo with ts-morph → generate vault dependency graph`,
             ``,
             `## CODE MODE PROTOCOL:`,
             `When asked to modify code, ALWAYS:`,
@@ -399,7 +399,7 @@ export class ChatSessionManager {
             openrouterApiKey: config.openrouterApiKey,
         });
 
-        const settingsManager = SettingsManager.inMemory({
+        const settingsConfig = {
             compaction: {
                 enabled: true,
                 reserveTokens: 2000,
@@ -411,26 +411,30 @@ export class ChatSessionManager {
                 baseDelayMs: 500,
                 maxDelayMs: 10_000,
             },
-        });
+        };
 
         const tools = this.buildTools();
-        const { session } = await createAgentSession({
+        const provider = resolveProvider(model, {
+            anthropicApiKey: config.anthropicApiKey,
+            geminiApiKey: config.geminiApiKey,
+            openrouterApiKey: config.openrouterApiKey,
+            ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
+        });
+        const { session } = createCompatSession({
             tools: tools as any,
             model,
-            settingsManager,
-        });
+            settingsManager: settingsConfig,
+        }, provider);
 
         this.session = session;
         this.messageCount = 0;
         this.isFirstMessage = true;
 
-        // Verify tools are accessible in session
+        // Log tools registered in session
         try {
-            const activeTools = session.getActiveToolNames?.() || [];
             logger.info("Chat session created", {
                 model: config.modelId,
                 registeredTools: tools.map(t => t.name),
-                activeTools: Array.isArray(activeTools) ? activeTools.map((t: any) => t.name || t) : "unknown",
             });
         } catch {
             logger.info("Chat session created", { model: config.modelId, tools: tools.length });

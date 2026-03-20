@@ -6,7 +6,7 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { HQAgentTool as AgentTool } from "@repo/agent-core";
 import { getBacklinks, getOutboundLinks, getFileExports } from "@repo/vault-client/graph";
 import { spawn } from "child_process";
 import * as fs from "fs";
@@ -102,7 +102,7 @@ const MapRepositorySchema = Type.Object({
 export function createMapRepositoryTool(vaultPath: string): AgentTool<typeof MapRepositorySchema> {
     return {
         name: "map_repository",
-        description: "Parse a TypeScript repository with ts-morph and generate Obsidian Index Cards into the vault. Run this once per repo (or after major structural changes) to build the dependency graph.",
+        description: "Parse a TypeScript repository with ts-morph and generate Vault Index Cards into the vault. Run this once per repo (or after major structural changes) to build the dependency graph.",
         parameters: MapRepositorySchema,
         label: "Map Repository",
         execute: async (_toolCallId, args) => {

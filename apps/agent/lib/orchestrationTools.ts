@@ -3,7 +3,7 @@
  * These tools allow the agent to break down high-level goals into DAG-based task plans.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { HQAgentTool as AgentTool } from "@repo/agent-core";
 import { Type } from "@sinclair/typebox";
 import { logger } from "./logger.js";
 
@@ -96,7 +96,7 @@ The orchestrator automatically:
                 await onDispatch(args, jobId);
 
                 // Build success response
-                const taskList = args.tasks.map((t, i) =>
+                const taskList = args.tasks.map((t: any, i: number) =>
                     `${i + 1}. **${t.id}**: ${t.description}\n   Command: \`${t.command}\`\n   Dependencies: ${t.dependencies.length > 0 ? t.dependencies.join(", ") : "none"}`
                 ).join("\n\n");
 
@@ -107,7 +107,7 @@ The orchestrator automatically:
                     }],
                     details: {
                         taskCount: args.tasks.length,
-                        tasks: args.tasks.map(t => ({ id: t.id, description: t.description }))
+                        tasks: args.tasks.map((t: any) => ({ id: t.id, description: t.description }))
                     }
                 };
             } catch (err: any) {

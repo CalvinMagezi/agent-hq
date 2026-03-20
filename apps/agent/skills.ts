@@ -7,7 +7,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Type } from "@sinclair/typebox";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { HQAgentTool as AgentTool } from "@repo/agent-core";
 import {
     SKILLS_DIR,
     getAutoLoadedSkillContent,

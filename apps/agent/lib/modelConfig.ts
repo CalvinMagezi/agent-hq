@@ -10,7 +10,6 @@
  * - OpenRouter (via OPENROUTER_API_KEY, fallback for all models)
  */
 
-import { getModel } from "@mariozechner/pi-ai";
 export { getFallbackChain } from "./modelFallback.js";
 
 export interface BuildModelConfigOptions {
@@ -150,14 +149,7 @@ export function buildModelConfig(options: BuildModelConfigOptions): any {
     // ── Google direct path ──────────────────────────────────────────
     if (isGeminiModel(modelId) && geminiApiKey) {
         const bareId = stripGooglePrefix(modelId);
-
-        // Try the Pi SDK built-in registry first — it has exact specs
-        const registryModel = getModel("google", bareId as any);
-        if (registryModel) {
-            return registryModel;
-        }
-
-        // Unknown Gemini model — construct a sensible default
+        const specs = getModelSpecs(bareId);
         return {
             id: bareId,
             name: bareId,
@@ -167,22 +159,15 @@ export function buildModelConfig(options: BuildModelConfigOptions): any {
             reasoning: bareId.includes("pro") || bareId.includes("thinking"),
             input: ["text", "image"],
             cost: { input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 1048576,
-            maxTokens: 65536,
+            contextWindow: specs?.contextWindow ?? 1048576,
+            maxTokens: specs?.maxOutputTokens ?? 65536,
         };
     }
 
     // ── Anthropic direct path ──────────────────────────────────────
     if (isAnthropicModel(modelId) && anthropicApiKey) {
         const bareId = stripAnthropicPrefix(modelId);
-
-        // Try the Pi SDK built-in registry first
-        const registryModel = getModel("anthropic", bareId as any);
-        if (registryModel) {
-            return registryModel;
-        }
-
-        // Unknown Anthropic model — construct a sensible default
+        const specs = getModelSpecs(bareId);
         return {
             id: bareId,
             name: bareId,
@@ -192,8 +177,8 @@ export function buildModelConfig(options: BuildModelConfigOptions): any {
             reasoning: bareId.includes("opus"),
             input: ["text", "image"],
             cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-            contextWindow: 200000,
-            maxTokens: 16000,
+            contextWindow: specs?.contextWindow ?? 200000,
+            maxTokens: specs?.maxOutputTokens ?? 16000,
         };
     }
 

@@ -15,8 +15,9 @@
 import * as fs from "fs";
 import * as path from "path";
 import { Type } from "@sinclair/typebox";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { HQAgentTool as AgentTool } from "@repo/agent-core";
 import { VaultClient } from "@repo/vault-client";
+import { loadLessons } from "./reflection.js";
 import type { SearchResult, SystemContext } from "@repo/vault-client";
 import type { AgentRole } from "./agentRoles.js";
 import { buildRolePromptSection } from "./agentRoles.js";
@@ -222,7 +223,7 @@ function getTaskTypeGuidance(taskType: TaskType): { steps: string; dod: string }
         case "coding":
             return {
                 steps: [
-                    "[CODE MODE PROTOCOL] CALL `mcp:map_repository` if the repository isn't mapped to Obsidian yet",
+                    "[CODE MODE PROTOCOL] CALL `mcp:map_repository` if the repository isn't mapped yet",
                     "[CODE MODE PROTOCOL] CALL `mcp:get_blast_radius` on target files FIRST to understand breakages",
                     "[CODE MODE PROTOCOL] CALL `mcp:get_dependency_context` to understand imports and dependencies",
                     "Read and understand the existing code in the relevant files",
@@ -468,6 +469,15 @@ export class PromptBuilder {
             contextParts.push(`### Agent Memory (Relevant)\n${memorySection}`);
         }
 
+        // Lessons from prior tasks (continuous improvement)
+        if (request.executionMode !== "quick") {
+            const lessons = loadLessons(this.vaultPath, 10);
+            if (lessons) {
+                contextParts.push(`### Lessons from Prior Tasks\n${lessons}`);
+                contextSources.push("LESSONS.md");
+            }
+        }
+
         // Current Events (skip in quick mode)
         if (request.executionMode !== "quick") {
             const briefsPath = path.join(this.vaultPath, "_system/NEWS-BRIEFS.md");
@@ -494,7 +504,12 @@ export class PromptBuilder {
         sections.push(`## Definition of Done\n${guidance.dod}`);
 
         // Philosophy 5: Context Efficiency — constraints are compact
-        sections.push(`## Constraints\n${harnessConstraints}`);
+        const guardrails = [
+            harnessConstraints,
+            "- **SELF-MODIFICATION BAN**: NEVER write code, patches, or generated files into Agent-HQ's own codebase (apps/, packages/, scripts/, plugins/). All agent output goes to .vault/ only.",
+            "- **NO PERSONAL FILES IN REPO**: NEVER save spreadsheets (.xlsx, .csv), documents (.docx, .pdf, .pptx), downloads, images, or non-source artifacts into the repo tree. Write to .vault/Notebooks/Artifacts/ or ask the user for a destination outside the repo.",
+        ].join("\n");
+        sections.push(`## Constraints\n${guardrails}`);
 
         // Agent Role (if specified) — injects role identity, behavior, and output format
         if (request.role) {

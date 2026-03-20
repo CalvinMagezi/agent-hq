@@ -5,7 +5,7 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { HQAgentTool as AgentTool } from "@repo/agent-core";
 import { logger } from "./logger.js";
 
 /** Callback fired when a job is dispatched, so the Discord bot can track it */

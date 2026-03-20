@@ -4,8 +4,7 @@
   "private": true,
   "workspaces": [
     "apps/*",
-    "packages/*",
-    "plugins/*"
+    "packages/*"
   ],
   "scripts": {
     "prepare": "git config core.hooksPath scripts/hooks",
@@ -33,10 +32,8 @@
     "whatsapp": "bun --cwd apps/relay-adapter-whatsapp start",
     "telegram": "bun --cwd apps/relay-adapter-telegram start",
     "googlechat": "bun --cwd apps/relay-adapter-googlechat start",
-    "plugin:build": "cd plugins/obsidian-vault-sync && bun run build",
-    "plugin:install": "bash scripts/install-obsidian-plugin.sh",
-    "icloud-bridge": "bun run scripts/vault-icloud-bridge.ts",
     "hq": "bun run scripts/hq.ts",
+    "hq:run": "bun run scripts/hq-run.ts",
     "tasks:monitor": "bun run scripts/monitor-scheduled-tasks.ts",
     "tasks:follow": "bun run scripts/monitor-scheduled-tasks.ts --follow",
     "vault-pwa": "bun --cwd apps/hq-control-center run dev",

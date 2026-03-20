@@ -5,8 +5,8 @@
  * relay bot can delegate to the right harness automatically.
  */
 
-export type OrchestrationIntent = "workspace" | "coding" | "general";
-export type TargetHarness = "gemini-cli" | "claude-code" | "opencode" | "any";
+export type OrchestrationIntent = "workspace" | "coding" | "orchestration" | "general";
+export type TargetHarness = "gemini-cli" | "claude-code" | "opencode" | "qwen-code" | "mistral-vibe" | "hq" | "any";
 export type DetectedRole = "workspace" | "coder" | "researcher" | "reviewer" | "planner" | "devops";
 
 const WORKSPACE_PATTERNS = [
@@ -53,12 +53,30 @@ const CODING_PATTERNS = [
   /\bbranch\b.*\bgit\b|\bgit\b.*\bbranch\b/i,
 ];
 
+// HQ-specific patterns — vault context, task management, orchestration
+const HQ_PATTERNS = [
+  /\b(vault|memory|context|brief|inbox|status|project)\b.*\b(search|find|check|show|list|read|scan)\b/i,
+  /\b(search|find|check|show|list|read|scan)\b.*\b(vault|memory|context|brief|inbox|project)\b/i,
+  /\bwhat should (i|we) work on\b/i,
+  /\bmorning brief\b/i,
+  /\b(summarize|recap|review)\b.*\b(today|yesterday|week|progress)\b/i,
+  /\btask\b.*\b(status|list|pending|create)\b/i,
+  /\b(pinned|recent)\b.*\b(notes?|context)\b/i,
+];
+
 export function detectIntent(message: string): {
   intent: OrchestrationIntent;
   harness: TargetHarness;
   role: DetectedRole;
 } {
   const lower = message.toLowerCase();
+
+  // HQ orchestration tasks get routed to HQ agent
+  for (const pattern of HQ_PATTERNS) {
+    if (pattern.test(lower)) {
+      return { intent: "orchestration", harness: "hq", role: "planner" };
+    }
+  }
 
   for (const pattern of WORKSPACE_PATTERNS) {
     if (pattern.test(lower)) {

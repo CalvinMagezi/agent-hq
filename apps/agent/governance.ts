@@ -1,5 +1,4 @@
-import type { AgentTool } from "@mariozechner/pi-agent-core";
-import type { BashSpawnContext } from "@mariozechner/pi-coding-agent";
+import type { HQAgentTool as AgentTool, BashSpawnContext } from "@repo/agent-core";
 import { analyzeBashCommand } from "./lib/bashAnalyzer.js";
 
 export enum SecurityProfile {

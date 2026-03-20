@@ -9,21 +9,13 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { TSchema, Static } from "@sinclair/typebox";
 import type { ToolRegistry, HQContext } from "./registry.js";
+import type { HQAgentTool } from "@repo/agent-core";
 
-// Minimal AgentTool shape — structurally compatible with Pi SDK AgentTool
-// Defined locally so hq-tools has no Pi SDK dependency
-export interface AgentToolShape<S extends TSchema> {
-  name: string;
-  description: string;
-  parameters: S;
-  label: string;
-  execute: (
-    toolCallId: string,
-    args: Static<S>
-  ) => Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown> }>;
-}
+// Re-export the canonical tool type from agent-core for backward compat
+export type { HQAgentTool };
+/** @deprecated Use HQAgentTool from @repo/agent-core instead */
+export type AgentToolShape<S = any> = HQAgentTool<S>;
 
 const HQDiscoverSchema = Type.Object({
   query: Type.String({

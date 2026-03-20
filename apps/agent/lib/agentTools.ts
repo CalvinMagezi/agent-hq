@@ -4,7 +4,7 @@
  * These tools interact with the agent's local state and vault adapter.
  */
 
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+import type { HQAgentTool as AgentTool } from "@repo/agent-core";
 import { Type } from "@sinclair/typebox";
 import * as fs from "fs";
 import type { AgentAdapter } from "@repo/vault-client/agent-adapter";

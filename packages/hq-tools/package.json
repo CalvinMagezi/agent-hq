@@ -20,7 +20,9 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@repo/agent-core": "workspace:*",
     "@repo/env-loader": "workspace:*",
+    "@repo/webmail-mcp": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@resvg/resvg-js": "^2.6.0",
     "@sinclair/typebox": "^0.32.0",

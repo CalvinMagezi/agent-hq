@@ -54,38 +54,50 @@ export function routeMessage(
     return { path: "delegation", harness, role };
   }
 
-  return { path: "chat" };
+  // General intent → route to HQ as the default harness
+  return { path: "local", harness: "hq" };
 }
 
 // ─── Harness label helpers ─────────────────────────────────────────
 
 export const HARNESS_ALIASES: Record<string, LocalHarnessType> = {
-  claude:       "claude-code",
-  "claude-code": "claude-code",
-  opencode:     "opencode",
-  oc:           "opencode",
-  gemini:       "gemini-cli",
-  "gemini-cli": "gemini-cli",
-  codex:        "codex-cli",
-  "codex-cli":  "codex-cli",
+  claude:         "claude-code",
+  "claude-code":  "claude-code",
+  opencode:       "opencode",
+  oc:             "opencode",
+  gemini:         "gemini-cli",
+  "gemini-cli":   "gemini-cli",
+  codex:          "codex-cli",
+  "codex-cli":    "codex-cli",
+  qwen:           "qwen-code",
+  "qwen-code":    "qwen-code",
+  vibe:           "mistral-vibe",
+  mistral:        "mistral-vibe",
+  "mistral-vibe": "mistral-vibe",
+  hq:             "hq",
 };
 
 export function harnessLabel(h: ActiveHarness): string {
   switch (h) {
-    case "claude-code": return "Claude Code";
-    case "opencode":    return "OpenCode";
-    case "gemini-cli":  return "Gemini CLI";
-    case "codex-cli":   return "Codex CLI";
-    case "auto":        return "Auto (intent-based)";
-    default:            return h;
+    case "claude-code":   return "Claude Code";
+    case "opencode":      return "OpenCode";
+    case "gemini-cli":    return "Gemini CLI";
+    case "codex-cli":     return "Codex CLI";
+    case "qwen-code":     return "Qwen Code";
+    case "mistral-vibe":  return "Mistral Vibe";
+    case "hq":            return "HQ Agent";
+    case "auto":          return "Auto (intent-based)";
+    default:              return h;
   }
 }
 
 export function delegationLabel(harness: string): string {
   switch (harness) {
-    case "gemini-cli":  return "Gemini CLI";
-    case "claude-code": return "Claude Code";
-    case "opencode":    return "OpenCode";
-    default:            return "HQ";
+    case "gemini-cli":    return "Gemini CLI";
+    case "claude-code":   return "Claude Code";
+    case "opencode":      return "OpenCode";
+    case "qwen-code":     return "Qwen Code";
+    case "mistral-vibe":  return "Mistral Vibe";
+    default:              return "HQ";
   }
 }

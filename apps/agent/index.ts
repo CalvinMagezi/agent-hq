@@ -1,11 +1,11 @@
 import {
-    createAgentSession,
+    createCompatSession,
     createCodingTools,
     createBashTool,
-    type AgentSessionEvent,
-    SettingsManager
-} from "@mariozechner/pi-coding-agent";
-import type { AgentTool } from "@mariozechner/pi-agent-core";
+    resolveProvider,
+    type CompatSessionEvent as AgentSessionEvent,
+    type HQAgentTool as AgentTool,
+} from "@repo/agent-core";
 import { Type } from "@sinclair/typebox";
 import {
     createLocalContextTool,
@@ -38,6 +38,7 @@ import { getFallbackChain, executeWithFallback, classifyError } from "./lib/mode
 import { createDefaultRegistry, createHQGatewayTools } from "@repo/hq-tools";
 import { SearchClient } from "@repo/vault-client/search";
 import { BudgetGuard } from "@repo/vault-client";
+import { generateReflection, storeReflection } from "./lib/reflection.js";
 
 
 // Load environment variables
@@ -671,7 +672,7 @@ async function handleJob(job: any) {
 
         const governedTools = rawTools.map(tool => guardian.govern(tool));
 
-        const settingsManager = SettingsManager.inMemory({
+        const settingsConfig = {
             compaction: {
                 enabled: true,
                 reserveTokens: 4000,
@@ -683,7 +684,7 @@ async function handleJob(job: any) {
                 baseDelayMs: 500,
                 maxDelayMs: 30_000
             }
-        });
+        };
 
         // Determine Model — per-job override takes priority, then env default
         const effectiveModelId = job.modelOverride || MODEL_ID;
@@ -709,17 +710,25 @@ async function handleJob(job: any) {
             logger.info("Job model override", { jobId: job._id, model: job.modelOverride, provider: model.provider });
         }
 
+        // Resolve LLM provider from model config
+        const provider = resolveProvider(model, {
+            anthropicApiKey: ANTHROPIC_API_KEY,
+            geminiApiKey: GEMINI_API_KEY,
+            openrouterApiKey: OPENROUTER_API_KEY,
+            ollamaBaseUrl: process.env.OLLAMA_BASE_URL,
+        });
+
         // Create Session — pass per-job thinkingLevel if specified
         const sessionOptions: any = {
             tools: cast(governedTools),
             model: model,
-            settingsManager: settingsManager
+            settingsManager: settingsConfig
         };
         if (job.thinkingLevel) {
             sessionOptions.thinkingLevel = job.thinkingLevel;
             logger.info("Job thinking level", { jobId: job._id, thinkingLevel: job.thinkingLevel });
         }
-        const { session } = await createAgentSession(sessionOptions);
+        const { session } = createCompatSession(sessionOptions, provider);
 
         currentSession = session;
 
@@ -1010,7 +1019,8 @@ IMPORTANT: Verify your work with tools before responding.`;
                 logger.warn(`Falling back to model: ${modelId}`, { previousModel: effectiveModelId, jobId: job._id });
                 await adapter.addJobLog({ jobId: job._id, type: "warning", content: `Model ${effectiveModelId} failed — retrying with ${modelId}` });
                 const fallbackModel = buildModelConfig({ modelId, geminiApiKey: GEMINI_API_KEY, anthropicApiKey: ANTHROPIC_API_KEY, openrouterApiKey: OPENROUTER_API_KEY });
-                const { session: fallbackSession } = await createAgentSession({ ...sessionOptions, model: fallbackModel });
+                const fallbackProvider = resolveProvider(fallbackModel, { anthropicApiKey: ANTHROPIC_API_KEY, geminiApiKey: GEMINI_API_KEY, openrouterApiKey: OPENROUTER_API_KEY, ollamaBaseUrl: process.env.OLLAMA_BASE_URL });
+                const { session: fallbackSession } = createCompatSession({ ...sessionOptions, model: fallbackModel }, fallbackProvider);
                 currentSession = fallbackSession;
                 if (profileToolNames !== "*") {
                     try { fallbackSession.setActiveToolsByName(profileToolNames); } catch (_) { /* tool list may not apply to all session types */ }
@@ -1084,6 +1094,24 @@ IMPORTANT: Verify your work with tools before responding.`;
 
         if (job.type !== "interactive") console.log("\n✓ Task completed");
         logger.info("Job completed", { jobId: job._id, type: job.type, stats: jobStats });
+
+        // Post-task reflection — learn from this job
+        try {
+            const jobDuration = Date.now() - (lastJobUpdatedAt || Date.now());
+            const reflection = await generateReflection(
+                { vaultPath: VAULT_PATH, geminiApiKey: GEMINI_API_KEY, anthropicApiKey: ANTHROPIC_API_KEY, openrouterApiKey: OPENROUTER_API_KEY },
+                job._id,
+                job.instruction,
+                toolState.rpcResult,
+                jobStats,
+                "done",
+                jobDuration,
+            );
+            storeReflection(VAULT_PATH, reflection);
+            logger.info("Post-task reflection stored", { jobId: job._id, lessons: reflection.lessons });
+        } catch (reflErr) {
+            logger.warn("Post-task reflection failed", { error: String(reflErr) });
+        }
 
         // Notify Discord of job completion
         if (discordBot) {

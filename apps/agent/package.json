@@ -10,7 +10,7 @@
         "lint": "eslint ."
     },
     "dependencies": {
-        "@mariozechner/pi-coding-agent": "latest",
+        "@repo/agent-core": "workspace:*",
         "@repo/vault-client": "*",
         "@repo/env-loader": "workspace:*",
         "@repo/hq-tools": "workspace:*",

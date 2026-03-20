@@ -246,31 +246,93 @@ async function startWhatsApp() {
   // Track message IDs we've sent as replies to avoid infinite loops in self-chat
   const sentMessageIds = new Set<string>();
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
+  // Debug: log ALL events to see what Baileys emits
+  const eventsToLog = ["messages.upsert", "messages.update", "messages.set", "message-receipt.update"];
+  for (const evt of eventsToLog) {
+    sock.ev.on(evt as any, (data: any) => {
+      const count = Array.isArray(data) ? data.length : data?.messages?.length ?? "?";
+      console.log(`[wa-debug] Event: ${evt} (${count} items)`);
+    });
+  }
+
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    console.log(`[wa-debug] messages.upsert type=${type} count=${messages.length}`);
+    for (const m of messages) {
+      console.log(`[wa-debug] msg: jid=${m.key.remoteJid} fromMe=${m.key.fromMe} hasMsg=${!!m.message} keys=${m.message ? Object.keys(m.message).join(",") : "NONE"}`);
+    }
     for (const msg of messages) {
+      try {
       if (!msg.message) continue;
 
-      // Owner-only guard
+      // Owner-only guard — accept both @s.whatsapp.net and @lid formats
       const jid = msg.key.remoteJid;
-      if (!jid || jid !== OWNER_JID) continue;
-
-      // Skip status broadcasts
+      if (!jid) continue;
       if (jid === "status@broadcast") continue;
+
+      // Match owner: either phone JID or LID (WhatsApp's new linked ID format)
+      const isOwnerJid = jid === OWNER_JID;
+      const isLid = jid.endsWith("@lid");
+      // Also accept self-chat via @s.whatsapp.net with fromMe
+      const isSelfChat = jid.endsWith("@s.whatsapp.net") && msg.key.fromMe;
+
+      if (!isOwnerJid && !isLid && !isSelfChat) continue;
+
+      console.log(`[wa-bridge] Incoming: jid=${jid} fromMe=${msg.key.fromMe} keys=${Object.keys(msg.message).join(",")}`);
 
       // Skip messages we sent as bot replies (prevent loops)
       const msgId = msg.key.id;
-      if (msgId && sentMessageIds.has(msgId)) continue;
+      if (msgId && sentMessageIds.has(msgId)) {
+        console.log(`[wa-bridge] Skipping own sent message: ${msgId}`);
+        continue;
+      }
 
       // Skip protocol/notification messages
-      if (msg.message.protocolMessage || msg.message.reactionMessage) continue;
+      if (msg.message.protocolMessage || msg.message.reactionMessage) {
+        console.log(`[wa-bridge] Skipping protocol/reaction message`);
+        continue;
+      }
 
-      // Extract text
-      let text = msg.message.conversation
-        ?? msg.message.extendedTextMessage?.text
-        ?? msg.message.imageMessage?.caption
-        ?? msg.message.videoMessage?.caption
-        ?? msg.message.documentMessage?.caption
-        ?? "";
+      // Skip senderKeyDistribution (group key setup) messages with no actual content
+      if (msg.message.senderKeyDistributionMessage && !msg.message.conversation && !msg.message.extendedTextMessage) {
+        console.log(`[wa-bridge] Skipping senderKeyDistribution`);
+        continue;
+      }
+
+      // Extract text — log the full message structure for debugging
+      const msgKeys = Object.keys(msg.message);
+      let text = "";
+
+      if (msg.message.conversation) {
+        text = msg.message.conversation;
+      } else if (msg.message.extendedTextMessage) {
+        text = msg.message.extendedTextMessage.text ?? "";
+        // Log the full extendedTextMessage structure if text is empty
+        if (!text) {
+          console.log(`[wa-debug] extendedTextMessage keys: ${JSON.stringify(Object.keys(msg.message.extendedTextMessage))}`);
+          // Try contextInfo.quotedMessage for text
+          text = JSON.stringify(msg.message.extendedTextMessage).slice(0, 200);
+          console.log(`[wa-debug] extendedTextMessage raw: ${text}`);
+          // Reset - we'll parse it properly
+          text = msg.message.extendedTextMessage.text
+            ?? msg.message.extendedTextMessage.caption
+            ?? "";
+        }
+      } else if (msg.message.imageMessage) {
+        text = msg.message.imageMessage.caption ?? "";
+      } else if (msg.message.videoMessage) {
+        text = msg.message.videoMessage.caption ?? "";
+      } else if (msg.message.documentMessage) {
+        text = msg.message.documentMessage.caption ?? "";
+      }
+
+      console.log(`[wa-bridge] Extracted text: "${text.slice(0, 80)}" (${text.length} chars) from keys: ${msgKeys.join(",")}`);
+
+      // If still no text and no media, skip
+      if (!text && !msg.message.imageMessage && !msg.message.videoMessage &&
+          !msg.message.documentMessage && !msg.message.audioMessage) {
+        console.log(`[wa-bridge] No text or media, skipping`);
+        continue;
+      }
 
       // Handle media
       if (msg.message.imageMessage) {
@@ -388,6 +450,9 @@ async function startWhatsApp() {
         react: { text: "✅", key: msg.key },
       });
       trackSent(reactSent);
+      } catch (err) {
+        console.error(`[wa-bridge] ERROR processing message:`, err);
+      }
     }
   });
 }

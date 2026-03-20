@@ -7,3 +7,4 @@
 .DS_Store
 web/node_modules/
 web/dist/
+bridges/whatsapp/node_modules/

@@ -243,14 +243,26 @@ async function startWhatsApp() {
     }
   });
 
+  // Track message IDs we've sent as replies to avoid infinite loops in self-chat
+  const sentMessageIds = new Set<string>();
+
   sock.ev.on("messages.upsert", async ({ messages }) => {
     for (const msg of messages) {
       if (!msg.message) continue;
-      if (msg.key.fromMe) continue;
 
       // Owner-only guard
       const jid = msg.key.remoteJid;
       if (!jid || jid !== OWNER_JID) continue;
+
+      // Skip status broadcasts
+      if (jid === "status@broadcast") continue;
+
+      // Skip messages we sent as bot replies (prevent loops)
+      const msgId = msg.key.id;
+      if (msgId && sentMessageIds.has(msgId)) continue;
+
+      // Skip protocol/notification messages
+      if (msg.message.protocolMessage || msg.message.reactionMessage) continue;
 
       // Extract text
       let text = msg.message.conversation
@@ -301,17 +313,20 @@ async function startWhatsApp() {
       // Handle commands
       const lower = text.toLowerCase().trim();
       if (lower === "/reset" || lower === "!reset") {
-        await sock.sendMessage(jid, { text: "Conversation reset." });
+        const s = await sock.sendMessage(jid, { text: "Conversation reset." });
+        if (s?.key?.id) sentMessageIds.add(s.key.id);
         continue;
       }
       if (lower === "/status" || lower === "!status") {
-        await sock.sendMessage(jid, { text: "Status: WhatsApp bridge connected via HQ (Rust)" });
+        const s = await sock.sendMessage(jid, { text: "Status: WhatsApp bridge connected via HQ (Rust)" });
+        if (s?.key?.id) sentMessageIds.add(s.key.id);
         continue;
       }
       if (lower === "/help" || lower === "!help") {
-        await sock.sendMessage(jid, {
+        const s = await sock.sendMessage(jid, {
           text: "HQ WhatsApp Commands\n\n/reset — Clear conversation\n/status — Show status\n/help — This help\n\nSend any message, image, document, or voice note.",
         });
+        if (s?.key?.id) sentMessageIds.add(s.key.id);
         continue;
       }
 
@@ -330,31 +345,49 @@ async function startWhatsApp() {
 
       await sock.sendPresenceUpdate("paused", jid);
 
-      // Send response (split if > 4096 chars)
+      // Send response — track IDs to prevent self-chat loops
       const MAX_LEN = 4096;
-      if (response.length <= MAX_LEN) {
-        await sock.sendMessage(jid, { text: response }, { quoted: msg });
-      } else {
-        let remaining = response;
-        let first = true;
-        while (remaining.length > 0) {
-          const chunk = remaining.slice(0, MAX_LEN);
-          remaining = remaining.slice(MAX_LEN).trim();
-          const splitAt = remaining.length > 0
-            ? (chunk.lastIndexOf("\n\n") !== -1 ? chunk.lastIndexOf("\n\n") : chunk.lastIndexOf("\n") !== -1 ? chunk.lastIndexOf("\n") : MAX_LEN)
-            : MAX_LEN;
-          const toSend = chunk.slice(0, splitAt);
-          remaining = chunk.slice(splitAt).trim() + (remaining ? "\n" + remaining : "");
+      const trackSent = (sent: any) => {
+        if (sent?.key?.id) sentMessageIds.add(sent.key.id);
+        // Keep set bounded
+        if (sentMessageIds.size > 100) {
+          const first = sentMessageIds.values().next().value;
+          if (first) sentMessageIds.delete(first);
+        }
+      };
 
-          await sock.sendMessage(jid, { text: toSend }, first ? { quoted: msg } : undefined);
-          first = false;
+      if (response.length <= MAX_LEN) {
+        const sent = await sock.sendMessage(jid, { text: response }, { quoted: msg });
+        trackSent(sent);
+      } else {
+        // Smart chunking
+        const chunks: string[] = [];
+        let rem = response;
+        while (rem.length > MAX_LEN) {
+          let split = rem.lastIndexOf("\n\n", MAX_LEN);
+          if (split === -1) split = rem.lastIndexOf("\n", MAX_LEN);
+          if (split === -1) split = rem.lastIndexOf(" ", MAX_LEN);
+          if (split === -1) split = MAX_LEN;
+          chunks.push(rem.slice(0, split));
+          rem = rem.slice(split).trim();
+        }
+        if (rem) chunks.push(rem);
+
+        for (let i = 0; i < chunks.length; i++) {
+          const sent = await sock.sendMessage(
+            jid,
+            { text: chunks[i] },
+            i === 0 ? { quoted: msg } : undefined,
+          );
+          trackSent(sent);
         }
       }
 
       // React with checkmark
-      await sock.sendMessage(jid, {
+      const reactSent = await sock.sendMessage(jid, {
         react: { text: "✅", key: msg.key },
       });
+      trackSent(reactSent);
     }
   });
 }

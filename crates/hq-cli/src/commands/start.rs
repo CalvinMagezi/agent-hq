@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use hq_core::config::HqConfig;
 use hq_db::Database;
+use hq_llm::LlmProvider;
 use hq_vault::VaultClient;
 use std::sync::Arc;
 use tokio::signal;
@@ -94,9 +95,11 @@ async fn start_all(
             let token = token.clone();
             let relay_vault = vault.clone();
             let relay_db = db.clone();
+            let api_key = config.openrouter_api_key.clone().unwrap_or_default();
+            let model = config.default_model.clone();
             tokio::spawn(async move {
                 info!("discord: starting relay");
-                if let Err(e) = run_discord_relay(&token, relay_vault, relay_db).await {
+                if let Err(e) = run_discord_relay(&token, relay_vault, relay_db, api_key, model).await {
                     tracing::error!("discord relay error: {e}");
                 }
             });
@@ -111,9 +114,11 @@ async fn start_all(
             let token = token.clone();
             let relay_vault = vault.clone();
             let relay_db = db.clone();
+            let api_key = config.openrouter_api_key.clone().unwrap_or_default();
+            let model = config.default_model.clone();
             tokio::spawn(async move {
                 info!("telegram: starting relay");
-                if let Err(e) = run_telegram_relay(&token, relay_vault, relay_db).await {
+                if let Err(e) = run_telegram_relay(&token, relay_vault, relay_db, api_key, model).await {
                     tracing::error!("telegram relay error: {e}");
                 }
             });
@@ -169,7 +174,8 @@ async fn start_discord(
 ) -> Result<()> {
     let token = config.relay.discord_token.as_ref()
         .context("Discord token not configured. Set relay.discord_token in ~/.hq/config.yaml")?;
-    run_discord_relay(token, vault, db).await
+    let api_key = config.openrouter_api_key.clone().unwrap_or_default();
+    run_discord_relay(token, vault, db, api_key, config.default_model.clone()).await
 }
 
 async fn start_telegram(
@@ -179,7 +185,8 @@ async fn start_telegram(
 ) -> Result<()> {
     let token = config.relay.telegram_token.as_ref()
         .context("Telegram token not configured. Set relay.telegram_token in ~/.hq/config.yaml")?;
-    run_telegram_relay(token, vault, db).await
+    let api_key = config.openrouter_api_key.clone().unwrap_or_default();
+    run_telegram_relay(token, vault, db, api_key, config.default_model.clone()).await
 }
 
 // ─── Component runners ──────────────────────────────────────────
@@ -275,46 +282,111 @@ async fn run_discord_relay(
     token: &str,
     _vault: Arc<VaultClient>,
     _db: Arc<Database>,
+    api_key: String,
+    model: String,
 ) -> Result<()> {
     use serenity::prelude::*;
     use serenity::model::prelude::*;
     use serenity::async_trait;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex as TokioMutex;
 
-    struct Handler;
+    struct Handler {
+        api_key: String,
+        model: String,
+        // Per-channel conversation history
+        threads: Arc<TokioMutex<HashMap<u64, Vec<hq_core::types::ChatMessage>>>>,
+    }
 
     #[async_trait]
     impl EventHandler for Handler {
         async fn message(&self, ctx: Context, msg: Message) {
-            // Ignore bot messages
             if msg.author.bot {
                 return;
             }
 
-            // Respond to messages mentioning the bot or in DMs
             let bot_id = ctx.cache.current_user().id;
             let is_mention = msg.mentions.iter().any(|u| u.id == bot_id);
             let is_dm = msg.guild_id.is_none();
 
-            if is_mention || is_dm {
-                let content = msg.content.replace(&format!("<@{}>", bot_id), "").trim().to_string();
-                if content.is_empty() {
-                    return;
+            if !(is_mention || is_dm) {
+                return;
+            }
+
+            let content = msg.content.replace(&format!("<@{}>", bot_id), "").trim().to_string();
+            if content.is_empty() {
+                return;
+            }
+
+            // Handle !reset command
+            if content == "!reset" || content == "/reset" {
+                let mut threads = self.threads.lock().await;
+                threads.remove(&msg.channel_id.get());
+                let _ = msg.channel_id.say(&ctx.http, "Conversation reset.").await;
+                return;
+            }
+
+            let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
+
+            // Get or create thread history
+            let channel_key = msg.channel_id.get();
+            let mut threads = self.threads.lock().await;
+            let history = threads.entry(channel_key).or_insert_with(|| {
+                vec![hq_core::types::ChatMessage {
+                    role: hq_core::types::MessageRole::System,
+                    content: "You are HQ, a helpful AI assistant. Be concise and helpful.".to_string(),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                }]
+            });
+
+            history.push(hq_core::types::ChatMessage {
+                role: hq_core::types::MessageRole::User,
+                content: content.clone(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+
+            // Keep history bounded
+            if history.len() > 30 {
+                let system = history[0].clone();
+                let recent: Vec<_> = history[history.len()-20..].to_vec();
+                *history = vec![system];
+                history.extend(recent);
+            }
+
+            // Call OpenRouter
+            let provider = hq_llm::openrouter::OpenRouterProvider::new(&self.api_key);
+            let request = hq_llm::ChatRequest {
+                model: self.model.clone(),
+                messages: history.clone(),
+                tools: vec![],
+                temperature: Some(0.7),
+                max_tokens: Some(2048),
+            };
+
+            match provider.chat(&request).await {
+                Ok(response) => {
+                    let reply = &response.message.content;
+                    history.push(response.message.clone());
+
+                    // Split for Discord's 2000 char limit
+                    let chunks = split_message(reply, 2000);
+                    for chunk in chunks {
+                        if let Err(e) = msg.channel_id.say(&ctx.http, &chunk).await {
+                            tracing::error!("discord send error: {e}");
+                        }
+                    }
                 }
-
-                // Send typing indicator
-                let _ = msg.channel_id.broadcast_typing(&ctx.http).await;
-
-                // For now, echo back with a note about Rust migration
-                let response = format!(
-                    "HQ (Rust) received: `{}`\n\n*Agent session execution is being wired up. \
-                     The Rust binary is running at 6MB / ~15MB RAM instead of the old 10GB.*",
-                    content.chars().take(100).collect::<String>()
-                );
-
-                if let Err(e) = msg.channel_id.say(&ctx.http, &response).await {
-                    tracing::error!("discord: failed to send: {e}");
+                Err(e) => {
+                    let _ = msg.channel_id.say(
+                        &ctx.http,
+                        &format!("Error: {e}"),
+                    ).await;
                 }
             }
+
+            drop(threads);
         }
 
         async fn ready(&self, _ctx: Context, ready: Ready) {
@@ -326,8 +398,14 @@ async fn run_discord_relay(
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
+    let handler = Handler {
+        api_key,
+        model,
+        threads: Arc::new(TokioMutex::new(HashMap::new())),
+    };
+
     let mut client = Client::builder(token, intents)
-        .event_handler(Handler)
+        .event_handler(handler)
         .await
         .context("failed to create Discord client")?;
 
@@ -340,24 +418,117 @@ async fn run_telegram_relay(
     token: &str,
     _vault: Arc<VaultClient>,
     _db: Arc<Database>,
+    api_key: String,
+    model: String,
 ) -> Result<()> {
     use teloxide::prelude::*;
+    use std::collections::HashMap;
+    use tokio::sync::Mutex as TokioMutex;
 
     info!("telegram: starting bot...");
 
     let bot = Bot::new(token);
+    let threads: Arc<TokioMutex<HashMap<i64, Vec<hq_core::types::ChatMessage>>>> =
+        Arc::new(TokioMutex::new(HashMap::new()));
+    let api_key = Arc::new(api_key);
+    let model = Arc::new(model);
 
-    teloxide::repl(bot, |bot: Bot, msg: teloxide::types::Message| async move {
-        if let Some(text) = msg.text() {
-            let response = format!(
-                "HQ (Rust) received: `{}`\n\n_Agent session being wired up. \
-                 Running at 6MB / ~15MB RAM._",
-                text.chars().take(100).collect::<String>()
-            );
-            bot.send_message(msg.chat.id, response).await?;
+    teloxide::repl(bot, move |bot: Bot, msg: teloxide::types::Message| {
+        let threads = threads.clone();
+        let api_key = api_key.clone();
+        let model = model.clone();
+        async move {
+            let text = match msg.text() {
+                Some(t) => t.to_string(),
+                None => return Ok(()),
+            };
+
+            // Handle /reset
+            if text == "/reset" {
+                let mut t = threads.lock().await;
+                t.remove(&msg.chat.id.0);
+                bot.send_message(msg.chat.id, "Conversation reset.").await?;
+                return Ok(());
+            }
+
+            // Get or create thread
+            let chat_key = msg.chat.id.0;
+            let mut t = threads.lock().await;
+            let history = t.entry(chat_key).or_insert_with(|| {
+                vec![hq_core::types::ChatMessage {
+                    role: hq_core::types::MessageRole::System,
+                    content: "You are HQ, a helpful AI assistant. Be concise and helpful.".to_string(),
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                }]
+            });
+
+            history.push(hq_core::types::ChatMessage {
+                role: hq_core::types::MessageRole::User,
+                content: text.clone(),
+                tool_calls: vec![],
+                tool_call_id: None,
+            });
+
+            if history.len() > 30 {
+                let system = history[0].clone();
+                let recent: Vec<_> = history[history.len()-20..].to_vec();
+                *history = vec![system];
+                history.extend(recent);
+            }
+
+            let provider = hq_llm::openrouter::OpenRouterProvider::new(&api_key);
+            let request = hq_llm::ChatRequest {
+                model: (*model).clone(),
+                messages: history.clone(),
+                tools: vec![],
+                temperature: Some(0.7),
+                max_tokens: Some(2048),
+            };
+
+            match provider.chat(&request).await {
+                Ok(response) => {
+                    let reply = response.message.content.clone();
+                    history.push(response.message);
+                    drop(t);
+
+                    let chunks = split_message(&reply, 4096);
+                    for chunk in chunks {
+                        bot.send_message(msg.chat.id, chunk).await?;
+                    }
+                }
+                Err(e) => {
+                    drop(t);
+                    bot.send_message(msg.chat.id, format!("Error: {e}")).await?;
+                }
+            }
+
+            Ok(())
         }
-        Ok(())
     }).await;
 
     Ok(())
+}
+
+fn split_message(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= max_len {
+            chunks.push(remaining.to_string());
+            break;
+        }
+        // Try to split at paragraph, then newline, then space
+        let search = &remaining[..max_len];
+        let split_at = search.rfind("\n\n")
+            .or_else(|| search.rfind('\n'))
+            .or_else(|| search.rfind(' '))
+            .unwrap_or(max_len);
+        chunks.push(remaining[..split_at].to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+    chunks
 }

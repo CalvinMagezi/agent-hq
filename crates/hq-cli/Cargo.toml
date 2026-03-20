@@ -26,3 +26,8 @@ reqwest = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 gray_matter = { workspace = true }
+serenity = { workspace = true }
+teloxide = { workspace = true }
+hq-web = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }

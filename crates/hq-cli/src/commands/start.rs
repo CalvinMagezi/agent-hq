@@ -154,10 +154,16 @@ async fn start_all(
                     .stderr(std::process::Stdio::inherit())
                     .stdin(std::process::Stdio::null())
                     .kill_on_drop(true)
-                    .spawn()
-                    .expect("failed to spawn WhatsApp bridge");
-                let _ = child.wait().await;
-                tracing::warn!("whatsapp: bridge process exited");
+                    .spawn();
+                match child {
+                    Ok(mut c) => {
+                        let _ = c.wait().await;
+                        tracing::warn!("whatsapp: bridge process exited");
+                    }
+                    Err(e) => {
+                        tracing::error!("whatsapp: failed to spawn bridge: {e}");
+                    }
+                }
             });
         }
     }

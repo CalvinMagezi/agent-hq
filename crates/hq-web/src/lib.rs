@@ -46,7 +46,10 @@ pub fn create_router(state: Arc<WsState>) -> Router {
         .route("/api/wa-message", axum::routing::post(wa_message_handler))
         .route("/api/search", get(search_handler))
         .route("/api/vault-asset", get(vault_asset_handler))
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::HeaderName::from_static("x-api-key")]))
         .with_state(state)
 }
 
@@ -287,40 +290,61 @@ async fn search_handler(
 async fn vault_asset_handler(
     State(state): State<Arc<WsState>>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     let path_param = params.get("path").cloned().unwrap_or_default();
-    if path_param.is_empty() || path_param.contains("..") {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            [("content-type", "text/plain")],
-            "bad path".to_string(),
-        );
+    if path_param.is_empty() {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
+    // Canonicalize to prevent path traversal
     let full_path = state.vault_path.join(&path_param);
-    match std::fs::read(&full_path) {
+    let canonical = match std::fs::canonicalize(&full_path) {
+        Ok(p) => p,
+        Err(_) => return axum::http::StatusCode::NOT_FOUND.into_response(),
+    };
+    let vault_canonical = std::fs::canonicalize(&state.vault_path)
+        .unwrap_or_else(|_| state.vault_path.clone());
+    if !canonical.starts_with(&vault_canonical) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    match std::fs::read(&canonical) {
         Ok(data) => {
-            let mime = match full_path.extension().and_then(|e| e.to_str()) {
+            let mime = match canonical.extension().and_then(|e| e.to_str()) {
                 Some("png") => "image/png",
                 Some("jpg" | "jpeg") => "image/jpeg",
                 Some("gif") => "image/gif",
                 Some("svg") => "image/svg+xml",
                 Some("pdf") => "application/pdf",
-                Some("md") => "text/markdown",
+                Some("md") => "text/markdown; charset=utf-8",
+                Some("txt" | "csv" | "json" | "yaml" | "yml") => "text/plain; charset=utf-8",
                 _ => "application/octet-stream",
             };
-            (axum::http::StatusCode::OK, [("content-type", mime)], unsafe { String::from_utf8_unchecked(data) })
+            (
+                axum::http::StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, mime)],
+                axum::body::Body::from(data),
+            ).into_response()
         }
-        Err(_) => (axum::http::StatusCode::NOT_FOUND, [("content-type", "text/plain")], "not found".to_string()),
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
     }
 }
 
 // ─── API: WhatsApp Message (bridge endpoint) ────────────────
 
 async fn wa_message_handler(
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<WsState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    // Auth: require API key if AGENTHQ_API_KEY is set, or only accept localhost
+    if let Ok(expected) = std::env::var("AGENTHQ_API_KEY") {
+        let provided = headers.get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if provided != expected {
+            return axum::Json(serde_json::json!({"error": "unauthorized"}));
+        }
+    }
+
     let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
     if text.is_empty() {
         return axum::Json(serde_json::json!({"error": "no text provided"}));

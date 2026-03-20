@@ -81,7 +81,7 @@ async function saveMedia(
       mime = m.audioMessage?.mimetype ?? "audio/ogg";
     } else if (type === "document") {
       mime = m.documentMessage?.mimetype ?? "application/octet-stream";
-      fname = m.documentMessage?.fileName ?? fname;
+      fname = path.basename(m.documentMessage?.fileName ?? fname).replace(/[^a-zA-Z0-9._-]/g, '_');
     } else if (type === "sticker") {
       mime = m.stickerMessage?.mimetype ?? "image/webp";
     }
@@ -269,13 +269,15 @@ async function startWhatsApp() {
       if (!jid) continue;
       if (jid === "status@broadcast") continue;
 
-      // Match owner: either phone JID or LID (WhatsApp's new linked ID format)
+      // Match owner: phone JID, own LID, or self-chat
       const isOwnerJid = jid === OWNER_JID;
-      const isLid = jid.endsWith("@lid");
-      // Also accept self-chat via @s.whatsapp.net with fromMe
-      const isSelfChat = jid.endsWith("@s.whatsapp.net") && msg.key.fromMe;
+      // Only accept the socket's own LID, not any @lid JID
+      const ownLid = (sock as any).user?.lid;
+      const isOwnLid = ownLid ? jid === ownLid : false;
+      // Self-chat: owner JID + fromMe
+      const isSelfChat = jid === OWNER_JID && msg.key.fromMe;
 
-      if (!isOwnerJid && !isLid && !isSelfChat) continue;
+      if (!isOwnerJid && !isOwnLid && !isSelfChat) continue;
 
       console.log(`[wa-bridge] Incoming: jid=${jid} fromMe=${msg.key.fromMe} keys=${Object.keys(msg.message).join(",")}`);
 

@@ -1946,14 +1946,27 @@ async fn run_discord_relay(
             }
 
             // 3. Strip bot mention from content
-            let content = msg.content
+            let raw_content = msg.content
                 .replace(&format!("<@{}>", bot_id), "")
                 .replace(&format!("<@!{}>", bot_id), "")
                 .trim()
                 .to_string();
-            if content.is_empty() {
+            if raw_content.is_empty() {
                 return;
             }
+
+            // Include reply context if user is replying to another message
+            let content = if let Some(ref referenced) = msg.referenced_message {
+                if !referenced.author.bot {
+                    let reply_text: String = referenced.content.chars().take(500).collect();
+                    format!("[Replying to {}: \"{}\"]\n\n{}",
+                        referenced.author.name, reply_text, raw_content)
+                } else {
+                    raw_content
+                }
+            } else {
+                raw_content
+            };
 
             let channel_key = msg.channel_id.get();
 
@@ -2459,9 +2472,28 @@ async fn run_telegram_relay(
         let _model = model.clone();
         let system_prompt = system_prompt.clone();
         async move {
-            let text = match msg.text() {
+            let raw_text = match msg.text() {
                 Some(t) => t.to_string(),
                 None => return Ok(()),
+            };
+
+            // Include reply context if user is replying to a message
+            let text = if let Some(reply) = msg.reply_to_message() {
+                if let Some(reply_text) = reply.text() {
+                    // Don't include reply context for bot's own messages being replied to
+                    // (the user is just continuing conversation)
+                    if reply.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
+                        raw_text
+                    } else {
+                        format!("[Replying to: \"{}\"]\n\n{}",
+                            reply_text.chars().take(500).collect::<String>(),
+                            raw_text)
+                    }
+                } else {
+                    raw_text
+                }
+            } else {
+                raw_text
             };
 
             let chat_key = msg.chat.id.0;

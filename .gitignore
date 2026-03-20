@@ -1,14 +1,34 @@
+# Build artifacts
 /target
-.vault/
 *.db
 *.db-wal
 *.db-shm
+
+# Vault data (private knowledge base)
+.vault/
+
+# Secrets — NEVER commit these
 .env
+.env.local
+.env.*.local
+.mcp.json
+*.pem
+*.key
+*.crt
+
+# OS
 .DS_Store
+Thumbs.db
+
+# Node/Bun (PWA + WhatsApp bridge)
+node_modules/
 web/node_modules/
 web/dist/
 bridges/whatsapp/node_modules/
 apps/hq-control-center/node_modules/
 apps/hq-control-center/dist/
-.env.local
-.mcp.json
+apps/hq-control-center/.tanstack/
+
+# Logs
+/tmp/
+*.log

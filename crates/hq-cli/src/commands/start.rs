@@ -127,13 +127,24 @@ async fn start_all(
         }
     }
 
-    // Spawn WebSocket server
+    // Spawn WebSocket + Web UI server
     let ws_port = config.ws_port;
+    let vault_for_ws = config.vault_path.clone();
     tokio::spawn(async move {
         info!(port = ws_port, "ws: starting server");
-        let state = Arc::new(hq_web::WsState::new());
+        // Resolve static dir relative to vault parent (repo root)
+        let repo_root = vault_for_ws.parent().unwrap_or(&vault_for_ws);
+        let static_dir = repo_root.join("web").join("dist");
+        let static_opt = if static_dir.join("index.html").exists() {
+            info!(path = %static_dir.display(), "ws: serving web UI");
+            Some(static_dir)
+        } else {
+            None
+        };
+        let state = Arc::new(hq_web::WsState::new(vault_for_ws, static_opt));
         let app = hq_web::create_router(state);
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], ws_port));
+        // Bind to 0.0.0.0 so Tailscale/Caddy can reach it
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], ws_port));
         if let Err(e) = axum::serve(
             tokio::net::TcpListener::bind(addr).await.unwrap(),
             app,

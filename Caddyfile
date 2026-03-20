@@ -1,0 +1,10 @@
+{
+	https_port 4749
+	http_port 4750
+}
+
+calvins-macbook-pro.tailebc87e.ts.net:4749 {
+	tls /Users/calvinmagezi/calvins-macbook-pro.tailebc87e.ts.net.crt /Users/calvinmagezi/calvins-macbook-pro.tailebc87e.ts.net.key
+
+	reverse_proxy localhost:5678
+}

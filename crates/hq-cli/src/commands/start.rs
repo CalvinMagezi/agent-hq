@@ -414,8 +414,28 @@ impl ChannelState {
 /// Also handles: `{"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}`
 /// And simpler: `{"text":"..."}` or `{"content":"..."}`
 fn extract_text_from_ndjson(json: &serde_json::Value) -> Option<String> {
-    // Claude Code assistant message: {"type":"assistant","content":[{"type":"text","text":"..."}]}
-    if json.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Claude Code: {"type":"assistant","message":{"content":[{"type":"text","text":"..."}]}}
+    // The content array is nested under "message"
+    if msg_type == "assistant" {
+        // Try message.content[] (Claude Code stream-json format)
+        if let Some(msg) = json.get("message") {
+            if let Some(content) = msg.get("content").and_then(|v| v.as_array()) {
+                let mut text = String::new();
+                for block in content {
+                    if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                            text.push_str(t);
+                        }
+                    }
+                }
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        // Also try direct content[] (older format)
         if let Some(content) = json.get("content").and_then(|v| v.as_array()) {
             let mut text = String::new();
             for block in content {
@@ -431,8 +451,17 @@ fn extract_text_from_ndjson(json: &serde_json::Value) -> Option<String> {
         }
     }
 
-    // Content block delta: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
-    if json.get("type").and_then(|v| v.as_str()) == Some("content_block_delta") {
+    // Claude Code result: {"type":"result","result":"..."}
+    if msg_type == "result" {
+        if let Some(t) = json.get("result").and_then(|v| v.as_str()) {
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+
+    // Content block delta: {"type":"content_block_delta","delta":{"text":"..."}}
+    if msg_type == "content_block_delta" {
         if let Some(delta) = json.get("delta") {
             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                 return Some(t.to_string());
@@ -440,23 +469,16 @@ fn extract_text_from_ndjson(json: &serde_json::Value) -> Option<String> {
         }
     }
 
+    // Codex: {"type":"message","content":"..."} or {"type":"item.completed",...}
+    if msg_type == "message" {
+        if let Some(t) = json.get("content").and_then(|v| v.as_str()) {
+            return Some(t.to_string());
+        }
+    }
+
     // Simple text field
     if let Some(t) = json.get("text").and_then(|v| v.as_str()) {
         if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-
-    // Simple content field (string)
-    if let Some(t) = json.get("content").and_then(|v| v.as_str()) {
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-
-    // Codex format: {"type":"message","content":"..."}
-    if json.get("type").and_then(|v| v.as_str()) == Some("message") {
-        if let Some(t) = json.get("content").and_then(|v| v.as_str()) {
             return Some(t.to_string());
         }
     }

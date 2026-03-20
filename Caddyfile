@@ -12,7 +12,21 @@ calvins-macbook-pro.tailebc87e.ts.net:4749 {
 		reverse_proxy localhost:5678
 	}
 
-	# Everything else → TanStack Start PWA (port 4747)
+	# Static assets → serve from dist/client directly (faster, correct MIME types)
+	@static path /assets/* /icons/* /manifest.json /sw.js /registerSW.js /vite.svg /notification.wav /chamuka-drawit.min.js /hq-agent.svg
+	handle @static {
+		root * /Users/calvinmagezi/Documents/GitHub/agent-hq/apps/hq-control-center/dist/client
+		file_server
+	}
+
+	# Public static files
+	@public path /icon-color.png /electron-vite.svg /electron-vite.animate.svg
+	handle @public {
+		root * /Users/calvinmagezi/Documents/GitHub/agent-hq/apps/hq-control-center/public
+		file_server
+	}
+
+	# Everything else → TanStack Start SSR (port 4747)
 	handle {
 		reverse_proxy localhost:4747
 	}

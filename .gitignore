@@ -10,3 +10,5 @@ web/dist/
 bridges/whatsapp/node_modules/
 apps/hq-control-center/node_modules/
 apps/hq-control-center/dist/
+.env.local
+.mcp.json

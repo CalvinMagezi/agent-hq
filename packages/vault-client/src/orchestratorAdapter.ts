@@ -18,7 +18,7 @@ import * as fs from "fs";
 import * as path from "path";
 import matter from "gray-matter";
 // HarnessType inlined (DelegatedTask removed from vault-types)
-type HarnessType = "claude-code" | "gemini-cli" | "opencode" | "qwen-code" | "mistral-vibe" | "codex-cli" | "any";
+type HarnessType = "hq" | "claude-code" | "gemini-cli" | "opencode" | "qwen-code" | "mistral-vibe" | "codex-cli" | "any";
 
 // ─── Errors ────────────────────────────────────────────────────────
 
@@ -88,10 +88,10 @@ const CAPABILITY_ROUTING: Record<string, HarnessType> = {
   "gmail": "gemini-cli",
   "google-calendar": "gemini-cli",
   "research": "any",
-  "code-edit": "claude-code",
-  "code-review": "claude-code",
-  "git-operations": "claude-code",
-  "debugging": "claude-code",
+  "code-edit": "hq",
+  "code-review": "hq",
+  "git-operations": "hq",
+  "debugging": "hq",
   "multi-model": "opencode",
   "code-generation": "opencode",
   "general": "any",

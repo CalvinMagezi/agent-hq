@@ -1,10 +1,7 @@
 import "@repo/env-loader";
+import { join } from "path";
 import { acquireLock, releaseLock } from "./src/lock.js";
 import { buildConfig, BotInstance } from "./src/bot.js";
-import { ClaudeHarness } from "./src/claude.js";
-import { OpenCodeHarness } from "./src/harnesses/opencode.js";
-import { GeminiHarness } from "./src/harnesses/gemini.js";
-import { CodexHarness } from "./src/harnesses/codex.js";
 
 // Prevent unhandled errors from crashing the relay process
 process.on("unhandledRejection", (reason: any) => {
@@ -24,11 +21,12 @@ if (!process.env.DISCORD_USER_ID) {
 const hasAnyBot =
   process.env.DISCORD_BOT_TOKEN ||
   process.env.DISCORD_BOT_TOKEN_OPENCODE ||
-  process.env.DISCORD_BOT_TOKEN_GEMINI;
+  process.env.DISCORD_BOT_TOKEN_GEMINI ||
+  process.env.DISCORD_BOT_TOKEN_CODEX;
 
 if (!hasAnyBot) {
   console.error(
-    "No bot tokens configured. Set at least one of: DISCORD_BOT_TOKEN, DISCORD_BOT_TOKEN_OPENCODE, DISCORD_BOT_TOKEN_GEMINI",
+    "No bot tokens configured. Set at least one of: DISCORD_BOT_TOKEN, DISCORD_BOT_TOKEN_OPENCODE, DISCORD_BOT_TOKEN_GEMINI, DISCORD_BOT_TOKEN_CODEX",
   );
   process.exit(1);
 }
@@ -40,7 +38,9 @@ const RELAY_DIR =
     ? ".discord-relay"
     : process.env.DISCORD_BOT_TOKEN_OPENCODE
       ? process.env.RELAY_DIR_OPENCODE || ".discord-relay-opencode"
-      : process.env.RELAY_DIR_GEMINI || ".discord-relay-gemini");
+      : process.env.DISCORD_BOT_TOKEN_GEMINI
+        ? process.env.RELAY_DIR_GEMINI || ".discord-relay-gemini"
+        : process.env.RELAY_DIR_CODEX || ".discord-relay-codex");
 
 if (!(await acquireLock(RELAY_DIR))) {
   console.error("Another discord-relay instance is already running. Exiting.");
@@ -48,6 +48,7 @@ if (!(await acquireLock(RELAY_DIR))) {
 }
 
 const sharedConfig = buildConfig();
+const vaultPath = sharedConfig.vaultPath || ".vault";
 const bots: BotInstance[] = [];
 
 // ── Shared VaultSync instance — one watcher + one SQLite writer for all bots ──
@@ -69,68 +70,76 @@ if (sharedConfig.vaultPath) {
   }
 }
 
-// ── Claude Code Bot (optional — set DISCORD_BOT_TOKEN to enable) ────
+// ── Bot Instances ────────────────────────────────────────────────────────
+// Each bot is a separate Discord application (token), but all share the same
+// unified architecture with full harness switching. The defaultHarness is just
+// the starting point — users can switch freely via /harness or !harness.
+//
+// Custom instructions can be loaded from vault MD files to give each bot
+// a distinct personality/focus (e.g., one for dev work, one for workspace tasks).
+
+// Claude Code Bot (optional — set DISCORD_BOT_TOKEN to enable)
 if (process.env.DISCORD_BOT_TOKEN) {
-  const claudeHarness = new ClaudeHarness(sharedConfig);
-  bots.push(new BotInstance(sharedConfig, claudeHarness, sharedSync));
-  console.log("[Claude Code] Bot enabled — token configured.");
+  bots.push(new BotInstance({
+    relayConfig: sharedConfig,
+    defaultHarness: "hq",
+    customInstructionsPath: process.env.CLAUDE_BOT_INSTRUCTIONS
+      || join(vaultPath, "_system/agents/claude-bot.md"),
+  }, sharedSync));
+  console.log("[HQ Agent] Bot enabled — token configured.");
 }
 
-// ── OpenCode Bot (optional — set DISCORD_BOT_TOKEN_OPENCODE to enable) ─
+// OpenCode Bot (optional — set DISCORD_BOT_TOKEN_OPENCODE to enable)
 if (process.env.DISCORD_BOT_TOKEN_OPENCODE) {
-  const opencodeConfig = {
-    ...sharedConfig,
-    discordBotToken: process.env.DISCORD_BOT_TOKEN_OPENCODE,
-    discordBotId: process.env.DISCORD_BOT_ID_OPENCODE,
-    relayDir: process.env.RELAY_DIR_OPENCODE || ".discord-relay-opencode",
-    uploadsDir: `${process.env.RELAY_DIR_OPENCODE || ".discord-relay-opencode"}/uploads`,
-  };
-  const opencodeHarness = new OpenCodeHarness({
-    opencodePath: process.env.OPENCODE_PATH || "opencode",
-    projectDir: process.env.PROJECT_DIR || process.cwd(),
-    relayDir: opencodeConfig.relayDir,
-  });
-  bots.push(new BotInstance(opencodeConfig, opencodeHarness, sharedSync));
+  const relayDir = process.env.RELAY_DIR_OPENCODE || ".discord-relay-opencode";
+  bots.push(new BotInstance({
+    relayConfig: {
+      ...sharedConfig,
+      discordBotToken: process.env.DISCORD_BOT_TOKEN_OPENCODE,
+      discordBotId: process.env.DISCORD_BOT_ID_OPENCODE,
+      relayDir,
+      uploadsDir: `${relayDir}/uploads`,
+    },
+    defaultHarness: "opencode",
+    customInstructionsPath: process.env.OPENCODE_BOT_INSTRUCTIONS
+      || join(vaultPath, "_system/agents/opencode-bot.md"),
+  }, sharedSync));
   console.log("[OpenCode] Bot enabled — token configured.");
 }
 
-// ── Gemini CLI Bot (optional — set DISCORD_BOT_TOKEN_GEMINI to enable) ──
+// Gemini CLI Bot (optional — set DISCORD_BOT_TOKEN_GEMINI to enable)
 if (process.env.DISCORD_BOT_TOKEN_GEMINI) {
-  const geminiRelayDir = process.env.RELAY_DIR_GEMINI || ".discord-relay-gemini";
-  const geminiConfig = {
-    ...sharedConfig,
-    discordBotToken: process.env.DISCORD_BOT_TOKEN_GEMINI,
-    discordBotId: process.env.DISCORD_BOT_ID_GEMINI,
-    relayDir: geminiRelayDir,
-    uploadsDir: `${geminiRelayDir}/uploads`,
-  };
-  const geminiHarness = new GeminiHarness({
-    geminiPath: process.env.GEMINI_PATH || "gemini",
-    projectDir: process.env.PROJECT_DIR || process.cwd(),
-    relayDir: geminiRelayDir,
-    defaultModel: process.env.GEMINI_DEFAULT_MODEL,
-  });
-  bots.push(new BotInstance(geminiConfig, geminiHarness, sharedSync));
+  const relayDir = process.env.RELAY_DIR_GEMINI || ".discord-relay-gemini";
+  bots.push(new BotInstance({
+    relayConfig: {
+      ...sharedConfig,
+      discordBotToken: process.env.DISCORD_BOT_TOKEN_GEMINI,
+      discordBotId: process.env.DISCORD_BOT_ID_GEMINI,
+      relayDir,
+      uploadsDir: `${relayDir}/uploads`,
+    },
+    defaultHarness: "gemini-cli",
+    customInstructionsPath: process.env.GEMINI_BOT_INSTRUCTIONS
+      || join(vaultPath, "_system/agents/gemini-bot.md"),
+  }, sharedSync));
   console.log("[Gemini CLI] Bot enabled — token configured.");
 }
 
-// ── Codex CLI Bot (optional — set DISCORD_BOT_TOKEN_CODEX to enable) ──
+// Codex CLI Bot (optional — set DISCORD_BOT_TOKEN_CODEX to enable)
 if (process.env.DISCORD_BOT_TOKEN_CODEX) {
-  const codexRelayDir = process.env.RELAY_DIR_CODEX || ".discord-relay-codex";
-  const codexConfig = {
-    ...sharedConfig,
-    discordBotToken: process.env.DISCORD_BOT_TOKEN_CODEX,
-    discordBotId: process.env.DISCORD_BOT_ID_CODEX,
-    relayDir: codexRelayDir,
-    uploadsDir: `${codexRelayDir}/uploads`,
-  };
-  const codexHarness = new CodexHarness({
-    codexPath: process.env.CODEX_PATH || "codex",
-    projectDir: process.env.PROJECT_DIR || process.cwd(),
-    relayDir: codexRelayDir,
-    defaultModel: process.env.CODEX_DEFAULT_MODEL,
-  });
-  bots.push(new BotInstance(codexConfig, codexHarness, sharedSync));
+  const relayDir = process.env.RELAY_DIR_CODEX || ".discord-relay-codex";
+  bots.push(new BotInstance({
+    relayConfig: {
+      ...sharedConfig,
+      discordBotToken: process.env.DISCORD_BOT_TOKEN_CODEX,
+      discordBotId: process.env.DISCORD_BOT_ID_CODEX,
+      relayDir,
+      uploadsDir: `${relayDir}/uploads`,
+    },
+    defaultHarness: "codex-cli",
+    customInstructionsPath: process.env.CODEX_BOT_INSTRUCTIONS
+      || join(vaultPath, "_system/agents/codex-bot.md"),
+  }, sharedSync));
   console.log("[Codex CLI] Bot enabled — token configured.");
 }
 
@@ -154,10 +163,10 @@ if (process.env.DISCORD_BOT_TOKEN_CODEX) enabledBots.push("Codex");
 
 console.log(`
 +----------------------------------------------+
-|  Discord Multi-Bot Relay                     |
+|  Discord Multi-Bot Relay (Unified)           |
 |  Bots: ${bots.length} (${enabledBots.join(" + ")})
 |  User: ${process.env.DISCORD_USER_ID}
-|  Vault: ${process.env.VAULT_PATH || ".vault"}
+|  Vault: ${vaultPath}
 |  Status: Starting...                         |
 +----------------------------------------------+
 `);

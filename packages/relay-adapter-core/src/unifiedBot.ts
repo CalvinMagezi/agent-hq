@@ -58,6 +58,10 @@ export interface UnifiedAdapterBotConfig {
   mediaAutoProcess?: boolean;
   stateFile?: string;
   vaultRoot?: string;
+  /** Default harness to use at startup (user can still switch via !harness). */
+  defaultHarness?: ActiveHarness;
+  /** Path to a vault MD file with custom instructions for this bot instance. */
+  customInstructionsPath?: string;
 }
 
 // ─── Bot ──────────────────────────────────────────────────────────
@@ -104,6 +108,8 @@ export class UnifiedAdapterBot {
 
   private vaultRoot: string;
   private readonly label: string;
+  private customInstructions: string | null = null;
+  private customInstructionsPath: string | null = null;
 
   constructor(config: UnifiedAdapterBotConfig) {
     this.bridge = config.bridge;
@@ -114,8 +120,14 @@ export class UnifiedAdapterBot {
     this.vaultRoot = config.vaultRoot ?? ".vault";
     this.stateFile = config.stateFile ?? `.${config.platformConfig.platformId}-state.json`;
     this.label = `unified-${config.platformConfig.platformId}`;
+    this.customInstructionsPath = config.customInstructionsPath ?? null;
 
     this.loadState();
+
+    // Apply defaultHarness only if no persisted harness was loaded
+    if (config.defaultHarness && this.activeHarness === "auto") {
+      this.activeHarness = config.defaultHarness;
+    }
 
     const harnessStateFile = `.${config.platformConfig.platformId}-harness-sessions.json`;
     this.localHarness = new LocalHarness(harnessStateFile);
@@ -137,6 +149,11 @@ export class UnifiedAdapterBot {
   // ─── Lifecycle ────────────────────────────────────────────────
 
   async start(): Promise<void> {
+    // Load custom instructions from vault file if configured
+    if (this.customInstructionsPath) {
+      this.loadCustomInstructions();
+    }
+
     // Relay connection is optional — local harness works without it
     try {
       console.log(`[${this.label}] Connecting to relay server...`);
@@ -383,6 +400,17 @@ export class UnifiedAdapterBot {
       hasVoiceTranscribe: () => !!this.voiceHandler,
       hasVision: () => !!(this.mediaHandler?.canDescribe),
       saveState: () => this.saveState(),
+      killActiveHarness: () => {
+        this.localHarness.kill();
+      },
+      resetActiveHarnessSession: () => {
+        const harnesses: Array<"claude-code" | "opencode" | "gemini-cli" | "codex-cli"> = [
+          "claude-code", "opencode", "gemini-cli", "codex-cli",
+        ];
+        for (const h of harnesses) {
+          this.localHarness.resetSession(h);
+        }
+      },
     };
 
     // Special case: "!export" is intercepted here to use bridge's file send
@@ -476,6 +504,10 @@ export class UnifiedAdapterBot {
     harness: "claude-code" | "opencode" | "gemini-cli" | "codex-cli",
     msg: UnifiedMessage,
   ): Promise<void> {
+    // Prepend custom instructions if loaded
+    if (this.customInstructions) {
+      content = `[System context — bot instructions]\n${this.customInstructions}\n\n[User message]\n${content}`;
+    }
     this.processingChats.set(msg.chatId, Date.now());
     const label = harnessLabel(harness);
     const sessionId = `${this.config.platformId}-${Date.now()}`;
@@ -607,9 +639,13 @@ export class UnifiedAdapterBot {
     msg?: UnifiedMessage,
     images?: Array<{ url: string; mediaType?: string }>,
   ): Promise<void> {
-    // Check relay connection — if down, fall back to local claude-code harness
+    // Prepend custom instructions if loaded
+    if (this.customInstructions) {
+      content = `[System context — bot instructions]\n${this.customInstructions}\n\n[User message]\n${content}`;
+    }
+    // Check relay connection — if down, fall back to local HQ harness
     if (!this.relay.isConnected) {
-      const fallback: "claude-code" | "opencode" | "gemini-cli" | "codex-cli" = "claude-code";
+      const fallback: "hq" | "claude-code" | "opencode" | "gemini-cli" | "codex-cli" = "hq";
       console.log(`[${this.label}] Relay not connected — falling back to local ${fallback} harness`);
       await this.handleLocalHarness(content, fallback, msg!);
       return;
@@ -990,5 +1026,74 @@ export class UnifiedAdapterBot {
       this.threadStore.setActiveHarness(this.threadId, h).catch(console.error);
     }
     this.saveState();
+  }
+
+  /** Full session reset — kills all harnesses, clears thread and model override. */
+  resetSession(): void {
+    this.localHarness.kill();
+    const harnesses: Array<"claude-code" | "opencode" | "gemini-cli" | "codex-cli"> = [
+      "claude-code", "opencode", "gemini-cli", "codex-cli",
+    ];
+    for (const h of harnesses) {
+      this.localHarness.resetSession(h);
+    }
+    this.threadId = null;
+    this.modelOverride = undefined;
+    if (this.currentChatId) this.chatThreads.delete(this.currentChatId);
+    this.saveState();
+  }
+
+  /** Kill any running harness process. Returns true if something was killed. */
+  killActive(): boolean {
+    const wasRunning = this.localHarness.isRunning();
+    this.localHarness.kill();
+    return wasRunning;
+  }
+
+  /** Get the current model override. */
+  getModelOverride(): string | undefined {
+    return this.modelOverride;
+  }
+
+  /** Set a model override (public accessor for slash commands). */
+  setModelOverridePub(m: string | undefined): void {
+    this.modelOverride = m;
+    this.saveState();
+  }
+
+  /** Get the current thread ID. */
+  getThreadId(): string | null {
+    return this.threadId;
+  }
+
+  /** Get custom instructions loaded for this bot instance. */
+  getCustomInstructions(): string | null {
+    return this.customInstructions;
+  }
+
+  /** Load custom instructions from the configured vault MD file. */
+  loadCustomInstructions(): void {
+    if (!this.customInstructionsPath) return;
+    try {
+      if (!existsSync(this.customInstructionsPath)) {
+        console.log(`[${this.label}] No custom instructions file at ${this.customInstructionsPath}`);
+        return;
+      }
+      const raw = readFileSync(this.customInstructionsPath, "utf-8");
+      // Strip YAML frontmatter (--- ... ---) if present
+      const fmMatch = raw.match(/^---\n[\s\S]*?\n---\n([\s\S]*)$/);
+      this.customInstructions = fmMatch ? fmMatch[1].trim() : raw.trim();
+      console.log(
+        `[${this.label}] Loaded custom instructions from ${this.customInstructionsPath} ` +
+        `(${this.customInstructions.length} chars)`,
+      );
+    } catch (err) {
+      console.warn(`[${this.label}] Failed to load custom instructions:`, err);
+    }
+  }
+
+  /** Check if the local harness is currently running. */
+  isHarnessRunning(): boolean {
+    return this.localHarness.isRunning();
   }
 }

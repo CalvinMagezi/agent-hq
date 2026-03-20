@@ -227,7 +227,7 @@ export class TeamOrchestrator {
       return emit({
         taskId: task.taskId,
         assignedAgent: task.agentName ?? "default",
-        assignedHarness: (task.targetHarnessType as HarnessType) || "claude-code",
+        assignedHarness: (task.targetHarnessType as HarnessType) || "hq",
         reason: "no relays available, queued for original target",
       });
     });

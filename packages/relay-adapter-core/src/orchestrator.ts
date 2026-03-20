@@ -91,7 +91,7 @@ export function detectIntent(message: string): {
       else if (/\b(plan|design|architect|spec)\b/i.test(lower)) role = "planner";
       else if (/\b(deploy|ci|cd|docker|infra|server)\b/i.test(lower)) role = "devops";
       else if (/\b(research|investigate|explain|compare)\b/i.test(lower)) role = "researcher";
-      return { intent: "coding", harness: "claude-code", role };
+      return { intent: "coding", harness: "hq", role };
     }
   }
 

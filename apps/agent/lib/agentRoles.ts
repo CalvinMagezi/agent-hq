@@ -22,7 +22,7 @@ export type AgentRole =
     | "devops"
     | "workspace";
 
-export type HarnessType = "claude-code" | "opencode" | "gemini-cli" | "any";
+export type HarnessType = "hq" | "claude-code" | "opencode" | "gemini-cli" | "any";
 
 export interface AgentRoleConfig {
     role: AgentRole;
@@ -46,8 +46,9 @@ const ROLE_CONFIGS: Record<AgentRole, AgentRoleConfig> = {
             "Make minimal, surgical changes. Do not refactor surrounding code.",
             "Verify by reading back the files you modified.",
             "Run tests if a test suite exists.",
+            "NEVER modify Agent-HQ's own source code (apps/, packages/, scripts/). Your output belongs in .vault/ only.",
         ].join(" "),
-        preferredHarness: "claude-code",
+        preferredHarness: "hq",
         maxTurns: 100,
         outputGuidance:
             "Return: files changed (with paths), tests run and results, verification status.",
@@ -61,7 +62,7 @@ const ROLE_CONFIGS: Record<AgentRole, AgentRoleConfig> = {
             "Cite sources. Structure findings with clear headings.",
             "DO NOT modify any files — only read and report.",
         ].join(" "),
-        preferredHarness: "claude-code",
+        preferredHarness: "hq",
         modelHint: "gemini-2.5-flash",
         maxTurns: 50,
         outputGuidance:
@@ -76,7 +77,7 @@ const ROLE_CONFIGS: Record<AgentRole, AgentRoleConfig> = {
             "DO NOT modify any files — only report findings.",
             "If everything looks good, say so in one sentence.",
         ].join(" "),
-        preferredHarness: "claude-code",
+        preferredHarness: "hq",
         modelHint: "claude-opus-4-6",
         maxTurns: 30,
         outputGuidance:
@@ -91,7 +92,7 @@ const ROLE_CONFIGS: Record<AgentRole, AgentRoleConfig> = {
             "Create detailed step-by-step plans with file paths, function signatures, and dependency ordering.",
             "DO NOT implement — only plan.",
         ].join(" "),
-        preferredHarness: "claude-code",
+        preferredHarness: "hq",
         maxTurns: 40,
         outputGuidance:
             "Return: numbered steps, files to create/modify, dependency order, risks and mitigations.",
@@ -105,7 +106,7 @@ const ROLE_CONFIGS: Record<AgentRole, AgentRoleConfig> = {
             "Test in safe mode first.",
             "Never force-push or delete production resources without explicit confirmation.",
         ].join(" "),
-        preferredHarness: "claude-code",
+        preferredHarness: "hq",
         maxTurns: 60,
         outputGuidance:
             "Return: changes made, validation results, rollback instructions if applicable.",

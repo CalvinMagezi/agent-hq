@@ -9,21 +9,15 @@ import * as path from 'node:path'
 import matter from 'gray-matter'
 import { VAULT_PATH } from './vault'
 
-// Resolve paths relative to the workspace root
-// One level up from the vault is the repo root
+// Resolve repo root: vault is always at {REPO_ROOT}/.vault
 const AGENT_HQ_ROOT = path.resolve(VAULT_PATH, '..')
 
 function tryJsonOrYaml(filePath: string): any {
   if (!fs.existsSync(filePath)) return null
   try {
     const raw = fs.readFileSync(filePath, 'utf-8')
-    const match = raw.match(/^---\s*\n([\s\S]*?)\n---/)
-    if (match) {
-      // Dynamic import yaml
-      const js_yaml = require('js-yaml')
-      return js_yaml.load(match[1])
-    }
-    return JSON.parse(raw)
+    const { data } = matter(raw)
+    return data && Object.keys(data).length > 0 ? data : null
   } catch {
     return null
   }
@@ -45,39 +39,40 @@ export interface AgentSummary {
   }
 }
 
-export const getAgentLibrary = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<{ agents: AgentSummary[] }> => {
-    const agentsRoot = path.join(AGENT_HQ_ROOT, 'packages/hq-tools/agents')
-    if (!fs.existsSync(agentsRoot)) return { agents: [] }
+/** Raw data loader — call directly from route loaders (same process, no serialization) */
+export async function fetchAgentLibrary(): Promise<{ agents: AgentSummary[] }> {
+  const agentsRoot = path.join(AGENT_HQ_ROOT, 'packages/hq-tools/agents')
+  if (!fs.existsSync(agentsRoot)) return { agents: [] }
 
-    const agents: AgentSummary[] = []
-    const verticals = fs.readdirSync(agentsRoot).filter(f =>
-      fs.statSync(path.join(agentsRoot, f)).isDirectory()
-    )
+  const agents: AgentSummary[] = []
+  const verticals = fs.readdirSync(agentsRoot).filter(f =>
+    fs.statSync(path.join(agentsRoot, f)).isDirectory()
+  )
 
-    for (const vertical of verticals) {
-      const vDir = path.join(agentsRoot, vertical)
-      const files = fs.readdirSync(vDir).filter(f => f.endsWith('.md'))
-      for (const file of files) {
-        const fm = tryJsonOrYaml(path.join(vDir, file))
-        if (fm) {
-          agents.push({
-            name: fm.name ?? file.replace('.md', ''),
-            displayName: fm.displayName ?? fm.name ?? file.replace('.md', ''),
-            vertical: fm.vertical ?? vertical,
-            baseRole: fm.baseRole ?? 'researcher',
-            preferredHarness: fm.preferredHarness ?? 'claude-code',
-            tags: fm.tags ?? [],
-            defaultsTo: fm.defaultsTo,
-            performanceProfile: fm.performanceProfile,
-          })
-        }
+  for (const vertical of verticals) {
+    const vDir = path.join(agentsRoot, vertical)
+    const files = fs.readdirSync(vDir).filter(f => f.endsWith('.md'))
+    for (const file of files) {
+      const fm = tryJsonOrYaml(path.join(vDir, file))
+      if (fm) {
+        agents.push({
+          name: fm.name ?? file.replace('.md', ''),
+          displayName: fm.displayName ?? fm.name ?? file.replace('.md', ''),
+          vertical: fm.vertical ?? vertical,
+          baseRole: fm.baseRole ?? 'researcher',
+          preferredHarness: fm.preferredHarness ?? 'hq',
+          tags: fm.tags ?? [],
+          defaultsTo: fm.defaultsTo,
+          performanceProfile: fm.performanceProfile,
+        })
       }
     }
-
-    return { agents }
   }
-)
+
+  return { agents }
+}
+
+export const getAgentLibrary = createServerFn({ method: 'GET' }).handler(fetchAgentLibrary)
 
 // ── Team List ────────────────────────────────────────────────────────────────
 
@@ -92,42 +87,37 @@ export interface TeamSummaryItem {
   isCustom: boolean
 }
 
-export const getTeamList = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<{ teams: TeamSummaryItem[] }> => {
-    const teamsRoot = path.join(AGENT_HQ_ROOT, 'packages/hq-tools/teams')
-    const vaultTeamsRoot = path.join(VAULT_PATH, '_team-registry')
+export async function fetchTeamList(): Promise<{ teams: TeamSummaryItem[] }> {
+  const teamsRoot = path.join(AGENT_HQ_ROOT, 'packages/hq-tools/teams')
+  const vaultTeamsRoot = path.join(VAULT_PATH, '_team-registry')
+  const teams: TeamSummaryItem[] = []
 
-    const teams: TeamSummaryItem[] = []
-
-    const readTeamsDir = (dir: string, isCustom: boolean) => {
-      if (!fs.existsSync(dir)) return
-      const files = fs.readdirSync(dir).filter(f => f.endsWith('.md'))
-      for (const file of files) {
-        const fm = tryJsonOrYaml(path.join(dir, file))
-        if (fm) {
-          const agents = Array.from(new Set(
-            (fm.stages ?? []).flatMap((s: any) => s.agents ?? [])
-          )) as string[]
-          teams.push({
-            name: fm.name ?? file.replace('.md', ''),
-            displayName: fm.displayName ?? fm.name ?? file.replace('.md', ''),
-            description: fm.description ?? '',
-            estimatedDurationMins: fm.estimatedDurationMins ?? 30,
-            stageCount: (fm.stages ?? []).length,
-            agents,
-            tags: fm.tags ?? [],
-            isCustom,
-          })
-        }
+  const readTeamsDir = (dir: string, isCustom: boolean) => {
+    if (!fs.existsSync(dir)) return
+    for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.md'))) {
+      const fm = tryJsonOrYaml(path.join(dir, file))
+      if (fm) {
+        const agents = Array.from(new Set(
+          (fm.stages ?? []).flatMap((s: any) => s.agents ?? [])
+        )) as string[]
+        teams.push({
+          name: fm.name ?? file.replace('.md', ''),
+          displayName: fm.displayName ?? fm.name ?? file.replace('.md', ''),
+          description: fm.description ?? '',
+          estimatedDurationMins: fm.estimatedDurationMins ?? 30,
+          stageCount: (fm.stages ?? []).length,
+          agents, tags: fm.tags ?? [], isCustom,
+        })
       }
     }
-
-    readTeamsDir(teamsRoot, false)
-    readTeamsDir(vaultTeamsRoot, true)
-
-    return { teams }
   }
-)
+
+  readTeamsDir(teamsRoot, false)
+  readTeamsDir(vaultTeamsRoot, true)
+  return { teams }
+}
+
+export const getTeamList = createServerFn({ method: 'GET' }).handler(fetchTeamList)
 
 // ── Team Performance ─────────────────────────────────────────────────────────
 
@@ -150,74 +140,54 @@ export const getTeamPerformance = createServerFn({ method: 'GET' })
 
 // ── Agent Leaderboard ────────────────────────────────────────────────────────
 
-export const getAgentLeaderboard = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<{ leaderboard: any[] }> => {
-    const agentsDir = path.join(VAULT_PATH, '_metrics', 'agents')
-    if (!fs.existsSync(agentsDir)) return { leaderboard: [] }
-
-    const leaderboard: any[] = []
-
-    for (const agentName of fs.readdirSync(agentsDir)) {
-      const agentDir = path.join(agentsDir, agentName)
-      if (!fs.statSync(agentDir).isDirectory()) continue
-
-      const runs = fs.readdirSync(agentDir)
-        .filter(f => f.startsWith('run-') && f.endsWith('.md'))
-        .map(f => tryJsonOrYaml(path.join(agentDir, f)))
-        .filter(Boolean)
-
-      if (runs.length === 0) continue
-
-      const avgScore = runs.reduce((s: number, r: any) => s + (r.successScore ?? 0), 0) / runs.length
-      leaderboard.push({ agentName, totalRuns: runs.length, successScore: avgScore })
-    }
-
-    return { leaderboard: leaderboard.sort((a, b) => b.successScore - a.successScore) }
+export async function fetchAgentLeaderboard(): Promise<{ leaderboard: any[] }> {
+  const agentsDir = path.join(VAULT_PATH, '_metrics', 'agents')
+  if (!fs.existsSync(agentsDir)) return { leaderboard: [] }
+  const leaderboard: any[] = []
+  for (const agentName of fs.readdirSync(agentsDir)) {
+    const agentDir = path.join(agentsDir, agentName)
+    if (!fs.statSync(agentDir).isDirectory()) continue
+    const runs = fs.readdirSync(agentDir)
+      .filter(f => f.startsWith('run-') && f.endsWith('.md'))
+      .map(f => tryJsonOrYaml(path.join(agentDir, f)))
+      .filter(Boolean)
+    if (runs.length === 0) continue
+    const avgScore = runs.reduce((s: number, r: any) => s + (r.successScore ?? 0), 0) / runs.length
+    leaderboard.push({ agentName, totalRuns: runs.length, successScore: avgScore })
   }
-)
+  return { leaderboard: leaderboard.sort((a, b) => b.successScore - a.successScore) }
+}
+
+export const getAgentLeaderboard = createServerFn({ method: 'GET' }).handler(fetchAgentLeaderboard)
 
 // ── Active Workflows ─────────────────────────────────────────────────────────
 
-export const getActiveWorkflows = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<{ workflows: any[] }> => {
-    // Read retro notes directory for recent workflows
-    const retroDir = path.join(VAULT_PATH, 'Notebooks/Projects/Agent-HQ/Retros')
-    if (!fs.existsSync(retroDir)) return { workflows: [] }
+export async function fetchActiveWorkflows(): Promise<{ workflows: any[] }> {
+  const retroDir = path.join(VAULT_PATH, 'Notebooks/Projects/Agent-HQ/Retros')
+  if (!fs.existsSync(retroDir)) return { workflows: [] }
+  const files = fs.readdirSync(retroDir).filter(f => f.endsWith('-retro.md')).slice(-20)
+  const workflows = files
+    .map(f => { const raw = tryJsonOrYaml(path.join(retroDir, f)); return raw ? { ...raw, retroFile: f } : null })
+    .filter(Boolean)
+    .sort((a: any, b: any) => (b.startedAt > a.startedAt ? 1 : -1))
+  return { workflows }
+}
 
-    const files = fs.readdirSync(retroDir)
-      .filter(f => f.endsWith('-retro.md'))
-      .slice(-20)
-
-    const workflows = files
-      .map(f => {
-        const raw = tryJsonOrYaml(path.join(retroDir, f))
-        return raw ? { ...raw, retroFile: f } : null
-      })
-      .filter(Boolean)
-      .sort((a: any, b: any) => (b.startedAt > a.startedAt ? 1 : -1))
-
-    return { workflows }
-  }
-)
+export const getActiveWorkflows = createServerFn({ method: 'GET' }).handler(fetchActiveWorkflows)
 
 // ── Pending Optimizations ────────────────────────────────────────────────────
 
-export const getPendingOptimizations = createServerFn({ method: 'GET' }).handler(
-  async (): Promise<{ optimizations: any[] }> => {
-    const pendingDir = path.join(VAULT_PATH, '_metrics', 'pending-optimizations')
-    if (!fs.existsSync(pendingDir)) return { optimizations: [] }
+export async function fetchPendingOptimizations(): Promise<{ optimizations: any[] }> {
+  const pendingDir = path.join(VAULT_PATH, '_metrics', 'pending-optimizations')
+  if (!fs.existsSync(pendingDir)) return { optimizations: [] }
+  const opts = fs.readdirSync(pendingDir)
+    .filter(f => f.endsWith('.md'))
+    .map(f => { const data = tryJsonOrYaml(path.join(pendingDir, f)); return data ? { ...data, _file: f } : null })
+    .filter(Boolean)
+  return { optimizations: opts }
+}
 
-    const opts = fs.readdirSync(pendingDir)
-      .filter(f => f.endsWith('.md'))
-      .map(f => {
-        const data = tryJsonOrYaml(path.join(pendingDir, f))
-        return data ? { ...data, _file: f } : null
-      })
-      .filter(Boolean)
-
-    return { optimizations: opts }
-  }
-)
+export const getPendingOptimizations = createServerFn({ method: 'GET' }).handler(fetchPendingOptimizations)
 
 // ── Apply Optimization ───────────────────────────────────────────────────────
 
@@ -258,8 +228,7 @@ export const saveCustomTeam = createServerFn({ method: 'POST' })
     fs.mkdirSync(registryDir, { recursive: true })
 
     const teamId = team.name ?? `custom-team-${Date.now()}`
-    const js_yaml = require('js-yaml')
-    const content = `---\n${js_yaml.dump(team)}---\n`
+    const content = matter.stringify('', team)
     fs.writeFileSync(path.join(registryDir, `${teamId}.md`), content, 'utf-8')
 
     return { success: true, teamId }
@@ -270,7 +239,7 @@ export const saveCustomTeam = createServerFn({ method: 'POST' })
 interface LaunchWorkflowInput {
   teamName: string
   instruction: string
-  modelOverride?: string
+  harnessOverride?: string
 }
 
 export const launchTeamWorkflow = createServerFn({ method: 'POST' })
@@ -286,7 +255,7 @@ export const launchTeamWorkflow = createServerFn({ method: 'POST' })
       team,
       instruction: data.instruction,
       executionMode: 'standard',
-      modelOverride: data.modelOverride,
+      harnessOverride: data.harnessOverride as any,
     })
 
     return {

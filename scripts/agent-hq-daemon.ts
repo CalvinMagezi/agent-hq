@@ -42,7 +42,6 @@ import { refreshNewsPulse as _refreshNewsPulse } from "./daemon/newsPulse.js";
 import {
   expireApprovals as _expireApprovals,
   healthCheck as _healthCheck,
-  relayHealthCheck as _relayHealthCheck,
   processEmbeddings as _processEmbeddings,
   forgetWeakMemories as _forgetWeakMemories,
   consolidateMemory as _consolidateMemory,
@@ -67,7 +66,6 @@ const embeddingProvider = resolveEmbeddingProvider();
 const STALE_JOB_DAYS = 7;
 const STUCK_JOB_HOURS = 2;
 const OFFLINE_WORKER_SECONDS = 30;
-const RELAY_STALE_SECONDS = 60;
 
 const HQ_BROWSER_PORT = parseInt(process.env.HQ_BROWSER_PORT ?? "19200", 10);
 const HQ_BROWSER_ENABLED = process.env.HQ_BROWSER_ENABLED === "true"; // opt-in to enable
@@ -113,7 +111,6 @@ function getDaemonCtx(): DaemonContext {
 const expireApprovals = () => _expireApprovals(getDaemonCtx());
 const processHeartbeat = () => _processHeartbeat(getDaemonCtx());
 const healthCheck = () => _healthCheck(getDaemonCtx());
-const relayHealthCheck = () => _relayHealthCheck(getDaemonCtx());
 const processEmbeddings = () => _processEmbeddings(getDaemonCtx());
 const forgetWeakMemories = () => _forgetWeakMemories(getDaemonCtx());
 const consolidateMemory = async () => {
@@ -169,7 +166,6 @@ function validatePrerequisites(): void {
 
   const requiredDirs = [
     "_jobs/pending", "_jobs/running", "_jobs/done", "_jobs/failed",
-    "_delegation/pending", "_delegation/claimed", "_delegation/completed",
     "_agent-sessions",
   ];
   for (const dir of requiredDirs) {
@@ -238,11 +234,9 @@ async function writeCronSchedule(): Promise<void> {
 
   // ── Daemon tasks ──
   const daemonRows = [
-    { interval: "Every 30s", task: "promote-delegation", description: "Move completed delegation tasks to done" },
     { interval: "Every 1min", task: "expire-approvals", description: "Expire human-in-the-loop approvals past deadline" },
     { interval: "Every 5min", task: "heartbeat", description: "Process HEARTBEAT.md for actionable tasks" },
     { interval: "Every 5min", task: "health-check", description: "Detect stuck jobs & offline workers, alert on issues" },
-    { interval: "Every 5min", task: "relay-health", description: "Check relay bot connectivity" },
     { interval: "Every 30min", task: "memory-consolidation", description: "Consolidate cross-harness memories via Ollama qwen3.5:9b" },
     { interval: "Every 30min", task: "embeddings", description: "Embed new/modified vault notes into FTS5 + vector index" },
     { interval: "Monthly 1st", task: "budget-reset", description: "Reset currentMonthUsd/todayUsd counters in budget.md" },
@@ -427,7 +421,7 @@ async function sendDailyBrief(): Promise<void> {
   const daemonLines: string[] = [];
   for (const [name, s] of Object.entries(taskRunStatus)) {
     // Skip noisy low-value tasks in the brief
-    const skip = ["expire-approvals", "promote-delegation"].includes(name);
+    const skip = ["expire-approvals"].includes(name);
     if (skip) continue;
     if (s.runCount === 0) continue;
     const status = s.errorCount > 0 ? `⚠️ ${s.errorCount} error(s)` : "✅";
@@ -513,44 +507,6 @@ async function sendDailyBrief(): Promise<void> {
   // Reset run counts for next day's brief (keep error state for review)
   for (const s of Object.values(taskRunStatus)) {
     s.runCount = 0;
-  }
-}
-
-async function promoteDelegationReady(): Promise<void> {
-  try {
-    // Find all completed task IDs from fbmq's flat done/ directory
-    const completedIds = new Set<string>();
-    const completedDir = path.join(VAULT_PATH, "_fbmq/delegation/done");
-    if (fs.existsSync(completedDir)) {
-      const files = fs.readdirSync(completedDir).filter(f => f.endsWith(".md"));
-      for (const file of files) {
-        try {
-          const raw = fs.readFileSync(path.join(completedDir, file), "utf-8");
-          // taskId is in the Custom: continuation block, e.g. "  taskId: research-1"
-          const match = raw.match(/^\s+taskId:\s*(.+)$/m);
-          if (match) completedIds.add(match[1].trim());
-        } catch { }
-      }
-    }
-
-    // Also check legacy _delegation/completed/ for tasks completed before migration
-    const legacyDir = path.join(VAULT_PATH, "_delegation/completed");
-    if (fs.existsSync(legacyDir)) {
-      const files = fs.readdirSync(legacyDir).filter(f => f.endsWith(".md"));
-      for (const file of files) {
-        try {
-          const raw = fs.readFileSync(path.join(legacyDir, file), "utf-8");
-          const match = raw.match(/taskId:\s*["']?([^"'\n]+)/);
-          if (match) completedIds.add(match[1].trim());
-        } catch { }
-      }
-    }
-
-    if (completedIds.size > 0) {
-      await vault.delegationQueue.promoteReady(completedIds);
-    }
-  } catch (err) {
-    console.error("[promote] Error promoting delegated tasks:", err);
   }
 }
 
@@ -712,12 +668,6 @@ const tasks: {
   lastRun: number;
 }[] = [
     {
-      name: "promote-delegation",
-      intervalMs: 30 * 1000,
-      fn: promoteDelegationReady,
-      lastRun: 0,
-    },
-    {
       name: "expire-approvals",
       intervalMs: 60 * 1000,
       fn: expireApprovals,
@@ -733,12 +683,6 @@ const tasks: {
       name: "health-check",
       intervalMs: 5 * 60 * 1000,
       fn: healthCheck,
-      lastRun: 0,
-    },
-    {
-      name: "relay-health",
-      intervalMs: 5 * 60 * 1000,
-      fn: relayHealthCheck,
       lastRun: 0,
     },
     {
@@ -1046,6 +990,37 @@ async function runScheduler(): Promise<void> {
     console.log(`[daemon] Registered ${getWorkers().length} vault workers`);
   } else {
     console.log("[daemon] Vault workers disabled (set VAULT_WORKERS_ENABLED=true to enable)");
+  }
+
+  // ── Email Poller (opt-in via IMAP_HOST + IMAP_USER + IMAP_PASS) ────
+  const IMAP_HOST = process.env.IMAP_HOST;
+  const IMAP_USER = process.env.IMAP_USER;
+  const IMAP_PASS = process.env.IMAP_PASS;
+  if (IMAP_HOST && IMAP_USER && IMAP_PASS) {
+    try {
+      const { createEmailPollerTask } = await import("@repo/webmail-mcp/daemon");
+      const pollIntervalMin = parseInt(process.env.MAIL_POLL_INTERVAL_MIN ?? "10", 10);
+      const emailTask = createEmailPollerTask({
+        imap: {
+          host: IMAP_HOST,
+          port: parseInt(process.env.IMAP_PORT ?? "993", 10),
+          user: IMAP_USER,
+          pass: IMAP_PASS,
+        },
+        accountLabel: process.env.MAIL_ACCOUNT_LABEL ?? IMAP_USER,
+        intervalMs: pollIntervalMin * 60 * 1000,
+        notify,
+        vaultPath: VAULT_PATH,
+        vipSenders: process.env.MAIL_VIP_SENDERS?.split(",").map((s) => s.trim()).filter(Boolean),
+        urgentKeywords: process.env.MAIL_URGENT_KEYWORDS?.split(",").map((s) => s.trim()).filter(Boolean),
+      });
+      tasks.push({ ...emailTask, lastRun: 0 });
+      console.log(`[daemon] Email poller enabled for ${IMAP_USER} (every ${pollIntervalMin}min)`);
+    } catch (err) {
+      console.warn("[daemon] Email poller failed to load (non-fatal):", err instanceof Error ? err.message : err);
+    }
+  } else {
+    console.log("[daemon] Email poller disabled (set IMAP_HOST, IMAP_USER, IMAP_PASS to enable)");
   }
 
   // Start the vault sync engine (file watching + change detection)

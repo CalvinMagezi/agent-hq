@@ -21,14 +21,10 @@ export function createTempVault(): { vaultPath: string; client: VaultClient } {
     "_jobs/running",
     "_jobs/done",
     "_jobs/failed",
-    "_delegation/pending",
-    "_delegation/pending/claude-code",
-    "_delegation/pending/opencode",
-    "_delegation/pending/gemini-cli",
-    "_delegation/pending/any",
-    "_delegation/claimed",
-    "_delegation/completed",
-    "_delegation/relay-health",
+    "_tasks/pending",
+    "_tasks/running",
+    "_tasks/completed",
+    "_tasks/failed",
     "_threads/active",
     "_threads/archived",
     "_approvals/pending",
@@ -49,22 +45,6 @@ export function createTempVault(): { vaultPath: string; client: VaultClient } {
   for (const dir of dirs) {
     fs.mkdirSync(path.join(vaultPath, dir), { recursive: true });
   }
-
-  // Initialize fbmq queues with correct paths matching VaultClient constructor:
-  //   jobQueue → _fbmq/jobs (with priority)
-  //   delegationQueue main → _fbmq/delegation (with priority)
-  //   delegationQueue staged → _fbmq/staged (no priority, FIFO)
-  const jobsPath = path.join(vaultPath, "_fbmq/jobs");
-  const delegationPath = path.join(vaultPath, "_fbmq/delegation");
-  const stagedPath = path.join(vaultPath, "_fbmq/staged");
-
-  fs.mkdirSync(jobsPath, { recursive: true });
-  fs.mkdirSync(delegationPath, { recursive: true });
-  fs.mkdirSync(stagedPath, { recursive: true });
-
-  Bun.spawnSync(["fbmq", "init", jobsPath, "--priority"]);
-  Bun.spawnSync(["fbmq", "init", delegationPath, "--priority"]);
-  Bun.spawnSync(["fbmq", "init", stagedPath]);
 
   // Create minimal system files
   fs.writeFileSync(

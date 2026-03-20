@@ -17,7 +17,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import matter from "gray-matter";
-import type { HarnessType, DelegatedTask } from "./types";
+// HarnessType inlined (DelegatedTask removed from vault-types)
+type HarnessType = "claude-code" | "gemini-cli" | "opencode" | "qwen-code" | "mistral-vibe" | "codex-cli" | "any";
 
 // ─── Errors ────────────────────────────────────────────────────────
 

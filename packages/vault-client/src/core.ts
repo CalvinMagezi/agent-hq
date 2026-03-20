@@ -8,21 +8,18 @@
 import * as fs from "fs";
 import * as path from "path";
 import matter from "gray-matter";
-import { JobQueue, DelegationQueue, FbmqCli, jobCodec, delegationCodec } from "@repo/queue-transport";
+import { AtomicQueue } from "./atomicQueue";
 import type {
   Job,
   Note,
-  DelegatedTask,
 } from "./types";
 
 export class VaultClient {
   readonly vaultPath: string;
-  readonly jobQueue: JobQueue;
-  readonly delegationQueue: DelegationQueue;
+  readonly jobQueue: AtomicQueue;
+  readonly taskQueue: AtomicQueue;
 
   /** @internal */ claimedJobs = new Map<string, string>();
-  /** @internal */ claimedTasks = new Map<string, string>();
-  /** @internal */ legacyClaimedTasks = new Map<string, string>();
 
   constructor(vaultPath: string) {
     this.vaultPath = path.resolve(vaultPath);
@@ -30,11 +27,12 @@ export class VaultClient {
       throw new Error(`Vault not found at: ${this.vaultPath}`);
     }
 
-    this.jobQueue = new JobQueue({ queueRoot: this.resolve("_fbmq/jobs") });
-    this.delegationQueue = new DelegationQueue(
-      { queueRoot: this.resolve("_fbmq/delegation") },
-      this.resolve("_fbmq/staged")
-    );
+    this.jobQueue = new AtomicQueue(this.resolve("_jobs"), {
+      stages: ["pending", "running", "done", "failed"],
+    });
+    this.taskQueue = new AtomicQueue(this.resolve("_tasks"), {
+      stages: ["pending", "running", "completed", "failed"],
+    });
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────
@@ -154,24 +152,6 @@ export class VaultClient {
     }
   }
 
-  // ─── RFC822 Helpers ────────────────────────────────────────────────
-
-  /** @internal */ writeRFC822(filePath: string, item: any, codec: any) {
-    const { body, priority, tags, correlationId, custom, ttl } = codec.serialize(item);
-    let rfc822 = `Priority: ${priority}\n`;
-    if (tags) rfc822 += `Tags: ${tags}\n`;
-    if (correlationId) rfc822 += `Correlation-Id: ${correlationId}\n`;
-    if (ttl) rfc822 += `TTL: ${ttl}\n`;
-    if (custom && Object.keys(custom).length > 0) {
-      rfc822 += `Custom:\n`;
-      for (const [k, v] of Object.entries(custom)) {
-        rfc822 += `  ${k}: ${v}\n`;
-      }
-    }
-    rfc822 += `\n${body}`;
-    fs.writeFileSync(filePath, rfc822, "utf-8");
-  }
-
   // ─── Parsers ───────────────────────────────────────────────────────
 
   /** @internal */ parseJob(
@@ -224,11 +204,11 @@ export class VaultClient {
     };
   }
 
-  /** @internal */ parseDelegatedTask(
+  /** @internal */ parseTaskRecord(
     filePath: string,
     data: Record<string, any>,
     content: string,
-  ): DelegatedTask {
+  ): import("./types").TaskRecord {
     const instrMatch = content.match(
       /^#\s+Task\s+Instruction\s*\n([\s\S]*?)(?=\n##|$)/m,
     );
@@ -237,21 +217,12 @@ export class VaultClient {
     return {
       taskId: data.taskId ?? "",
       jobId: data.jobId ?? "",
-      targetHarnessType: data.targetHarnessType ?? "any",
-      status: data.status ?? "pending",
-      priority: data.priority ?? 50,
-      deadlineMs: data.deadlineMs ?? 600000,
-      dependsOn: data.dependsOn ?? [],
-      claimedBy: data.claimedBy ?? null,
-      claimedAt: data.claimedAt ?? null,
       instruction,
+      status: data.status ?? "pending",
+      targetHarnessType: data.targetHarnessType,
       result: data.result,
       error: data.error,
       createdAt: data.createdAt ?? "",
-      traceId: data.traceId ?? undefined,
-      spanId: data.spanId ?? undefined,
-      parentSpanId: data.parentSpanId ?? undefined,
-      securityConstraints: data.securityConstraints ?? undefined,
       _filePath: filePath,
     };
   }

@@ -132,55 +132,20 @@ export class EventBus {
       return { ...base, type: "job:status-changed" };
     }
 
-    // ─── fbmq job queue events ──────────────────────────
-    // pending/ has 256 hash-sharded buckets (00-ff); processing/, done/, failed/ are flat
-    if (path.match(/^_fbmq\/jobs\/pending\/[0-9a-f]{2}\//)) {
-      if (type === "create") return { ...base, type: "job:created" };
-      if (type === "delete") return { ...base, type: "job:claimed" };
-    }
-    if (path.startsWith("_fbmq/jobs/processing/")) {
-      if (type === "create") return { ...base, type: "job:claimed" };
-      if (type === "modify") return { ...base, type: "job:status-changed" };
-    }
-    if (path.startsWith("_fbmq/jobs/done/") || path.startsWith("_fbmq/jobs/failed/")) {
-      return { ...base, type: "job:status-changed" };
-    }
-
-    // ─── Delegation events ─────────────────────────────────────
-    if (path.startsWith("_delegation/pending/")) {
-      if (type === "create") {
-        return { ...base, type: "task:created" };
-      }
-      if (type === "modify") {
-        // Same as job:created — avoid double event from scanner+watcher
-        return { ...base, type: "task:status-changed" };
-      }
-      if (type === "delete") {
-        return { ...base, type: "task:claimed" };
-      }
-    }
-
-    if (path.startsWith("_delegation/claimed/")) {
-      if (type === "create") {
-        return { ...base, type: "task:claimed" };
-      }
-    }
-
-    if (path.startsWith("_delegation/completed/")) {
-      return { ...base, type: "task:completed" };
-    }
-
-    // ─── fbmq delegation queue events ───────────────────
-    // pending/ has 256 hash-sharded buckets (00-ff); processing/, done/, failed/ are flat
-    if (path.match(/^_fbmq\/delegation\/pending\/[0-9a-f]{2}\//)) {
+    // ─── Task queue events ────────────────────────────────────
+    if (path.startsWith("_tasks/pending/")) {
       if (type === "create") return { ...base, type: "task:created" };
       if (type === "delete") return { ...base, type: "task:claimed" };
     }
-    if (path.startsWith("_fbmq/delegation/processing/")) {
-      return { ...base, type: "task:claimed" };
+    if (path.startsWith("_tasks/running/")) {
+      if (type === "create") return { ...base, type: "task:claimed" };
+      if (type === "modify") return { ...base, type: "task:status-changed" };
     }
-    if (path.startsWith("_fbmq/delegation/done/")) {
+    if (path.startsWith("_tasks/completed/")) {
       return { ...base, type: "task:completed" };
+    }
+    if (path.startsWith("_tasks/failed/")) {
+      return { ...base, type: "task:status-changed" };
     }
 
     // ─── Approval events ──────────────────────────────────────

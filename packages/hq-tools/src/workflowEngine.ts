@@ -11,16 +11,20 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { VaultClient } from "@repo/vault-client";
+import { VaultClient, resolveChatProvider } from "@repo/vault-client";
 import type { TeamManifest, TeamStage, QualityGate } from "./types/teamManifest.js";
 import type { WorkflowRunRecord, AgentRunScore, GateOutcome } from "./types/teamPerformance.js";
 import { parseAgentFile, listAgentNames, buildAgentPromptSection } from "./agentLoader.js";
 import { recordRun } from "./performanceTracker.js";
+import { SmartTraceWriter } from "./smartTrace.js";
+import type { SmartDimensions } from "./smartTrace.js";
 
 interface WorkflowOptions {
   team: TeamManifest;
   instruction: string;
   executionMode?: "quick" | "standard" | "thorough";
+  /** Override the LLM model for all agents in this run (e.g. "anthropic/claude-haiku-4-5-20251001") */
+  modelOverride?: string;
 }
 
 interface StageResult {
@@ -55,6 +59,7 @@ export interface WorkflowResult {
 export class WorkflowEngine {
   private vault: VaultClient;
   private vaultPath: string;
+  private modelOverride?: string;
 
   constructor(vaultPath: string) {
     this.vaultPath = vaultPath;
@@ -63,18 +68,26 @@ export class WorkflowEngine {
 
   async run(options: WorkflowOptions): Promise<WorkflowResult> {
     const { team, instruction, executionMode = "standard" } = options;
+    this.modelOverride = options.modelOverride;
     const runId = generateId();
     const startedAt = nowISO();
     const startMs = Date.now();
 
+    // ── SMART Trace: track this run ──
+    const trace = new SmartTraceWriter(this.vaultPath, runId);
+    trace.appendEvent({ type: "run_start", runId, teamName: team.name, instruction: instruction.substring(0, 200) });
+
     const allGateResults: Record<string, GateOutcome> = {};
     const allAgentScores: Record<string, AgentRunScore> = {};
+    const taskAssignments: SmartDimensions["achievable"]["assignments"] = [];
     let stagesCompleted = 0;
     let finalStatus: WorkflowResult["status"] = "completed";
 
     const priorResults: Record<string, string> = {};
 
     for (const stage of team.stages) {
+      trace.appendEvent({ type: "stage_start", stageId: stage.stageId, pattern: stage.pattern, agents: stage.agents });
+
       const stageResult = await this.runStage(
         stage,
         team.name,
@@ -82,6 +95,7 @@ export class WorkflowEngine {
         instruction,
         priorResults,
         executionMode,
+        trace,
       );
 
       // Accumulate results
@@ -90,6 +104,7 @@ export class WorkflowEngine {
       }
       for (const [gateId, outcome] of Object.entries(stageResult.gateOutcomes)) {
         allGateResults[gateId] = outcome;
+        trace.appendEvent({ type: "gate_evaluated", gateId, outcome });
       }
       for (const [agentName, score] of Object.entries(allAgentScores)) {
         // accumulate scores — merge if already present
@@ -99,7 +114,15 @@ export class WorkflowEngine {
         }
       }
 
+      // Collect assignment info from stage results
+      for (const agentName of stage.agents) {
+        const harness = this.resolveHarness(agentName);
+        const status = stageResult.agentResults[agentName] ? "completed" : "unknown";
+        taskAssignments.push({ agent: agentName, harness, reason: `stage ${stage.stageId}`, status });
+      }
+
       stagesCompleted++;
+      trace.appendEvent({ type: "stage_complete", stageId: stage.stageId, success: stageResult.success });
 
       if (!stageResult.success) {
         // Check if any gate was BLOCKED
@@ -112,6 +135,52 @@ export class WorkflowEngine {
     const completedAt = nowISO();
     const durationMs = Date.now() - startMs;
 
+    // ── Write SMART trace summary ──
+    trace.appendEvent({ type: "run_complete", status: finalStatus, durationMs });
+    const dimensions: SmartDimensions = {
+      specific: { instruction, stagesCompleted, totalStages: team.stages.length },
+      measurable: {},
+      achievable: { assignments: taskAssignments },
+      relevant: { gateResults: Object.fromEntries(Object.entries(allGateResults).map(([k, v]) => [k, String(v)])) },
+      timeBound: { deadlineMs: 30 * 60 * 1000, deadlineMet: durationMs < 30 * 60 * 1000 },
+    };
+
+    const durationMin = Math.round(durationMs / 60000);
+    const gateSection = Object.entries(allGateResults)
+      .map(([gateId, outcome]) => `- ${gateId}: **${outcome}**`)
+      .join("\n") || "- No gates evaluated";
+    const resultsSection = Object.entries(priorResults)
+      .map(([stage, result]) => `### ${stage}\n\n${result.substring(0, 1000)}${result.length > 1000 ? "\n\n[truncated...]" : ""}`)
+      .join("\n\n");
+
+    trace.writeSummary({
+      runId,
+      teamName: team.name,
+      status: finalStatus,
+      startedAt,
+      completedAt,
+      durationMs,
+      dimensions,
+      body: [
+        `# Workflow Trace: ${team.name} — ${runId}`,
+        ``,
+        `**Status**: ${finalStatus} | **Duration**: ${durationMin}min | **Stages**: ${stagesCompleted}/${team.stages.length}`,
+        ``,
+        `## Task`,
+        ``,
+        instruction,
+        ``,
+        `## Gate Results`,
+        ``,
+        gateSection,
+        ``,
+        `## Stage Results`,
+        ``,
+        resultsSection,
+      ].join("\n"),
+    });
+
+    // Also write legacy retro note (for backward compatibility)
     const retroNotePath = await this.writeRetroNote({
       runId,
       teamName: team.name,
@@ -158,30 +227,54 @@ export class WorkflowEngine {
     instruction: string,
     priorResults: Record<string, string>,
     executionMode: string,
+    trace?: SmartTraceWriter,
   ): Promise<StageResult> {
     const agentResults: Record<string, string> = {};
     const gateOutcomes: Record<string, GateOutcome> = {};
 
     // Build tasks for this stage
-    const agentTasks = stage.agents.map(agentName => ({
-      taskId: `${runId}-${stage.stageId}-${agentName}`,
-      agentName,
-      instruction: this.buildTaskInstruction(agentName, instruction, priorResults),
-      targetHarnessType: this.resolveHarness(agentName),
-    }));
+    const agentTasks = stage.agents.map(agentName => {
+      const harness = this.resolveHarness(agentName);
+      const taskId = `${runId}-${stage.stageId}-${agentName}`;
+      trace?.appendEvent({ type: "task_assigned", taskId, agent: agentName, harness, reason: `stage ${stage.stageId}` });
+      return {
+        taskId,
+        agentName,
+        instruction: this.buildTaskInstruction(agentName, instruction, priorResults),
+        targetHarnessType: harness,
+      };
+    });
 
     let taskResults: Array<{ taskId: string; agentName: string; result: string }> = [];
 
     if (stage.pattern === "parallel") {
       // Run all agents concurrently
+      for (const t of agentTasks) trace?.appendEvent({ type: "task_started", taskId: t.taskId, harness: t.targetHarnessType });
       const results = await Promise.all(
         agentTasks.map(t => this.submitAndWaitForTask(t.taskId, t.agentName, t.instruction, t.targetHarnessType, runId))
       );
-      taskResults = agentTasks.map((t, i) => ({ taskId: t.taskId, agentName: t.agentName, result: results[i] }));
+      taskResults = agentTasks.map((t, i) => {
+        const failed = results[i].startsWith("[TIMEOUT]") || results[i].startsWith("[FAILED]");
+        trace?.appendEvent({
+          type: failed ? "task_failed" : "task_completed",
+          taskId: t.taskId,
+          ...(failed ? { error: results[i].substring(0, 200) } : {}),
+        });
+        return { taskId: t.taskId, agentName: t.agentName, result: results[i] };
+      });
     } else {
       // Run sequentially
       for (const task of agentTasks) {
+        trace?.appendEvent({ type: "task_started", taskId: task.taskId, harness: task.targetHarnessType });
+        const startMs = Date.now();
         const result = await this.submitAndWaitForTask(task.taskId, task.agentName, task.instruction, task.targetHarnessType, runId);
+        const failed = result.startsWith("[TIMEOUT]") || result.startsWith("[FAILED]");
+        trace?.appendEvent({
+          type: failed ? "task_failed" : "task_completed",
+          taskId: task.taskId,
+          durationMs: Date.now() - startMs,
+          ...(failed ? { error: result.substring(0, 200) } : {}),
+        });
         taskResults.push({ taskId: task.taskId, agentName: task.agentName, result });
       }
     }
@@ -300,41 +393,94 @@ export class WorkflowEngine {
     runId: string,
   ): Promise<string> {
     const jobId = `workflow-${runId}`;
-    
-    // Create the delegation task in vault
-    await this.vault.createDelegatedTasks(jobId, [{
+
+    // Record task in vault for traceability
+    await this.vault.submitTask(jobId, {
       taskId,
       instruction,
-      targetHarnessType: targetHarnessType as any,
-      priority: 60,
-      dependsOn: [],
-    }]);
+      targetHarnessType,
+    });
+    await this.vault.claimTask(taskId, "workflow-engine");
 
-    // Poll for completion (every 3s, timeout 30min)
-    const timeoutMs = 30 * 60 * 1000;
-    const pollIntervalMs = 3000;
-    const startMs = Date.now();
-
-    while (true) {
-      if (Date.now() - startMs > timeoutMs) {
-        return `[TIMEOUT] Task ${taskId} timed out after 30 minutes`;
-      }
-
-      const tasks = await this.vault.getTasksForJob(jobId);
-      const task = tasks.find(t => t.taskId === taskId);
-
-      if (task?.status === "completed") {
-        return task.result ?? "(no result)";
-      }
-      if (task?.status === "failed") {
-        return `[FAILED] ${task.error ?? "unknown error"}`;
-      }
-      if (task?.status === "cancelled") {
-        return `[CANCELLED] Task was cancelled`;
-      }
-
-      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+    // Execute inline via LLM
+    try {
+      const result = await this.executeLLMCall(instruction);
+      await this.vault.completeTask(taskId, result);
+      return result;
+    } catch (err: any) {
+      const errorMsg = err.message ?? String(err);
+      await this.vault.failTask(taskId, errorMsg);
+      return `[FAILED] ${errorMsg}`;
     }
+  }
+
+  /**
+   * Execute a single LLM call via OpenRouter, Anthropic, or Gemini.
+   * Uses modelOverride if set, otherwise resolves from environment.
+   */
+  private async executeLLMCall(instruction: string): Promise<string> {
+    const provider = resolveChatProvider();
+    const model = this.modelOverride ?? provider.model;
+
+    if (provider.type === "none" && !this.modelOverride) {
+      throw new Error("No LLM provider configured. Set OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY.");
+    }
+
+    // Anthropic native API
+    if (provider.type === "anthropic" && !this.modelOverride?.includes("/")) {
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": provider.apiKey!,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 4096,
+          messages: [{ role: "user", content: instruction }],
+        }),
+      });
+      if (!resp.ok) throw new Error(`Anthropic API ${resp.status}: ${await resp.text()}`);
+      const data = await resp.json() as any;
+      return data.content?.[0]?.text ?? "(empty response)";
+    }
+
+    // Gemini native API
+    if (provider.type === "gemini" && !this.modelOverride?.includes("/")) {
+      const url = `${provider.baseUrl}/models/${model}:generateContent?key=${provider.apiKey}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: instruction }] }],
+          generationConfig: { maxOutputTokens: 4096 },
+        }),
+      });
+      if (!resp.ok) throw new Error(`Gemini API ${resp.status}: ${await resp.text()}`);
+      const data = await resp.json() as any;
+      return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "(empty response)";
+    }
+
+    // OpenRouter (default — supports all model IDs with slash notation)
+    const apiKey = provider.type === "openrouter" ? provider.apiKey : process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error("No OpenRouter API key available for model: " + model);
+
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 4096,
+        messages: [{ role: "user", content: instruction }],
+      }),
+    });
+    if (!resp.ok) throw new Error(`OpenRouter API ${resp.status}: ${await resp.text()}`);
+    const data = await resp.json() as any;
+    return data.choices?.[0]?.message?.content ?? "(empty response)";
   }
 
   private async writeRetroNote(options: {
@@ -350,7 +496,7 @@ export class WorkflowEngine {
     completedAt: string;
     durationMs: number;
   }): Promise<string> {
-    const retroDir = path.join(this.vaultPath, "Notebooks", "Projects", "Cloud-HQ", "Retros");
+    const retroDir = path.join(this.vaultPath, "Notebooks", "Projects", "Agent-HQ", "Retros");
     fs.mkdirSync(retroDir, { recursive: true });
 
     const retroPath = path.join(retroDir, `${options.runId}-retro.md`);

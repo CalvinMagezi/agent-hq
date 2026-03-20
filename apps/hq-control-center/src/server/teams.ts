@@ -181,7 +181,7 @@ export const getAgentLeaderboard = createServerFn({ method: 'GET' }).handler(
 export const getActiveWorkflows = createServerFn({ method: 'GET' }).handler(
   async (): Promise<{ workflows: any[] }> => {
     // Read retro notes directory for recent workflows
-    const retroDir = path.join(VAULT_PATH, 'Notebooks/Projects/Cloud-HQ/Retros')
+    const retroDir = path.join(VAULT_PATH, 'Notebooks/Projects/Agent-HQ/Retros')
     if (!fs.existsSync(retroDir)) return { workflows: [] }
 
     const files = fs.readdirSync(retroDir)
@@ -270,25 +270,29 @@ export const saveCustomTeam = createServerFn({ method: 'POST' })
 interface LaunchWorkflowInput {
   teamName: string
   instruction: string
+  modelOverride?: string
 }
 
 export const launchTeamWorkflow = createServerFn({ method: 'POST' })
   .inputValidator((d: LaunchWorkflowInput) => d)
-  .handler(async ({ data }): Promise<{ success: boolean; workflowId: string }> => {
-    // Write a job to vault for the daemon to pick up
-    const jobId = `workflow-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`
-    const pendingDir = path.join(VAULT_PATH, '_jobs/pending')
-    fs.mkdirSync(pendingDir, { recursive: true })
+  .handler(async ({ data }): Promise<{ success: boolean; workflowId: string; status?: string; durationMs?: number }> => {
+    const { WorkflowEngine, getTeam } = await import('@repo/hq-tools')
 
-    const content = `---
-type: team-workflow
-teamName: ${data.teamName}
-status: pending
-createdAt: "${new Date().toISOString()}"
-instruction: |
-  ${data.instruction.split('\n').join('\n  ')}
----
-`
-    fs.writeFileSync(path.join(pendingDir, `${jobId}.md`), content, 'utf-8')
-    return { success: true, workflowId: jobId }
+    const team = getTeam(data.teamName)
+    if (!team) throw new Error(`Team '${data.teamName}' not found`)
+
+    const engine = new WorkflowEngine(VAULT_PATH)
+    const result = await engine.run({
+      team,
+      instruction: data.instruction,
+      executionMode: 'standard',
+      modelOverride: data.modelOverride,
+    })
+
+    return {
+      success: result.status === 'completed',
+      workflowId: result.runId,
+      status: result.status,
+      durationMs: result.durationMs,
+    }
   })

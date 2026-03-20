@@ -27,6 +27,8 @@ import { SyncState } from "./syncState";
 import { EventBus } from "./eventBus";
 import { LockManager } from "./lockManager";
 import { ConflictResolver } from "./conflictResolver";
+import { WriteHistory } from "./writeHistory";
+import type { WriteHistoryConfig } from "./writeHistory";
 import { openSyncDatabase } from "./db";
 import { generateDeviceId } from "./utils";
 import type {
@@ -46,6 +48,7 @@ export class VaultSync {
   readonly syncState: SyncState;
   readonly lockManager: LockManager;
   readonly conflictResolver: ConflictResolver;
+  readonly writeHistory: WriteHistory;
   readonly deviceId: string;
 
   private watcher: FileWatcher;
@@ -71,6 +74,10 @@ export class VaultSync {
       this.deviceId,
       config.conflictStrategy ?? "merge-frontmatter",
     );
+    this.writeHistory = new WriteHistory({
+      vaultPath: config.vaultPath,
+      debug: config.debug,
+    });
     this.scanner = new FullScanner(
       config.vaultPath,
       this.syncState,
@@ -233,7 +240,20 @@ export class VaultSync {
         );
       }
 
-      // 3. Classify into domain event and emit
+      // 3. Record write history (non-blocking, tracked prefixes only)
+      try {
+        this.writeHistory.record(
+          change.path,
+          change.type,
+          change.contentHash,
+          change.size,
+          change.oldPath,
+        );
+      } catch {
+        // Non-fatal — history recording must never block the pipeline
+      }
+
+      // 4. Classify into domain event and emit
       const event = this.eventBus.classifyChange(change);
       await this.eventBus.emit(event);
     }
@@ -246,7 +266,7 @@ export class VaultSync {
    * Flow: remote change → conflict check → record in ChangeLog → update SyncState → emit events
    *
    * The caller is responsible for writing actual file content to disk
-   * (either via Obsidian API or fs.writeFileSync) BEFORE calling this method.
+   * (either via external editor API or fs.writeFileSync) BEFORE calling this method.
    */
   async injectRemoteChanges(
     changes: FileChange[],
@@ -449,15 +469,17 @@ export class SyncedVaultClient extends VaultClient {
     );
   }
 
-  async updateTaskStatus(
-    taskId: string,
-    status: string,
-    result?: string,
-    error?: string,
-  ): Promise<void> {
+  async completeTask(taskId: string, result: string): Promise<void> {
     const lockKey = `task:${taskId}`;
     return this.sync.lockManager.withLock(lockKey, () =>
-      super.updateTaskStatus(taskId, status as any, result, error),
+      super.completeTask(taskId, result),
+    );
+  }
+
+  async failTask(taskId: string, error: string): Promise<void> {
+    const lockKey = `task:${taskId}`;
+    return this.sync.lockManager.withLock(lockKey, () =>
+      super.failTask(taskId, error),
     );
   }
 
@@ -498,4 +520,6 @@ export { FileWatcher } from "./watcher";
 export { FullScanner } from "./scanner";
 export { LockManager } from "./lockManager";
 export { ConflictResolver } from "./conflictResolver";
+export { WriteHistory } from "./writeHistory";
+export type { WriteHistoryConfig } from "./writeHistory";
 export { openSyncDatabase } from "./db";

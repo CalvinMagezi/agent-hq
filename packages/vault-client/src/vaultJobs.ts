@@ -1,10 +1,12 @@
 /**
  * VaultClient — Job Queue methods.
+ *
+ * Backed by AtomicQueue (pure filesystem, no external binary).
  */
 
 import * as fs from "fs";
 import * as path from "path";
-import { FbmqCli, jobCodec } from "@repo/queue-transport";
+import matter from "gray-matter";
 import { VaultClient } from "./core";
 import type {
   Job,
@@ -59,11 +61,19 @@ declare module "./core" {
 }
 
 VaultClient.prototype.getPendingJob = async function (workerId) {
-  const job = await this.jobQueue.dequeue();
-  if (job) {
-    this.claimedJobs.set(job.jobId, job._filePath);
+  const item = this.jobQueue.dequeue("pending", "running");
+  if (!item) return null;
+
+  try {
+    const { data, content } = this.readMdFile(item.path);
+    const job = this.parseJob(item.path, data, content);
+    this.claimedJobs.set(job.jobId, item.path);
+    return job;
+  } catch {
+    // If we can't read the file, move it to failed
+    this.jobQueue.transition(item.name, "running", "failed");
+    return null;
   }
-  return job;
 };
 
 VaultClient.prototype.claimJob = async function (jobId, workerId) {
@@ -71,17 +81,11 @@ VaultClient.prototype.claimJob = async function (jobId, workerId) {
   if (!claimedPath) return false;
 
   try {
-    const headers = await this.jobQueue["cli"].inspect(claimedPath);
-    const rawBody = await this.jobQueue["cli"].cat(claimedPath);
-    const { custom, cleanBody } = FbmqCli.parseBodyCustom(rawBody);
-    headers.custom = { ...headers.custom, ...custom };
-    const job = jobCodec.deserialize(claimedPath, cleanBody, headers);
-
-    job.status = "running";
-    job.workerId = workerId;
-    job.updatedAt = this.nowISO();
-
-    this.writeRFC822(claimedPath, job, jobCodec);
+    this.updateFrontmatter(claimedPath, {
+      status: "running",
+      workerId,
+      updatedAt: this.nowISO(),
+    });
     return true;
   } catch {
     return false;
@@ -94,51 +98,36 @@ VaultClient.prototype.updateJobStatus = async function (jobId, status, data) {
     throw new Error(`Job not found or not claimed by this process: ${jobId}`);
   }
 
-  const headers = await this.jobQueue["cli"].inspect(claimedPath);
-  const rawBodyStr = await this.jobQueue["cli"].cat(claimedPath);
-  const { custom: jobCustom, cleanBody: jobCleanBody } = FbmqCli.parseBodyCustom(rawBodyStr);
-  headers.custom = { ...jobCustom, ...headers.custom };
-  const job = jobCodec.deserialize(claimedPath, jobCleanBody, headers);
-  if (job.jobId === "unknown" || !job.jobId) job.jobId = jobId;
-
-  job.status = status;
-  job.updatedAt = this.nowISO();
-
-  if (data?.result) job.result = data.result;
-  if (data?.stats) job.stats = data.stats;
-  if (data?.steeringMessage) job.steeringMessage = data.steeringMessage;
-  if (data?.streamingText) job.streamingText = data.streamingText;
+  const updates: Record<string, any> = {
+    status,
+    updatedAt: this.nowISO(),
+  };
+  if (data?.result) updates.result = data.result;
+  if (data?.stats) updates.stats = data.stats;
+  if (data?.steeringMessage) updates.steeringMessage = data.steeringMessage;
+  if (data?.streamingText) updates.streamingText = data.streamingText;
   if (data?.conversationHistory && data.conversationHistory.length > 0) {
-    job.conversationHistory = data.conversationHistory;
+    updates.conversationHistory = data.conversationHistory;
   }
 
-  this.writeRFC822(claimedPath, job, jobCodec);
+  this.updateFrontmatter(claimedPath, updates);
 
   if (status === "done" || status === "failed" || status === "cancelled") {
-    await this.jobQueue.complete(claimedPath);
+    const filename = path.basename(claimedPath);
+    const targetStage = status === "done" ? "done" : "failed";
+    this.jobQueue.transition(filename, "running", targetStage);
     this.claimedJobs.delete(jobId);
   }
 };
 
 VaultClient.prototype.getJob = async function (jobId) {
-  const queueRoot = this.resolve("_fbmq", "jobs");
-  const searchDirs = ["processing", "done", "failed"];
-  for (const dir of searchDirs) {
-    const dirPath = path.join(queueRoot, dir);
-    if (!fs.existsSync(dirPath)) continue;
-    const files = fs.readdirSync(dirPath);
-    for (const file of files) {
-      if (!file.endsWith(".md")) continue;
-      const filePath = path.join(dirPath, file);
+  for (const stage of ["running", "done", "failed"]) {
+    const items = this.jobQueue.list(stage);
+    for (const item of items) {
       try {
-        const headers = await this.jobQueue["cli"].inspect(filePath);
-        if (headers.custom?.jobId === jobId) {
-          const rawBody = await this.jobQueue["cli"].cat(filePath);
-          const { custom, cleanBody } = FbmqCli.parseBodyCustom(rawBody);
-          headers.custom = { ...custom, ...headers.custom };
-          const job = jobCodec.deserialize(filePath, cleanBody, headers);
-          if (job.jobId === "unknown" || !job.jobId) job.jobId = jobId;
-          return job;
+        const { data, content } = this.readMdFile(item.path);
+        if (data.jobId === jobId) {
+          return this.parseJob(item.path, data, content);
         }
       } catch { /* skip unreadable files */ }
     }
@@ -168,22 +157,27 @@ VaultClient.prototype.addJobLog = async function (jobId, type, content, metadata
 
 VaultClient.prototype.createJob = async function (options) {
   const jobId = `job-${this.generateId()}`;
-  const job: Job = {
-    jobId,
-    type: options.type ?? "background",
-    status: "pending",
-    priority: options.priority ?? 50,
-    securityProfile: options.securityProfile ?? "standard",
-    modelOverride: options.modelOverride ?? null,
-    thinkingLevel: options.thinkingLevel ?? null,
-    workerId: null,
-    threadId: options.threadId ?? null,
-    createdAt: this.nowISO(),
-    instruction: options.instruction,
-    _filePath: "",
-  };
+  const filename = `${jobId}.md`;
+  const content = `# Instruction\n\n${options.instruction}`;
 
-  await this.jobQueue.enqueue(job);
+  this.writeMdFile(
+    path.join(this.vaultPath, "_jobs", "pending", filename),
+    {
+      jobId,
+      type: options.type ?? "background",
+      status: "pending",
+      priority: options.priority ?? 50,
+      securityProfile: options.securityProfile ?? "standard",
+      modelOverride: options.modelOverride ?? null,
+      thinkingLevel: options.thinkingLevel ?? null,
+      workerId: null,
+      threadId: options.threadId ?? null,
+      createdAt: this.nowISO(),
+    },
+    content,
+    { isCreate: true },
+  );
+
   return jobId;
 };
 

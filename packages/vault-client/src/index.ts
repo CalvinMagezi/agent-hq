@@ -1,7 +1,7 @@
 /**
  * VaultClient — Local filesystem replacement for Convex backend.
  *
- * Reads/writes markdown files with YAML frontmatter in the Obsidian vault.
+ * Reads/writes markdown files with YAML frontmatter in the markdown vault.
  * Job claiming uses atomic fs.renameSync for concurrency safety.
  *
  * Domain methods are split across files for maintainability:
@@ -16,7 +16,7 @@
 // Side-effect imports — augment VaultClient.prototype with domain methods
 import "./vaultJobs";
 import "./vaultNotes";
-import "./vaultDelegation";
+import "./vaultTasks";
 import "./vaultSystem";
 import "./vaultUsage";
 
@@ -27,8 +27,7 @@ export { VaultClient } from "./core";
 export type {
   Job,
   Note,
-  DelegatedTask,
-  RelayHealth,
+  TaskRecord,
   SystemContext,
   SearchResult,
   RecentActivityEntry,
@@ -37,6 +36,9 @@ export type {
 export { calculateCost } from "./pricing";
 export * from "./types";
 export { SearchClient } from "./search";
+export { NoteQuery } from "./noteQuery";
+export { AtomicQueue } from "./atomicQueue";
+export type { AtomicQueueConfig, QueueItem } from "./atomicQueue";
 export { TraceDB } from "./traceDb";
 export { BudgetGuard } from "./budgetGuard";
 export type { BudgetCheckResult } from "./budgetGuard";

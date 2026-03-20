@@ -28,8 +28,8 @@ describe("Job Lifecycle (fbmq)", () => {
 
     expect(jobId).toMatch(/^job-/);
 
-    // Job should be in fbmq pending queue (depth > 0)
-    const depth = await client.jobQueue.depth();
+    // Job should be in pending queue
+    const depth = client.jobQueue.count("pending");
     expect(depth).toBeGreaterThanOrEqual(1);
   });
 

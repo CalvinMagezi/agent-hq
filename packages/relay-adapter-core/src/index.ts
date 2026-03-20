@@ -80,13 +80,6 @@ export {
 } from "./chatHandler.js";
 
 export {
-  handleDelegation,
-  handleVaultEvent,
-  type DelegationContext,
-  type DelegationState,
-} from "./delegation.js";
-
-export {
   UnifiedAdapterBot,
   type UnifiedAdapterBotConfig,
 } from "./unifiedBot.js";

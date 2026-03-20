@@ -100,6 +100,7 @@ import {
   PlanGalleryTool,
   PlanPhaseUpdateTool,
 } from "./tools/planning.js";
+import { webmailTools } from "./tools/webmail.js";
 
 export {
   GoogleWorkspaceSchemaTool,
@@ -128,6 +129,14 @@ export {
   needsFallback,
 } from "./capabilityResolver.js";
 export type { CapabilityResolution } from "./capabilityResolver.js";
+export { TeamOrchestrator } from "./teamOrchestrator.js";
+export type { TaskAssignment, OrchestratorDecision, PermissionRequest, OrchestratorContext, MessageResponse, WorkflowContext } from "./teamOrchestrator.js";
+export { SmartTraceWriter } from "./smartTrace.js";
+export type { TraceEvent, TraceEventType, SmartDimensions, SmartTraceSummary } from "./smartTrace.js";
+export { CommsWatcher } from "./commsWatcher.js";
+export type { AgentMessage, AgentMessageType, MessageHandler } from "./commsWatcher.js";
+export { HarnessPool } from "./harnessPool.js";
+export type { HarnessExecutor, PoolConfig, HarnessStatus } from "./harnessPool.js";
 export {
   parseTeamFile,
   getBuiltInTeam,
@@ -139,6 +148,7 @@ export {
   TEAMS_DIR,
   VAULT_TEAMS_DIR,
 } from "./teamLoader.js";
+export { WorkflowEngine } from "./workflowEngine.js";
 export * from "./types/agentDefinition.js";
 export * from "./types/teamManifest.js";
 export * from "./types/teamPerformance.js";
@@ -197,5 +207,7 @@ export function createDefaultRegistry(_ctx?: HQContext): ToolRegistry {
   registry.register(PlanVisualizeTool);
   registry.register(PlanGalleryTool);
   registry.register(PlanPhaseUpdateTool);
+  // Webmail tools (IMAP read + SMTP send — requires IMAP_HOST/IMAP_USER/IMAP_PASS env)
+  for (const tool of webmailTools) registry.register(tool);
   return registry;
 }

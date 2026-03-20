@@ -15,7 +15,6 @@ import type { DaemonContext } from "./context.js";
 const STALE_JOB_DAYS = 7;
 const STUCK_JOB_HOURS = 2;
 const OFFLINE_WORKER_SECONDS = 30;
-const RELAY_STALE_SECONDS = 60;
 
 // ─── Task: Expire Stale Approvals (every 1 min) ────────────────────
 
@@ -117,59 +116,6 @@ export async function healthCheck(ctx: DaemonContext): Promise<void> {
   }
 }
 
-// ─── Task: Relay Health Check (every 5 min) ─────────────────────────
-
-export async function relayHealthCheck(ctx: DaemonContext): Promise<void> {
-  const now = Date.now();
-  const relays = await ctx.vault.getRelayHealthAll();
-
-  for (const relay of relays) {
-    if (relay.lastHeartbeat) {
-      const elapsed = now - new Date(relay.lastHeartbeat).getTime();
-
-      let newStatus = relay.status;
-      if (elapsed > RELAY_STALE_SECONDS * 2 * 1000) {
-        newStatus = "offline";
-      } else if (elapsed > RELAY_STALE_SECONDS * 1000) {
-        newStatus = "degraded";
-      }
-
-      if (newStatus !== relay.status) {
-        await ctx.vault.upsertRelayHealth(relay.relayId, { status: newStatus });
-        console.log(
-          `[relay-health] ${relay.displayName}: ${relay.status} -> ${newStatus}`,
-        );
-      }
-    }
-  }
-
-  // Time out stale claimed tasks
-  const claimedDir = path.join(ctx.vaultPath, "_delegation/claimed");
-  if (fs.existsSync(claimedDir)) {
-    const files = fs
-      .readdirSync(claimedDir)
-      .filter((f) => f.endsWith(".md"));
-    const matter = await import("gray-matter").then((m) => m.default);
-
-    for (const file of files) {
-      try {
-        const filePath = path.join(claimedDir, file);
-        const { data } = matter(fs.readFileSync(filePath, "utf-8"));
-
-        if (data.claimedAt && data.deadlineMs) {
-          const elapsed = now - new Date(data.claimedAt).getTime();
-          if (elapsed > data.deadlineMs) {
-            await ctx.vault.updateTaskStatus(data.taskId, "timeout");
-            console.log(`[relay-health] Task ${data.taskId} timed out`);
-          }
-        }
-      } catch {
-        // Skip
-      }
-    }
-  }
-}
-
 // ─── Task: Embedding Processor (every 30 min) ──────────────────────
 
 export async function processEmbeddings(ctx: DaemonContext): Promise<void> {
@@ -255,11 +201,11 @@ export async function cleanupStaleJobs(ctx: DaemonContext): Promise<void> {
   let cleaned = 0;
 
   try {
-    await ctx.vault.jobQueue.reap(7200);
-    await ctx.vault.jobQueue.purge(STALE_JOB_DAYS * 24 * 3600);
+    await ctx.vault.jobQueue.reap("running", "pending", 7200);
+    await ctx.vault.jobQueue.purge("done", STALE_JOB_DAYS * 24 * 3600);
     cleaned++;
   } catch (err) {
-    console.error("[cleanup] fbmq job queue cleanup failed:", err);
+    console.error("[cleanup] job queue cleanup failed:", err);
   }
 
   const logsDir = path.join(ctx.vaultPath, "_logs");
@@ -282,65 +228,24 @@ export async function cleanupStaleJobs(ctx: DaemonContext): Promise<void> {
   }
 }
 
-// ─── Task: Delegation Artifact Cleanup (every 1 hr) ────────────────
+// ─── Task: Task Queue Cleanup (every 1 hr) ──────────────────────────
 
 export async function cleanupDelegationArtifacts(ctx: DaemonContext): Promise<void> {
-  const now = Date.now();
-  const signalMaxAge = 60 * 60 * 1000;
-  const resultMaxAge = 7 * 24 * 3600 * 1000;
   let cleaned = 0;
 
-  try {
-    await ctx.vault.delegationQueue.reap(7200);
-    await ctx.vault.delegationQueue.purge(7 * 24 * 3600);
-    cleaned++;
-  } catch (err) {
-    console.error("[delegation-cleanup] fbmq delegation queue cleanup failed:", err);
-  }
+  // Reap stale running tasks (>2hr) back to pending
+  cleaned += ctx.vault.taskQueue.reap("running", "pending", 7200);
 
-  const signalsDir = path.join(ctx.vaultPath, "_delegation/signals");
-  if (fs.existsSync(signalsDir)) {
-    for (const file of fs.readdirSync(signalsDir).filter(f => f.endsWith(".md"))) {
-      try {
-        const filePath = path.join(signalsDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > signalMaxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch { /* skip */ }
-    }
-  }
+  // Purge completed/failed tasks older than 7 days
+  cleaned += ctx.vault.taskQueue.purge("completed", 7 * 24 * 3600);
+  cleaned += ctx.vault.taskQueue.purge("failed", 7 * 24 * 3600);
 
-  const resultsDir = path.join(ctx.vaultPath, "_delegation/results");
-  if (fs.existsSync(resultsDir)) {
-    for (const file of fs.readdirSync(resultsDir).filter(f => f.endsWith(".md"))) {
-      try {
-        const filePath = path.join(resultsDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > resultMaxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch { /* skip */ }
-    }
-  }
-
-  const liveDir = path.join(ctx.vaultPath, "_delegation/live");
-  if (fs.existsSync(liveDir)) {
-    for (const file of fs.readdirSync(liveDir).filter(f => f.endsWith(".md"))) {
-      try {
-        const filePath = path.join(liveDir, file);
-        const stat = fs.statSync(filePath);
-        if (now - stat.mtimeMs > signalMaxAge) {
-          fs.unlinkSync(filePath);
-          cleaned++;
-        }
-      } catch { /* skip */ }
-    }
-  }
+  // Also clean up job queue
+  cleaned += ctx.vault.jobQueue.reap("running", "pending", 7200);
+  cleaned += ctx.vault.jobQueue.purge("done", 7 * 24 * 3600);
+  cleaned += ctx.vault.jobQueue.purge("failed", 7 * 24 * 3600);
 
   if (cleaned > 0) {
-    console.log(`[delegation-cleanup] Removed ${cleaned} stale artifact(s)`);
+    console.log(`[queue-cleanup] Removed/reaped ${cleaned} stale item(s)`);
   }
 }

@@ -1,13 +1,13 @@
 /**
  * VaultAPI — Drop-in replacement for ConvexAPI in the Discord relay.
  *
- * Reads/writes directly to the Obsidian vault filesystem instead of
+ * Reads/writes directly to the vault filesystem instead of
  * calling Convex HTTP endpoints. Same API surface as convex.ts.
  */
 
 import { VaultClient } from "@repo/vault-client";
 import { SearchClient } from "@repo/vault-client/search";
-import type { RelayConfig, ConvexNote, MemoryFact, DelegatedTask } from "./types.js";
+import type { RelayConfig, ConvexNote, MemoryFact } from "./types.js";
 import * as path from "path";
 import * as fs from "fs";
 
@@ -230,20 +230,13 @@ export class VaultAPI {
     }
   }
 
-  /** Send agent heartbeat by updating relay health file */
+  /** Send agent heartbeat (relay health tracking removed) */
   async sendHeartbeat(
-    workerId: string,
-    status: "online" | "busy" | "offline",
-    metadata?: Record<string, unknown>,
+    _workerId: string,
+    _status: "online" | "busy" | "offline",
+    _metadata?: Record<string, unknown>,
   ): Promise<void> {
-    try {
-      await this.vault.upsertRelayHealth(workerId, {
-        status: status === "online" ? "healthy" : status === "busy" ? "degraded" : "offline",
-        lastHeartbeat: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      console.warn("[VaultAPI] Heartbeat error:", err.message);
-    }
+    // No-op — relay health system removed
   }
 
   /** Save a message to channel history */
@@ -288,97 +281,24 @@ export class VaultAPI {
     }
   }
 
-  // ── Delegation API ────────────────────────────────────────────────
-
-  /** Get pending delegated tasks for this relay bot */
-  async getPendingDelegations(
-    relayId: string,
-    harnessType: string,
-  ): Promise<DelegatedTask[]> {
-    try {
-      const tasks = await this.vault.getPendingTasks(harnessType);
-      return tasks.map((t) => ({
-        _id: t.taskId,
-        taskId: t.taskId,
-        jobId: t.jobId,
-        instruction: t.instruction,
-        targetHarnessType: t.targetHarnessType,
-        status: t.status,
-        priority: t.priority,
-        modelOverride: undefined as string | undefined,
-        dependsOn: t.dependsOn,
-        createdAt: Date.now(),
-        traceId: t.traceId,
-        spanId: t.spanId,
-        securityConstraints: t.securityConstraints as any,
-      }));
-    } catch {
-      return [];
-    }
-  }
-
-  /** Claim a pending delegated task */
-  async claimDelegation(
-    taskId: string,
-    relayId: string,
-  ): Promise<boolean> {
-    try {
-      return await this.vault.claimTask(taskId, relayId);
-    } catch (err: any) {
-      console.warn("[VaultAPI] Claim delegation error:", err.message);
-      return false;
-    }
-  }
-
-  /** Update a delegated task status */
-  async updateDelegation(
-    taskId: string,
-    status: "running" | "completed" | "failed" | "cancelled" | "timeout",
-    result?: string,
-    error?: string,
-  ): Promise<void> {
-    try {
-      await this.vault.updateTaskStatus(taskId, status, result, error);
-    } catch (err: any) {
-      console.warn("[VaultAPI] Update delegation error:", err.message);
-    }
-  }
-
-  /** Update relay health with capabilities */
+  /** Update relay health (relay health tracking removed) */
   async updateRelayHealth(
-    relayId: string,
-    harnessType: string,
-    displayName: string,
-    capabilities: string[],
+    _relayId: string,
+    _harnessType: string,
+    _displayName: string,
+    _capabilities: string[],
   ): Promise<void> {
-    try {
-      await this.vault.upsertRelayHealth(relayId, {
-        harnessType,
-        displayName,
-        capabilities,
-        status: "healthy",
-      });
-    } catch (err: any) {
-      console.warn("[VaultAPI] Update relay health error:", err.message);
-    }
+    // No-op — relay health system removed
   }
 
-  /** Write a live stdout chunk for a running delegated task */
-  writeLiveChunk(taskId: string, claimedBy: string, chunk: string): void {
-    try {
-      this.vault.writeLiveChunk(taskId, claimedBy, chunk);
-    } catch {
-      // Non-fatal — live output is best-effort
-    }
+  /** Write a live stdout chunk (live output tracking removed) */
+  writeLiveChunk(_taskId: string, _claimedBy: string, _chunk: string): void {
+    // No-op — live output system removed
   }
 
-  /** Delete the live output file for a task (call at completion or failure) */
-  deleteLiveOutput(taskId: string): void {
-    try {
-      this.vault.deleteLiveOutput(taskId);
-    } catch {
-      // Non-fatal
-    }
+  /** Delete live output file (live output tracking removed) */
+  deleteLiveOutput(_taskId: string): void {
+    // No-op — live output system removed
   }
 
   /** Get comprehensive system status for the !hq status command */
@@ -447,21 +367,8 @@ export class VaultAPI {
       }
     } catch { /* skip */ }
 
-    // Read relay health
+    // Relay health tracking removed
     const relays: SystemStatus["relays"] = [];
-    try {
-      const relayHealth = await this.vault.getRelayHealthAll();
-      for (const r of relayHealth) {
-        relays.push({
-          displayName: r.displayName ?? r.relayId,
-          relayId: r.relayId,
-          status: r.status ?? "unknown",
-          lastHeartbeat: r.lastHeartbeat ?? null,
-          tasksCompleted: r.tasksCompleted ?? 0,
-          tasksFailed: r.tasksFailed ?? 0,
-        });
-      }
-    } catch { /* skip */ }
 
     return { daemon, workflows, heartbeat, workers, relays, cronSchedule };
   }

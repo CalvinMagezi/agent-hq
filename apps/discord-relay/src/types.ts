@@ -71,32 +71,3 @@ export interface ClaudeCallOptions {
   continueSession?: boolean;
 }
 
-/** Security constraints passed from HQ orchestrator to relay bots */
-export interface DelegationSecurityConstraints {
-  blockedCommands?: string[];
-  filesystemAccess?: "full" | "read-only" | "restricted";
-  allowedDirectories?: string[];
-  noGit?: boolean;
-  noNetwork?: boolean;
-  maxExecutionMs?: number;
-}
-
-/** A task delegated from HQ orchestrator to a relay bot */
-export interface DelegatedTask {
-  _id: string;
-  taskId: string;
-  jobId: string;
-  instruction: string;
-  targetHarnessType: string;
-  targetRelayId?: string;
-  status: string;
-  priority?: number;
-  modelOverride?: string;
-  discordChannelId?: string;
-  dependsOn?: string[];
-  createdAt: number;
-  /** Trace context — set by HQ when orchestrating */
-  traceId?: string;
-  spanId?: string;
-  securityConstraints?: DelegationSecurityConstraints;
-}

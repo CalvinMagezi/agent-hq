@@ -139,6 +139,7 @@ interface RunTeamWorkflowInput {
   teamName: string;
   instruction: string;
   executionMode?: "quick" | "standard" | "thorough";
+  modelOverride?: string;
 }
 
 interface RunTeamWorkflowOutput {
@@ -168,6 +169,9 @@ export const RunTeamWorkflowTool: HQTool<RunTeamWorkflowInput, RunTeamWorkflowOu
         Type.Literal("thorough"),
       ], { description: "Override the team's default execution mode" })
     ),
+    modelOverride: Type.Optional(
+      Type.String({ description: "Override the LLM model for all agents (e.g. 'anthropic/claude-haiku-4-5-20251001' for fast/cheap runs)" })
+    ),
   }),
   async execute(input, ctx) {
     const team = getTeam(input.teamName);
@@ -184,6 +188,7 @@ export const RunTeamWorkflowTool: HQTool<RunTeamWorkflowInput, RunTeamWorkflowOu
       team,
       instruction: input.instruction,
       executionMode: input.executionMode ?? team.executionMode ?? "standard",
+      modelOverride: input.modelOverride,
     });
 
     return {

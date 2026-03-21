@@ -2,7 +2,11 @@
 
 All notable changes to Agent-HQ will be documented in this file.
 
-## [0.2.0] — 2026-03-21
+## [0.6.0] — 2026-03-21
+
+> **Note**: Continues from v0.5.0 (Bun/TS monorepo). This release marks the full Rust rewrite.
+> The npm package `@calvin.magezi/agent-hq` is deprecated — the canonical distribution is now
+> the `hq` binary from [GitHub Releases](https://github.com/CalvinMagezi/agent-hq/releases).
 
 ### Major: Modular Architecture Refactor
 

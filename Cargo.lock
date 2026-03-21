@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "hq-agent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1269,6 +1269,8 @@ dependencies = [
  "hq-core",
  "hq-db",
  "hq-llm",
+ "hq-memory",
+ "hq-tools",
  "hq-vault",
  "serde",
  "serde_json",
@@ -1280,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "hq-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1291,8 +1293,12 @@ dependencies = [
  "futures",
  "gray_matter",
  "hq-core",
+ "hq-daemon",
  "hq-db",
  "hq-llm",
+ "hq-memory",
+ "hq-sync",
+ "hq-tools",
  "hq-vault",
  "hq-web",
  "reqwest 0.12.28",
@@ -1309,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "hq-context"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1325,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "hq-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1342,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "hq-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1363,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "hq-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1378,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "hq-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1396,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "hq-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "hq-core",
@@ -1413,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "hq-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1432,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "hq-relay"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1441,6 +1447,7 @@ dependencies = [
  "hq-core",
  "hq-db",
  "hq-llm",
+ "hq-tools",
  "hq-vault",
  "serde",
  "serde_json",
@@ -1452,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "hq-relay-discord"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1469,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "hq-relay-telegram"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1485,7 +1492,7 @@ dependencies = [
 
 [[package]]
 name = "hq-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1507,7 +1514,7 @@ dependencies = [
 
 [[package]]
 name = "hq-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1536,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "hq-vault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1557,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "hq-web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",

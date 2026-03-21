@@ -12,6 +12,7 @@ hq-core = { workspace = true }
 hq-vault = { workspace = true }
 hq-db = { workspace = true }
 hq-llm = { workspace = true }
+hq-tools = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -29,5 +30,8 @@ gray_matter = { workspace = true }
 serenity = { workspace = true }
 teloxide = { workspace = true }
 hq-web = { workspace = true }
+hq-sync = { workspace = true }
+hq-daemon = { workspace = true }
+hq-memory = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }

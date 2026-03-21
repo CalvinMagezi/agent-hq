@@ -8,6 +8,7 @@ hq-core = { workspace = true }
 hq-vault = { workspace = true }
 hq-db = { workspace = true }
 hq-llm = { workspace = true }
+hq-tools = { workspace = true }
 hq-context = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

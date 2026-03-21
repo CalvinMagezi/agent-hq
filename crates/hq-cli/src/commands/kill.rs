@@ -1,75 +1,85 @@
+//! Force-kill ALL Agent HQ processes — nuclear option.
+
 use anyhow::Result;
 use hq_core::config::HqConfig;
-use std::process::Command;
 
-/// Force-kill all Agent HQ processes.
-pub async fn run(_config: &HqConfig) -> Result<()> {
+/// Force-kill all Agent HQ processes including child harnesses.
+pub async fn run(config: &HqConfig) -> Result<()> {
     println!("Killing all Agent HQ processes...\n");
 
-    let mut killed = 0;
+    // First do a graceful stop
+    super::stop::run(config, "all").await?;
 
-    // Kill known daemon processes
-    let daemons = [
-        "com.agent-hq.agent",
-        "com.agent-hq.discord-relay",
-        "com.agent-hq.relay-server",
-        "com.agent-hq.whatsapp",
-        "com.agent-hq.telegram",
-        "com.agent-hq.vault-sync",
-        "com.agent-hq.pwa",
-    ];
+    // Then force-kill any remaining patterns
+    #[cfg(unix)]
+    {
+        use std::process::Command;
 
-    for daemon in &daemons {
-        // Check PID file
-        let pid_dir = if cfg!(target_os = "macos") {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join("Library/Logs")
-        } else {
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".local/share/agent-hq/pids")
-        };
+        let force_patterns = [
+            // HQ binary
+            "hq start",
+            "hq-rs start",
+            // CLI harnesses spawned by HQ
+            "claude.*--output-format.*stream-json",
+            "claude.*--dangerously-skip-permissions",
+            "opencode.*--output-format",
+            "gemini.*-p",
+            "codex exec",
+            "qwen.*--output-format",
+            "kilo run",
+            "vibe.*--prompt",
+        ];
 
-        let pid_file = pid_dir.join(format!("{}.pid", daemon));
-        if pid_file.exists() {
-            if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
-                if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    #[cfg(unix)]
-                    {
-                        let _ = Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .output();
+        let mut killed = 0;
+        let my_pid = std::process::id();
+
+        for pattern in &force_patterns {
+            let output = Command::new("pgrep")
+                .args(["-f", pattern])
+                .output();
+            if let Ok(o) = output {
+                if o.status.success() {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    for line in stdout.lines() {
+                        if let Ok(pid) = line.trim().parse::<u32>() {
+                            if pid != my_pid {
+                                let _ = Command::new("kill")
+                                    .args(["-9", &pid.to_string()])
+                                    .output();
+                                killed += 1;
+                            }
+                        }
                     }
-                    killed += 1;
-                    println!("  Killed {} (PID {})", daemon, pid);
                 }
             }
-            let _ = std::fs::remove_file(&pid_file);
         }
 
-        // Stop via launchd on macOS
-        #[cfg(target_os = "macos")]
-        {
-            let _ = Command::new("launchctl")
-                .args(["stop", daemon])
-                .output();
+        if killed > 0 {
+            println!("Force-killed {} remaining process(es).", killed);
+        } else {
+            println!("No remaining processes to kill.");
         }
     }
 
-    // Kill CLI harness processes
-    #[cfg(unix)]
-    {
-        let patterns = [
-            "claude.*--resume|claude.*--print|claude.*--output-format",
-            "opencode run",
-            "gemini.*--output-format|gemini.*--yolo",
-        ];
+    // Clean all PID files
+    let pid_dir = if cfg!(target_os = "macos") {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join("Library/Logs")
+    } else {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".local/share/agent-hq/pids")
+    };
 
-        for pattern in &patterns {
-            let _ = Command::new("pkill")
-                .args(["-9", "-f", pattern])
-                .output();
+    if pid_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&pid_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if name.to_string_lossy().starts_with("com.agent-hq.") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
         }
     }
 
@@ -79,14 +89,9 @@ pub async fn run(_config: &HqConfig) -> Result<()> {
         .join(".discord-relay/bot.lock");
     if relay_lock.exists() {
         let _ = std::fs::remove_file(&relay_lock);
-        println!("  Removed relay lock file");
+        println!("Removed relay lock file");
     }
 
-    if killed == 0 {
-        println!("No processes were running.");
-    } else {
-        println!("\nKilled {} process(es). Done.", killed);
-    }
-
+    println!("\nAll HQ processes terminated.");
     Ok(())
 }

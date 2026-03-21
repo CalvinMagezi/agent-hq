@@ -6,6 +6,7 @@
 
 # Vault data (private knowledge base)
 .vault/
+.playwright-mcp/
 
 # Secrets — NEVER commit these
 .env

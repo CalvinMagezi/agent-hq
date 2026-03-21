@@ -3,6 +3,7 @@
 use anyhow::Result;
 use hq_core::types::{ChatMessage, MessageRole};
 use hq_llm::{ChatRequest, LlmProvider};
+use hq_tools::skills::SkillHintIndex;
 use tracing::{debug, info};
 
 use crate::thread::ThreadStore;
@@ -10,6 +11,10 @@ use crate::thread::ThreadStore;
 /// Handle a chat message: build context, call LLM, store response, return text.
 ///
 /// Generic over `L: LlmProvider` because the trait is not dyn-compatible.
+///
+/// If `skill_index` is provided, the system prompt is enriched with contextual
+/// skills matching the user's message content. This happens per-message so each
+/// conversation turn gets the right skills without pre-loading everything.
 pub async fn handle_chat<L: LlmProvider>(
     content: &str,
     thread_id: &str,
@@ -17,6 +22,7 @@ pub async fn handle_chat<L: LlmProvider>(
     llm_provider: &L,
     model: &str,
     system_prompt: Option<&str>,
+    skill_index: Option<&SkillHintIndex>,
 ) -> Result<String> {
     // Store the user message
     thread_store.add_message(thread_id, "user", content)?;
@@ -25,11 +31,15 @@ pub async fn handle_chat<L: LlmProvider>(
     let context = thread_store.get_context(thread_id, 4000)?;
     let mut messages = Vec::new();
 
-    // System message
+    // System message — enriched with contextual skills if available
     if let Some(sys) = system_prompt {
+        let enriched = match skill_index {
+            Some(index) => hq_tools::skills::enrich_system_prompt(index, sys, content),
+            None => sys.to_string(),
+        };
         messages.push(ChatMessage {
             role: MessageRole::System,
-            content: sys.to_string(),
+            content: enriched,
             tool_calls: Vec::new(),
             tool_call_id: None,
         });

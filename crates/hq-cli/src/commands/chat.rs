@@ -4,6 +4,7 @@ use hq_core::config::HqConfig;
 use hq_core::types::{ChatMessage, MessageRole};
 use hq_llm::openrouter::OpenRouterProvider;
 use hq_llm::provider::{ChatRequest, LlmProvider, StreamChunk};
+use hq_tools::skills::{SkillHintIndex, enrich_system_prompt};
 use std::io::{self, BufRead, Write};
 
 pub async fn run(config: &HqConfig, model_override: Option<String>) -> Result<()> {
@@ -15,13 +16,19 @@ pub async fn run(config: &HqConfig, model_override: Option<String>) -> Result<()
     let provider = OpenRouterProvider::new(api_key);
     let model = model_override.unwrap_or_else(|| config.default_model.clone());
 
+    // Build skill hint index from vault skills directory
+    let skills_dir = config.vault_path.join("skills");
+    let skill_index = SkillHintIndex::build(&skills_dir);
+
+    let base_prompt = "You are a helpful AI assistant. Be concise and direct.";
+
     println!("HQ Chat (model: {})", model);
     println!("Type your message. Press Ctrl+D to exit.");
     println!();
 
     let mut messages: Vec<ChatMessage> = vec![ChatMessage {
         role: MessageRole::System,
-        content: "You are a helpful AI assistant. Be concise and direct.".to_string(),
+        content: base_prompt.to_string(),
         tool_calls: vec![],
         tool_call_id: None,
     }];
@@ -55,6 +62,9 @@ pub async fn run(config: &HqConfig, model_override: Option<String>) -> Result<()
             tool_calls: vec![],
             tool_call_id: None,
         });
+
+        // Re-enrich the system prompt based on this turn's user input
+        messages[0].content = enrich_system_prompt(&skill_index, base_prompt, input);
 
         let request = ChatRequest {
             model: model.clone(),

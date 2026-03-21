@@ -13,6 +13,7 @@ use crate::coding::register_coding_tools;
 use crate::governance::ToolGuardian;
 use crate::session::{AgentSession, SessionConfig};
 use crate::tools::ToolRegistry;
+use hq_tools::skills;
 
 // ─── Backoff schedule ───────────────────────────────────────────
 
@@ -178,15 +179,103 @@ impl AgentWorker {
         let mut session =
             AgentSession::new(self.provider.clone(), governed_registry, self.session_config.clone());
 
-        session.set_system_prompt(format!(
-            "You are an AI agent executing a job (ID: {}). \
+        // ── Context assembly via 5-layer engine ──
+
+        // 1. Load system context: SOUL + MEMORY + PREFERENCES + pinned notes
+        let sys_ctx = hq_vault::system::get_system_context(self.vault.vault_path())
+            .unwrap_or_default();
+
+        // 2. Query live DB memories (best-effort — Ollama may be offline)
+        let db_memory = {
+            hq_memory::open_memory_tables(&self.db).ok();
+            let mut querier = hq_memory::MemoryQuerier::new(self.db.clone());
+            querier.get_recent_context(Some(10_i64), None).ok()
+        };
+
+        // 3. Combine static MEMORY.md with live DB memories
+        let memory_text = match &db_memory {
+            Some(ctx) if !ctx.formatted.is_empty() => {
+                format!("{}\n\n---\n\n## Live Agent Memories\n\n{}", sys_ctx.memory, ctx.formatted)
+            }
+            _ => sys_ctx.memory.clone(),
+        };
+
+        // 4. Forward replay: surface precedent memories for this job
+        let instruction_with_precedents = {
+            let vault_path = self.vault.vault_path().to_path_buf();
+            let replay = hq_memory::AwakeReplayEngine::new(self.db.clone(), vault_path);
+            match replay.forward_replay(job_id, "hq-agent", instruction, Some(5)) {
+                Ok(result) if !result.precedents.is_empty() => {
+                    let precedent_text: String = result.precedents.iter()
+                        .map(|m| format!("- {}", m.summary))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    info!(
+                        job_id = %job_id,
+                        count = result.precedents.len(),
+                        "forward replay: surfaced precedent memories"
+                    );
+                    format!(
+                        "## Relevant Precedents (from past experience)\n\n{precedent_text}\n\n---\n\n{instruction}"
+                    )
+                }
+                _ => instruction.to_string(),
+            }
+        };
+
+        // 5. Select budget profile based on instruction characteristics
+        let profile = if instruction.len() < 100 {
+            "quick"
+        } else if instruction.to_lowercase().contains("[thorough]") {
+            "thorough"
+        } else {
+            "standard"
+        };
+
+        // 6. Build context frame via 5-layer engine
+        let harness_instructions = format!(
+            "## Current Job\n\n**Job ID**: {job_id}\n\
              Complete the task described in the user's message. \
              Use the available tools to read files, write code, and run commands as needed. \
-             When finished, provide a clear summary of what was accomplished.",
-            job_id
-        ));
+             When finished, provide a clear summary of what was accomplished."
+        );
 
-        // Set up heartbeat
+        let frame_input = hq_context::FrameInput {
+            profile: profile.to_string(),
+            total_tokens: 128_000, // Default context window
+            soul: sys_ctx.soul,
+            harness_instructions,
+            user_message: instruction_with_precedents.clone(),
+            memory: memory_text,
+            private_tags: vec!["#internal".to_string(), "#private".to_string()],
+            thread: vec![], // Empty at job start
+            pinned_notes: sys_ctx.pinned_notes,
+            search_results: vec![],
+        };
+
+        let engine = hq_context::ContextEngine::new();
+        let frame = engine.build_frame(frame_input)?;
+
+        info!(
+            job_id = %job_id,
+            profile,
+            total_used = frame.budget.total_used,
+            utilization_pct = format!("{:.1}", frame.budget.utilization_pct),
+            "context frame assembled"
+        );
+
+        // 7. Enrich with skill hints and set system prompt
+        let skills_dir = self.vault.vault_path().join("skills");
+        let skill_index = skills::SkillHintIndex::build(&skills_dir);
+        let system_prompt = skills::enrich_system_prompt(
+            &skill_index,
+            &frame.system,
+            &instruction_with_precedents,
+        );
+        session.set_system_prompt(system_prompt);
+
+        // ── Execute with heartbeat ──
+
         let worker_id = self.worker_id.clone();
         let job_id_owned = job_id.to_string();
         let heartbeat_handle = tokio::spawn(async move {
@@ -200,10 +289,8 @@ impl AgentWorker {
             }
         });
 
-        // Run the prompt
-        let result = session.prompt(instruction).await;
+        let result = session.prompt(&instruction_with_precedents).await;
 
-        // Cancel heartbeat
         heartbeat_handle.abort();
 
         let stats = session.stats();
@@ -215,6 +302,43 @@ impl AgentWorker {
             messages = stats.message_count,
             "job execution stats"
         );
+
+        // ── Post-execution: memory ingestion + reverse replay ──
+
+        if let Ok(ref result_text) = result {
+            // Ingest conversation result as memory (best-effort)
+            let db_for_memory = self.db.clone();
+            let vault_path_for_replay = self.vault.vault_path().to_path_buf();
+            let result_owned = result_text.clone();
+            let job_id_for_memory = job_id.to_string();
+            let instruction_for_memory = instruction.to_string();
+            tokio::spawn(async move {
+                let mut ingester = hq_memory::MemoryIngester::new(db_for_memory.clone());
+                let exchange = format!(
+                    "Job: {}\nInstruction: {}\nResult: {}",
+                    job_id_for_memory,
+                    instruction_for_memory.chars().take(500).collect::<String>(),
+                    result_owned.chars().take(2000).collect::<String>(),
+                );
+                if let Err(e) = ingester.ingest(&exchange, &format!("job:{job_id_for_memory}"), Some("hq-agent")).await {
+                    tracing::debug!(error = %e, "memory ingestion skipped (Ollama likely offline)");
+                }
+
+                // Reverse replay: credit assignment for memories used during this job
+                let replay = hq_memory::AwakeReplayEngine::new(
+                    db_for_memory,
+                    vault_path_for_replay,
+                );
+                if let Err(e) = replay.reverse_replay(
+                    &job_id_for_memory,
+                    "hq-agent",
+                    None,
+                    None,
+                ) {
+                    tracing::debug!(error = %e, "reverse replay skipped");
+                }
+            });
+        }
 
         result
     }

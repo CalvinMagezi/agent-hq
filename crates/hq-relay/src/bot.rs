@@ -4,6 +4,7 @@
 use anyhow::Result;
 use hq_core::types::UnifiedMessage;
 use hq_llm::LlmProvider;
+use hq_tools::skills::SkillHintIndex;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -35,6 +36,8 @@ pub struct UnifiedBot<B: PlatformBridge, L: LlmProvider> {
     default_harness: String,
     /// System prompt for LLM chat.
     system_prompt: Option<String>,
+    /// Skill hint index for contextual skill injection.
+    skill_index: Option<Arc<SkillHintIndex>>,
 }
 
 impl<B: PlatformBridge, L: LlmProvider> UnifiedBot<B, L> {
@@ -59,7 +62,14 @@ impl<B: PlatformBridge, L: LlmProvider> UnifiedBot<B, L> {
             model,
             default_harness,
             system_prompt,
+            skill_index: None,
         }
+    }
+
+    /// Set the skill hint index for contextual skill injection per-message.
+    pub fn with_skill_index(mut self, index: SkillHintIndex) -> Self {
+        self.skill_index = Some(Arc::new(index));
+        self
     }
 
     /// Handle an incoming message from any platform.
@@ -190,6 +200,7 @@ impl<B: PlatformBridge, L: LlmProvider> UnifiedBot<B, L> {
             &*self.llm_provider,
             &self.model,
             self.system_prompt.as_deref(),
+            self.skill_index.as_ref().map(|idx| idx.as_ref()),
         )
         .await
     }

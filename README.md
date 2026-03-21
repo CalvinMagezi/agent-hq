@@ -1,10 +1,33 @@
-# Agent-HQ
+<p align="center">
+  <img src="docs/icon.png" alt="Agent-HQ" width="120" height="120" />
+</p>
 
-> **A local-first AI agent hub. Single Rust binary. Your machine, your data, your agents.**
+<h1 align="center">Agent-HQ</h1>
 
-Agent-HQ connects AI coding agents (Claude Code, Gemini CLI, OpenCode, Codex CLI) to every communication channel you use -- Discord, Telegram, WhatsApp, a Tailscale-secured PWA -- while keeping all your data in a markdown vault on your filesystem.
+<p align="center">
+  <strong>A local-first AI agent hub. Single Rust binary. Your machine, your data, your agents.</strong>
+</p>
 
-No cloud backend. No vendor lock-in. One 6 MB binary.
+<p align="center">
+  <a href="https://github.com/CalvinMagezi/agent-hq/releases/tag/v0.6.0"><img src="https://img.shields.io/badge/version-0.6.0-blue" alt="Version" /></a>
+  <a href="https://github.com/CalvinMagezi/agent-hq/actions"><img src="https://github.com/CalvinMagezi/agent-hq/actions/workflows/rust-ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://notebooklm.google.com/notebook/5ff12d52-b1c6-47a4-ae16-7376182621d3"><img src="https://img.shields.io/badge/NotebookLM-Deep%20Dive-orange" alt="NotebookLM" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> •
+  <a href="#architecture">Architecture</a> •
+  <a href="#the-vault">The Vault</a> •
+  <a href="https://notebooklm.google.com/notebook/5ff12d52-b1c6-47a4-ae16-7376182621d3">Interactive Deep Dive ↗</a> •
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+---
+
+Agent-HQ connects AI coding agents (Claude Code, Gemini CLI, OpenCode, Codex CLI) to every communication channel you use — Discord, Telegram, WhatsApp, a Tailscale-secured PWA — while keeping all your data in a markdown vault on your filesystem.
+
+No cloud backend. No vendor lock-in. One 15 MB binary.
 
 ---
 
